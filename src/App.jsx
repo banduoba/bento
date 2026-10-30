@@ -118,8 +118,10 @@ function sanitizePanes(raw, home) {
     return {
       tabs,
       active: Math.min(Math.max(p?.active ?? 0, 0), tabs.length - 1),
-      colWidths: normalizeCols(p?.colWidths), // 列宽/显示哪些列按窗格各自保存
-      colVisible: normalizeVis(p?.colVisible),
+      // 列设置按窗格各自保存；colsVersion<2 的旧值是旧默认（全显示），丢弃以套用新默认（修改日期/大小/种类）
+      colWidths: normalizeCols(p?.colsVersion === 2 ? p.colWidths : null),
+      colVisible: normalizeVis(p?.colsVersion === 2 ? p.colVisible : null),
+      colsVersion: 2,
     }
   })
 }
@@ -1029,7 +1031,7 @@ export default function App() {
 
   // 每个窗格各自的列设置（宽度 / 显示哪些列）
   const patchPane = (i, patch) =>
-    setCfg((c) => ({ ...c, panes: c.panes.map((pp, j) => (j === i ? { ...pp, ...patch } : pp)) }))
+    setCfg((c) => ({ ...c, panes: c.panes.map((pp, j) => (j === i ? { ...pp, ...patch, colsVersion: 2 } : pp)) }))
   const colMenu = (i, x, y) => {
     const vis = normalizeVis(cfg.panes[i]?.colVisible)
     setMenu({

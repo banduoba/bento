@@ -2,15 +2,16 @@
 // 右键表头勾选显示哪些列。每个窗格各存各的（pane.colWidths / pane.colVisible）。
 // 窗格太窄放不下时，按优先级自动隐藏次要列（而不是横向滚动藏起来或把文件名挤成「A…」）。
 // 宽度/模板以 CSS 变量写在窗格根元素上，拖动时直接改变量（不触发 React 渲染/写盘）。
-export const NAME_MIN = 200
+export const NAME_MIN = 160
 export const COL_MIN = 48
 export const COL_MAX = 600
 export const COL_GAP = 8
 export const COL_PAD = 24
-export const DEFAULT_COLS = { name: null, size: 80, kind: 120, mtime: 148, btime: 148 }
-export const DEFAULT_VIS = { size: true, kind: true, mtime: true, btime: true }
-// 表头/行里的显示顺序
-export const COL_ORDER = ['size', 'kind', 'mtime', 'btime']
+export const DEFAULT_COLS = { name: null, size: 72, kind: 104, mtime: 130, btime: 130 }
+// 默认显示 修改日期/大小/种类（与 QSpace 一致），创建日期按需右键勾选
+export const DEFAULT_VIS = { mtime: true, btime: false, size: true, kind: true }
+// 表头/行里的显示顺序：名称 | 修改日期 | 创建日期 | 大小 | 种类
+export const COL_ORDER = ['mtime', 'btime', 'size', 'kind']
 // 放不下时先隐藏谁（越靠前越先隐藏）
 const DROP_ORDER = ['btime', 'kind', 'size', 'mtime']
 export const COL_LABELS = [

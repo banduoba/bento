@@ -10,11 +10,18 @@ export function fmtSize(n) {
   return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`
 }
 
+// 与 QSpace 一致：今天/昨天只显示时间，其余「2026/9/25 00:07」（月日不补零）
 export function fmtDate(ms) {
   if (!ms) return '--'
   const d = new Date(ms)
   const p = (n) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}/${p(d.getMonth() + 1)}/${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`
+  const now = new Date()
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+  const diff = Math.round((day(now) - day(d)) / 86400000)
+  if (diff === 0) return `今天 ${hm}`
+  if (diff === 1) return `昨天 ${hm}`
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${hm}`
 }
 
 const IMG = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'ico', 'tiff', 'avif'])
@@ -58,12 +65,15 @@ export function kindOf(entry) {
   return KINDS[entry.ext] || (entry.ext ? `${entry.ext.toUpperCase()} 文件` : '文件')
 }
 
-// 文件名拆成「主干 + 扩展名」，让过长时只截断主干、始终露出扩展名（funn….pdf）
+// 文件名拆成「前段 + 末段」，过长时只缩短前段，形成「前面…后面」的中间省略（funnel_pl…ot.pdf）。
+// 末段至少含扩展名并多带几个字符，让后缀和名字结尾都可见；短名字不拆。
 export function splitName(name, isDir) {
-  if (isDir) return [name, '']
-  const i = name.lastIndexOf('.')
-  if (i <= 0 || name.length - i > 10) return [name, '']
-  return [name.slice(0, i), name.slice(i)]
+  const chars = Array.from(name) // 按字符而非 UTF-16 单元，避免劈开 emoji/生僻字
+  if (chars.length <= 14) return [name, '']
+  const dot = name.lastIndexOf('.')
+  const extLen = !isDir && dot > 0 && name.length - dot <= 10 ? Array.from(name.slice(dot)).length : 0
+  const tail = Math.min(Math.max(extLen + 5, 8, Math.round(chars.length * 0.3)), chars.length - 4)
+  return [chars.slice(0, chars.length - tail).join(''), chars.slice(chars.length - tail).join('')]
 }
 
 export const basename = (p) => p.split('/').filter(Boolean).pop() || p

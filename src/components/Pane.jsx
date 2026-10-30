@@ -825,10 +825,10 @@ export default function Pane({
         <div className="cols-inner" ref={colsInnerRef}>
           {[
             ['name', '名称', false],
-            ['size', '大小', true],
-            ['kind', '种类', false],
             ['mtime', '修改日期', false],
             ['btime', '创建日期', false],
+            ['size', '大小', true],
+            ['kind', '种类', false],
           ]
             .filter(([key]) => key === 'name' || shownCols.includes(key))
             .map(([key, label, right]) => {
@@ -985,10 +985,10 @@ export default function Pane({
                       </>
                     )}
                   </div>
-                  {shownCols.includes('size') && <span className="row-size">{entry.is_dir ? '--' : fmtSize(entry.size)}</span>}
-                  {shownCols.includes('kind') && <span className="row-kind" title={kindOf(entry)}>{kindOf(entry)}</span>}
                   {shownCols.includes('mtime') && <span className="row-date">{fmtDate(entry.mtime_ms)}</span>}
                   {shownCols.includes('btime') && <span className="row-date">{fmtDate(entry.btime_ms)}</span>}
+                  {shownCols.includes('size') && <span className="row-size">{entry.is_dir ? '--' : fmtSize(entry.size)}</span>}
+                  {shownCols.includes('kind') && <span className="row-kind" title={kindOf(entry)}>{kindOf(entry)}</span>}
                 </div>
               )
             })}
