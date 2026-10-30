@@ -18,6 +18,8 @@ export const api = hasTauri
       search: (query, scope, root, showHidden, roots, mode) =>
         invoke('search', { query, scope, root: root || null, showHidden, roots: roots || [], mode: mode || 'name' }),
       copyFilesToClipboard: (paths) => invoke('copy_files_to_clipboard', { paths }),
+      readTextPreview: (path, query, maxBytes) =>
+        invoke('read_text_preview', { path, query, maxBytes: maxBytes || 262144 }),
       openPrivacySettings: () => invoke('open_privacy_settings'),
       fsearchStatus: () => invoke('fsearch_status'),
       dirActivity: (paths) => invoke('dir_activity', { paths }),
@@ -125,6 +127,17 @@ function mockApi() {
         entry.ext = newName.includes('.') ? newName.split('.').pop().toLowerCase() : ''
       }
       return Promise.resolve(`${parent}/${newName}`)
+    },
+    readTextPreview: (path, query) => {
+      const name = path.slice(path.lastIndexOf('/') + 1)
+      const q = (query || '示例').trim()
+      const lines = []
+      for (let i = 1; i <= 60; i++) {
+        if (i % 7 === 3) lines.push(`      第 ${i} 行：这里包含关键词「${q}」的匹配内容，用于预览高亮演示。`)
+        else if (i % 7 === 5) lines.push(`      第 ${i} 行：another line mentioning ${q} inside the demo body text`)
+        else lines.push(`      第 ${i} 行：普通内容行 ${name} demo line ${i}`)
+      }
+      return Promise.resolve({ kind: 'text', text: lines.join('\n'), truncated: false, matchLines: [3, 10, 17, 24] })
     },
     openPath: () => Promise.resolve(),
     reveal: () => Promise.resolve(),

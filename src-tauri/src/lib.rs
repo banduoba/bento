@@ -882,6 +882,101 @@ async fn search_content(
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize)]
+struct TextPreview {
+    kind: String, // "text" | "binary" | "image" | "too-large"
+    text: String,
+    truncated: bool,
+    match_lines: Vec<f64>,
+}
+
+fn is_image_path(p: &Path) -> bool {
+    matches!(
+        p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("gif") | Some("webp") | Some("bmp")
+    )
+}
+
+/// 读取文本文件内容供搜索预览：全量（截断至 max_bytes）+ 命中行号
+#[tauri::command]
+async fn read_text_preview(
+    path: String,
+    query: String,
+    max_bytes: Option<usize>,
+) -> Result<TextPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let p = Path::new(&path);
+        if is_image_path(p) {
+            return Ok(TextPreview {
+                kind: "image".into(),
+                text: String::new(),
+                truncated: false,
+                match_lines: Vec::new(),
+            });
+        }
+        let cap = max_bytes.unwrap_or(262_144);
+        let md = fs::metadata(p).map_err(|e| format!("无法读取: {}", e))?;
+        let truncated = md.len() > cap as u64;
+        let take = if truncated {
+            // 截断到行边界附近，避免切出半行
+            let mut end = cap;
+            let f = fs::File::open(p).map_err(|e| e.to_string())?;
+            use std::io::Read;
+            let mut buf = vec![0u8; cap];
+            f.take(cap as u64).read_exact(&mut buf).ok();
+            if let Some(pos) = buf.iter().rposition(|&b| b == b'\n') {
+                end = pos;
+            }
+            let s = String::from_utf8_lossy(&buf[..end]).into_owned();
+            return Ok(TextPreview {
+                kind: "text".into(),
+                text: s,
+                truncated,
+                match_lines: Vec::new(),
+            });
+        } else {
+            md.len() as usize
+        };
+        let bytes = fs::read(p).map_err(|e| e.to_string())?;
+        // 二进制检测：前 8KB 含 NUL
+        let probe = &bytes[..bytes.len().min(8192)];
+        if probe.contains(&0u8) {
+            return Ok(TextPreview {
+                kind: "binary".into(),
+                text: String::new(),
+                truncated: false,
+                match_lines: Vec::new(),
+            });
+        }
+        let text = String::from_utf8_lossy(&bytes[..take.min(bytes.len())]).into_owned();
+        let words: Vec<String> = query
+            .split_whitespace()
+            .filter(|w| !w.contains(':'))
+            .map(|w| w.to_lowercase())
+            .collect();
+        let mut match_lines = Vec::new();
+        if !words.is_empty() {
+            for (i, line) in text.lines().enumerate() {
+                let lc = line.to_lowercase();
+                if words.iter().any(|w| lc.contains(w.as_str())) {
+                    match_lines.push((i + 1) as f64);
+                    if match_lines.len() >= 20 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(TextPreview {
+            kind: "text".into(),
+            text,
+            truncated,
+            match_lines,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 把文件引用写进系统剪贴板（Finder 等可直接粘贴文件本体；含引号的路径不支持）
 #[tauri::command]
 async fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
