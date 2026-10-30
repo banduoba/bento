@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, fileSrc } from '../api'
 import { fmtDate, fmtSize, isImage, extColor, copyText } from '../format'
 import { IconFolder, IconSearch } from '../icons'
@@ -59,15 +59,15 @@ function SearchGuide({ noResults = false }) {
   )
 }
 
-// 高亮文件名里命中搜索词的片段（拆掉通配符后逐段高亮）
-function Highlight({ text, query }) {
+// 文件名拆掉通配符与筛选语法；内容预览按原样关键词高亮。
+function Highlight({ text, query, literal = false }) {
   const parts = useMemo(() => {
     const frags = [
       ...new Set(
         (query || '')
           .trim()
           .split(/\s+/)
-          .flatMap((t) => (t.includes(':') ? [] : t.split(/[*?]+/)))
+          .flatMap((t) => literal ? [t] : t.includes(':') ? [] : t.split(/[*?]+/))
           .map((s) => s.trim())
           .filter((s) => s.length >= 1)
       ),
@@ -75,7 +75,7 @@ function Highlight({ text, query }) {
     if (!frags.length) return null
     const re = new RegExp(`(${frags.map(escapeRe).join('|')})`, 'gi')
     return text.split(re)
-  }, [text, query])
+  }, [text, query, literal])
   if (!parts) return <>{text}</>
   return <>{parts.map((p, i) => (i % 2 === 1 ? <mark key={i}>{p}</mark> : p))}</>
 }
@@ -110,6 +110,7 @@ export default function SearchOverlay({
   const suppressClickRef = useRef(false)
   const inputRef = useRef(null)
   const tokenRef = useRef(0)
+  const previousModeRef = useRef(mode)
   const timerRef = useRef(null)
   const menuRef = useRef(null)
   menuRef.current = menu
@@ -148,11 +149,19 @@ export default function SearchOverlay({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [onClose, open])
 
-  // 防抖搜索 + 过期结果丢弃
-  useEffect(() => {
-    if (!open) return
-    const q = query.trim()
+  // 绘制前清空切换模式的旧结果；防抖搜索 + 过期结果丢弃。
+  useLayoutEffect(() => {
     const token = ++tokenRef.current
+    if (previousModeRef.current !== mode) {
+      previousModeRef.current = mode
+      setResults([])
+      setSelIdx(0)
+    }
+    if (!open) {
+      setBusy(false)
+      return
+    }
+    const q = query.trim()
     if (!q) {
       setResults([])
       setBusy(false)
@@ -181,8 +190,11 @@ export default function SearchOverlay({
         if (tokenRef.current === token) setBusy(false)
       }
     }, 250)
-    return () => clearTimeout(timerRef.current)
-  }, [query, scope, root, showHidden, searchPaths])
+    return () => {
+      clearTimeout(timerRef.current)
+      ++tokenRef.current
+    }
+  }, [open, query, scope, root, showHidden, searchPaths, mode])
 
   // 全局范围时轮询 fsearch 索引状态（未建好时结果来自系统索引，需要提示）
   useEffect(() => {
@@ -202,7 +214,7 @@ export default function SearchOverlay({
       live = false
       clearInterval(t)
     }
-  }, [scope])
+  }, [open, scope])
 
   const choose = (item) => {
     if (!item) return
@@ -280,6 +292,34 @@ export default function SearchOverlay({
     },
     { label: '在访达中显示', action: () => onReveal(item.path) },
   ]
+
+  const resultActions = (item) => (
+    <span className="search-actions">
+      <button
+        className="search-reveal search-copy"
+        title="复制路径"
+        aria-label={`复制路径：${item.path}`}
+        onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation()
+          copyText(item.path)
+        }}
+      >
+        复制路径
+      </button>
+      <button
+        className="search-reveal"
+        title="在访达中显示"
+        onClick={(e) => {
+          e.stopPropagation()
+          onReveal(item.path)
+        }}
+      >
+        访达
+      </button>
+    </span>
+  )
 
   return (
     <div className={`search-overlay${open ? '' : ' hidden'}`} aria-hidden={!open} inert={!open} onMouseDown={onClose}>
@@ -365,7 +405,7 @@ export default function SearchOverlay({
             sorted.map((item, i) => (
               <div
                 key={item.path + i}
-                className={`search-item${i === selIdx ? ' on' : ''}`}
+                className={`search-item${mode === 'content' ? ' search-item-content' : ''}${i === selIdx ? ' on' : ''}`}
                 onMouseEnter={() => setSelIdx(i)}
                 onMouseDown={(e) => {
                   if (e.button === 0) dragRef.current = { x: e.clientX, y: e.clientY, item, started: false }
@@ -384,65 +424,49 @@ export default function SearchOverlay({
                   setMenu({ x: e.clientX, y: e.clientY, item })
                 }}
               >
-                <span className="fileicon">
-                  {item.is_dir ? (
-                    <IconFolder size={22} />
-                  ) : isImage(item.name.split('.').pop().toLowerCase()) ? (
-                    <img className="thumb" src={fileSrc(item.path)} loading="lazy" alt="" draggable={false} />
-                  ) : (
-                    <span
-                      className="exttile"
-                      style={{ background: extColor(item.name.split('.').pop().toLowerCase()) }}
-                    >
-                      {(item.name.split('.').pop() || 'file').slice(0, 4)}
-                    </span>
-                  )}
-                </span>
-                <span className="search-main">
-                  <span className="search-name" title={item.name}>
-                    {mode === 'content' ? (
-                      item.name
+                <span className="search-file">
+                  <span className="fileicon">
+                    {item.is_dir ? (
+                      <IconFolder size={22} />
+                    ) : isImage(item.name.split('.').pop().toLowerCase()) ? (
+                      <img className="thumb" src={fileSrc(item.path)} loading="lazy" alt="" draggable={false} />
                     ) : (
-                      <Highlight text={item.name} query={query} />
-                    )}
-                    {item.matches != null && (
-                      <span className="search-matches">{item.matches} 处匹配</span>
+                      <span
+                        className="exttile"
+                        style={{ background: extColor(item.name.split('.').pop().toLowerCase()) }}
+                      >
+                        {(item.name.split('.').pop() || 'file').slice(0, 4)}
+                      </span>
                     )}
                   </span>
-                  <span className="search-dir" title={item.dir}>
-                    {item.dir}
-                  </span>
-                  {mode === 'content' && item.preview && (
-                    <span className="search-preview" title={item.preview}>
-                      {item.preview}
+                  <span className="search-main">
+                    <span className="search-name" title={item.name}>
+                      {mode === 'content' ? (
+                        item.name
+                      ) : (
+                        <Highlight text={item.name} query={query} />
+                      )}
                     </span>
-                  )}
+                    <span className="search-dir" title={item.dir}>
+                      {item.dir}
+                    </span>
+                  </span>
                 </span>
-                <span className="search-date">{fmtDate(item.btime_ms)}</span>
-                <span className="search-size">{item.is_dir ? '--' : fmtSize(item.size)}</span>
-                <button
-                  className="search-reveal search-copy"
-                  title="复制路径"
-                  aria-label={`复制路径：${item.path}`}
-                  onMouseDown={(e) => e.stopPropagation()}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    copyText(item.path)
-                  }}
-                >
-                  复制路径
-                </button>
-                <button
-                  className="search-reveal"
-                  title="在访达中显示"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    onReveal(item.path)
-                  }}
-                >
-                  访达
-                </button>
+                {mode === 'content' ? (
+                  <span className="search-content">
+                    <span className="search-content-header">
+                      {resultActions(item)}
+                      {item.matches != null && <span className="search-matches">{item.matches} 处匹配</span>}
+                    </span>
+                    <span className="search-preview" title={item.preview || ''}>
+                      <Highlight text={item.preview || ''} query={query} literal />
+                    </span>
+                  </span>
+                ) : <>
+                  <span className="search-date">{fmtDate(item.btime_ms)}</span>
+                  <span className="search-size">{item.is_dir ? '--' : fmtSize(item.size)}</span>
+                  {resultActions(item)}
+                </>}
               </div>
             ))
           )}

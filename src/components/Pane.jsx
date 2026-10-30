@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { startDrag } from '@crabnebula/tauri-plugin-drag'
 import singleDragPreview from '../assets/drag/1.png?inline'
+import singleFileDragPreview from '../assets/drag/1-file.png?inline'
 import multipleDragPreview from '../assets/drag/n.png?inline'
 import { api, fileSrc } from '../api'
 import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher, copyText } from '../format'
@@ -13,8 +14,8 @@ const MIME = 'application/x-bento'
 const multipleDragImage = new Image()
 multipleDragImage.src = multipleDragPreview
 
-async function makeDragPreview(count) {
-  if (count === 1) return singleDragPreview
+async function makeDragPreview(count, isDir) {
+  if (count === 1) return isDir ? singleDragPreview : singleFileDragPreview
   await multipleDragImage.decode()
   const canvas = document.createElement('canvas')
   // Canvas PNG 不保留模板的 144 dpi 元数据，按逻辑尺寸输出以免原生预览变大。
@@ -185,7 +186,7 @@ export default function Pane({
   const beginRowDrag = (e, entry) => {
     if (rowDragRef.current?.started) return
     const paths = selection?.has(entry.path) && selection.size > 1 ? [...selection] : [entry.path]
-    const preview = makeDragPreview(paths.length).catch(() => multipleDragPreview)
+    const preview = makeDragPreview(paths.length, entry.is_dir).catch(() => multipleDragPreview)
     rowDragRef.current = { x: e.clientX, y: e.clientY, paths, preview, started: false }
   }
 
