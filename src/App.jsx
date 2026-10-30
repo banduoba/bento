@@ -171,6 +171,7 @@ function sanitizeConfig(saved, home) {
     searchPrefs: {
       scope: ['pane', 'home', 'global'].includes(saved.searchPrefs?.scope) ? saved.searchPrefs.scope : 'global',
       sort: ['btime', 'mtime', 'size', 'name', 'score'].includes(saved.searchPrefs?.sort) ? saved.searchPrefs.sort : 'btime',
+      mode: ['name', 'content'].includes(saved.searchPrefs?.mode) ? saved.searchPrefs.mode : 'name',
     },
     searchPaths: Array.isArray(saved.searchPaths)
       ? saved.searchPaths.filter((p) => typeof p === 'string' && p.startsWith('/'))
@@ -226,6 +227,7 @@ export default function App() {
   const [flashPane, setFlashPane] = useState(-1)
   const [wsRenaming, setWsRenaming] = useState(null) // { id, value }
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
   const flashTimer = useRef(null)
 
   // 闪烁提示：让用户一眼看到导航发生在哪个窗格
@@ -438,6 +440,43 @@ export default function App() {
   const [layoutPickerOpen, setLayoutPickerOpen] = useState(false)
   const layoutPreset = getPreset(cfg?.layout)
 
+  // 原生拖拽：接收来自其他软件/本应用（搜索结果、文件行）的拖放
+  useEffect(() => {
+    if (!hasTauri) return
+    const un = getCurrentWindow().onDragDropEvent(async (ev) => {
+      if (ev.payload.type !== 'drop') return
+      const { paths } = ev.payload
+      if (!paths?.length) return
+      const ratio = window.devicePixelRatio || 1
+      const el = document.elementFromPoint(ev.payload.position.x / ratio, ev.payload.position.y / ratio)
+      if (!el) return
+      // 命中侧边栏条目 → 添加书签
+      const sbItem = el.closest('.sb-item')
+      if (sbItem) {
+        setCfg((c) => {
+          if (c.favorites.some((f) => f.path === paths[0])) return c
+          return { ...c, favorites: [...c.favorites, { name: basename(paths[0]), path: paths[0] }] }
+        })
+        return
+      }
+      // 命中窗格 → 传入文件/移动
+      const paneEl = el.closest('.pane')
+      if (!paneEl) return
+      const idx = [...document.querySelectorAll('.pane')].indexOf(paneEl)
+      if (idx === -1) return
+      const dest = cfgRef.current.panes[idx]?.tabs[cfgRef.current.panes[idx].active]?.path
+      if (!dest) return
+      const volOf = (p) => p.match(/^\/Volumes\/[^/]+/)?.[0] || '/'
+      const sameVol = paths.every((p) => volOf(p) === volOf(dest))
+      // 同卷移动、跨卷复制（Finder 惯例）；来自 Finder 的外部文件默认复制
+      const mode = sameVol ? 'move' : 'copy'
+      transferInto(dest, paths, mode)
+    })
+    return () => {
+      un.then((f) => f()).catch(() => {})
+    }
+  }, [])
+
   // 窗口大小/位置变化后防抖保存（配合 window-state 插件，重启原样恢复）
   useEffect(() => {
     if (!hasTauri) return
@@ -589,7 +628,11 @@ export default function App() {
 
   const doCopyCut = (tabId, mode) => {
     const paths = selArr(tabId)
-    if (paths.length) setClip({ mode, paths })
+    if (paths.length) {
+      setClip({ mode, paths })
+      // 文件引用写进系统剪贴板：其他软件 ⌘V 可直接粘贴文件本体
+      if (mode === 'copy') api.copyFilesToClipboard(paths).catch(() => {})
+    }
   }
 
   const doPaste = (tabId) => {
@@ -812,6 +855,15 @@ export default function App() {
   // ---------- 全局快捷键 ----------
   const keyRef = useRef(null)
   keyRef.current = (e) => {
+    // ⌘,：输入框聚焦时也可打开设置
+    if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key === ',') {
+      e.preventDefault()
+      setSearchOpen(false)
+      setMenu(null)
+      setLayoutPickerOpen(false)
+      setSettingsOpen(true)
+      return
+    }
     // ⌘K：打开/聚焦搜索面板（浏览器习惯）
     if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
       e.preventDefault()
@@ -1053,6 +1105,8 @@ export default function App() {
               cutSet={cutSet}
               editPathSignal={i === focusIdx ? pathEditTick : 0}
               flash={i === flashPane}
+              reveal={revealReq && revealReq.tabId === p.tabs[p.active]?.id ? revealReq : null}
+              onRevealDone={() => setRevealReq(null)}
               onFocus={setFocused}
               onNav={nav}
               onBack={navBack}
@@ -1095,11 +1149,16 @@ export default function App() {
           onSortChange={(v) => setCfg((c) => ({ ...c, searchPrefs: { ...c.searchPrefs, sort: v } }))}
           onClose={() => setSearchOpen(false)}
         onOpenEntry={openSearchResult}
-        onLocate={(dir) => {
+        onLocate={(dir, file) => {
           const t = activeTabOf(focusIdx) || cfg.panes[0]?.tabs[0]
           if (!t) return
           setFocused(focusIdx)
           nav(t.id, dir)
+          if (file) {
+            setRevealReq({ tabId: t.id, path: file, nonce: Date.now() })
+          } else {
+            setRevealReq(null)
+          }
         }}
         onReveal={(p) => api.reveal(p).catch(() => {})}
       />
@@ -1107,6 +1166,10 @@ export default function App() {
         open={settingsOpen}
         searchPaths={cfg.searchPaths}
         onChange={(paths) => setCfg((c) => ({ ...c, searchPaths: paths }))}
+        showHidden={cfg.showHidden}
+        onShowHiddenChange={(showHidden) => setCfg((c) => ({ ...c, showHidden }))}
+        layout={normalizeLayout(cfg.layout)}
+        onLayoutChange={setLayout}
         onClose={() => setSettingsOpen(false)}
       />
       {batchRename && (

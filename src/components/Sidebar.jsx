@@ -3,6 +3,31 @@ import { invoke } from '@tauri-apps/api/core'
 import { api } from '../api'
 import { labelOf } from '../format'
 import { IconDrive, IconFolder, IconHouse } from '../icons'
+import homeIcon from '../assets/sidebar/Home.png'
+import desktopIcon from '../assets/sidebar/Desktop.png'
+import documentsIcon from '../assets/sidebar/Documents.png'
+import downloadsIcon from '../assets/sidebar/Downloads.png'
+import moviesIcon from '../assets/sidebar/Movies.png'
+import musicIcon from '../assets/sidebar/Music.png'
+import picturesIcon from '../assets/sidebar/Pictures.png'
+
+const favoriteIcons = {
+  Desktop: desktopIcon,
+  Documents: documentsIcon,
+  Downloads: downloadsIcon,
+  Movies: moviesIcon,
+  Music: musicIcon,
+  Pictures: picturesIcon,
+}
+
+function FavoriteIcon({ favorite }) {
+  const tail = favorite.path.split('/').filter(Boolean).pop()
+  const src = Object.hasOwn(favoriteIcons, favorite.name) ? favoriteIcons[favorite.name]
+    : Object.hasOwn(favoriteIcons, tail) ? favoriteIcons[tail] : null
+  return src
+    ? <img className="sb-system-icon" src={src} width={16} height={16} alt="" draggable={false} />
+    : <IconFolder size={15} />
+}
 
 const trace = (m) => invoke('log_debug', { msg: m }).catch(() => {})
 
@@ -135,7 +160,7 @@ export default function Sidebar({
     <div className="sidebar" ref={ref}>
       <div className="sb-title">个人收藏</div>
       <FavItem
-        icon={<IconHouse size={15} />}
+        icon={home ? <img className="sb-system-icon" src={homeIcon} width={16} height={16} alt="" draggable={false} /> : <IconHouse size={15} />}
         label="主目录"
         path={home}
         removable={false}
@@ -149,7 +174,7 @@ export default function Sidebar({
       {favorites.map((f) => (
         <FavItem
           key={f.path}
-          icon={<IconFolder size={15} />}
+          icon={<FavoriteIcon favorite={f} />}
           label={labelOf(f.path, home)}
           path={f.path}
           removable

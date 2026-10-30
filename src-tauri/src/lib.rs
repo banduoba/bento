@@ -58,6 +58,8 @@ fn fsearch_global(query: &str, limit: usize) -> Option<Vec<SearchItem>> {
                     size: if f.size > 0 { f.size } else { md.as_ref().map(|m| if m.is_dir() { 0 } else { m.len() }).unwrap_or(0) },
                     mtime_ms: md.as_ref().map(mtime_of).unwrap_or((f.mtime as i64) as f64 * 1000.0),
                     btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
+                    preview: None,
+                    matches: None,
                 }
             })
             .collect(),
@@ -463,6 +465,10 @@ struct SearchItem {
     size: u64,
     mtime_ms: f64,
     btime_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    matches: Option<usize>,
 }
 
 fn mtime_of(md: &std::fs::Metadata) -> f64 {
@@ -581,6 +587,8 @@ fn walk_search(root: &Path, query: &str, show_hidden: bool, limit: usize) -> Res
                     size,
                     mtime_ms: md.as_ref().map(mtime_of).unwrap_or(0.0),
                     btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
+                    preview: None,
+                    matches: None,
                 });
             }
             if is_dir {
@@ -625,6 +633,8 @@ fn mdfind_search(query: &str, onlyin: Option<&str>, limit: usize) -> Vec<SearchI
                 size,
                 mtime_ms: md.as_ref().map(mtime_of).unwrap_or(0.0),
                 btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
+                preview: None,
+                matches: None,
             })
         })
         .collect()
@@ -639,12 +649,17 @@ async fn search(
     show_hidden: bool,
     limit: Option<usize>,
     roots: Option<Vec<String>>,
+    mode: Option<String>,
 ) -> Result<Vec<SearchItem>, String> {
     let q = query.trim().to_string();
     if q.is_empty() {
         return Ok(Vec::new());
     }
     let limit = limit.unwrap_or(300).min(1000);
+    // 内容模式：委托 fsearch grep（三词索引）
+    if scope == "global" && mode.as_deref() == Some("content") {
+        return search_content(q, root, Some(limit), roots).await;
+    }
     tauri::async_runtime::spawn_blocking(move || match scope.as_str() {
         // 全局：优先 fsearch 引擎（模糊 + 拼写容错 + 实时 + glob/ext 语法）
         // 并合并**全盘** Spotlight 结果（-onlyin /Volumes 不会递归挂载点，必须全盘查）
@@ -722,6 +737,117 @@ async fn home_dir() -> Result<String, String> {
 #[tauri::command]
 async fn log_debug(msg: String) {
     eprintln!("[webview] {msg}");
+}
+
+/// 文件内容搜索（fsearch grep 三词索引）
+#[tauri::command]
+async fn search_content(
+    query: String,
+    root: Option<String>,
+    limit: Option<usize>,
+    roots: Option<Vec<String>>,
+) -> Result<Vec<SearchItem>, String> {
+    let q = query.trim().to_string();
+    if q.is_empty() {
+        return Ok(Vec::new());
+    }
+    let limit = limit.unwrap_or(200).min(1000);
+    tauri::async_runtime::spawn_blocking(move || {
+        let eng = fsearch_engine().ok_or("内容搜索需要 fsearch 引擎（首次建索引中）")?;
+        let home = std::env::var("HOME").unwrap_or_default();
+        // 过滤器（ext:/kind: 等）进 Query；其余词作为内容模式
+        let mut filters = String::new();
+        let mut words = Vec::new();
+        for w in q.split_whitespace() {
+            if w.contains(':') {
+                filters.push_str(w);
+                filters.push(' ');
+            } else {
+                words.push(w);
+            }
+        }
+        let pattern: String = words.join(" ").replace('"', "");
+        if pattern.is_empty() {
+            return Ok(Vec::new());
+        }
+        let query = fsearch::Query::parse(&format!("{}grep:{}", filters, pattern), &home)?;
+        let g = fsearch::Grep::new(&pattern, fsearch::GrepMode::Literal)?;
+        let (res, _) = eng.grep(&query, &g)?;
+        let mut out: Vec<SearchItem> = res
+            .files
+            .iter()
+            .map(|f| {
+                let pb = PathBuf::from(String::from_utf8_lossy(&f.path).into_owned());
+                let preview = f
+                    .lines
+                    .first()
+                    .map(|(_, t)| t.chars().take(160).collect::<String>());
+                SearchItem {
+                    dir: pb
+                        .parent()
+                        .map(|x| x.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    name: pb
+                        .file_name()
+                        .map(|x| x.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    path: pb.to_string_lossy().into_owned(),
+                    is_dir: false,
+                    size: 0,
+                    mtime_ms: 0.0,
+                    btime_ms: 0.0,
+                    preview,
+                    matches: Some(f.lines.len()),
+                }
+            })
+            .collect();
+        if let Some(roots) = roots {
+            if !roots.is_empty() {
+                out.retain(|item| roots.iter().any(|r| item.path.starts_with(r.as_str())));
+            }
+        }
+        if let Some(r) = root {
+            out.retain(|item| item.path.starts_with(r.as_str()));
+        }
+        out.truncate(limit);
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 把文件引用写进系统剪贴板（Finder 等可直接粘贴文件本体；含引号的路径不支持）
+#[tauri::command]
+async fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    if paths.iter().any(|p| p.contains('"')) {
+        return Err("路径包含引号，无法写入剪贴板".into());
+    }
+    let list: Vec<String> = paths
+        .iter()
+        .map(|p| format!("POSIX file \"{}\"", p))
+        .collect();
+    let script = format!("set the clipboard to {{{}}}", list.join(", "));
+    let out = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    }
+    Ok(())
+}
+
+/// 打开系统的「完全磁盘访问权限」设置页
+#[tauri::command]
+async fn open_privacy_settings() -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// 立即保存窗口大小/位置（前端在 resize/move 防抖后调用）
@@ -842,6 +968,9 @@ pub fn run() {
             quick_look,
             make_file,
             search,
+            search_content,
+            copy_files_to_clipboard,
+            open_privacy_settings,
             disk_space,
             home_dir,
             log_debug,
