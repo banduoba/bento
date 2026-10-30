@@ -483,6 +483,7 @@ export default function SearchOverlay({
               <div
                 key={item.path + i}
                 className={`search-item${mode === 'content' ? ' search-item-content' : ''}${i === selIdx ? ' on' : ''}`}
+                title={`${item.path}\n${item.is_dir ? '--' : fmtSize(item.size)}`}
                 onMouseEnter={() => setSelIdx(i)}
                 onMouseDown={(e) => {
                   if (e.button === 0) dragRef.current = { x: e.clientX, y: e.clientY, item, started: false }
@@ -517,19 +518,26 @@ export default function SearchOverlay({
                     )}
                   </span>
                   <span className="search-main">
-                    <span className="search-name" title={item.name}>
-                      {mode === 'content' ? (
-                        item.name
-                      ) : (
-                        <Highlight text={item.name} query={query} />
-                      )}
+                    <span className="search-heading">
+                      <span className="search-name" title={item.name}>
+                        {mode === 'content' ? (
+                          item.name
+                        ) : (
+                          <Highlight text={item.name} query={query} />
+                        )}
+                      </span>
+                      <span className="search-date">{fmtDate(item.btime_ms)}</span>
                     </span>
-                    <span className="search-dir" title={item.dir}>
-                      {item.dir}
+                    <span className="search-details">
+                      <span className="search-dir" title={item.dir}>
+                        {item.dir}
+                      </span>
+                      {mode === 'content' && item.matches != null && (
+                        <span className="search-matches">{item.matches} 行命中</span>
+                      )}
                     </span>
                   </span>
                 </span>
-                <span className="search-date">{fmtDate(item.btime_ms)}</span>
                 <span className="search-size">{item.is_dir ? '--' : fmtSize(item.size)}</span>
                 {resultActions(item)}
               </div>
