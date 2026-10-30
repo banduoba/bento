@@ -1,15 +1,42 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
+import { startDrag } from '@crabnebula/tauri-plugin-drag'
+import singleDragPreview from '../assets/drag/1.png?inline'
+import multipleDragPreview from '../assets/drag/n.png?inline'
 import { api, fileSrc } from '../api'
 import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher, copyText } from '../format'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
 
 const MIME = 'application/x-bento'
 
+// 插件直接接收 PNG data URL；无需 asset protocol 或临时文件权限。
+const multipleDragImage = new Image()
+multipleDragImage.src = multipleDragPreview
+
+async function makeDragPreview(count) {
+  if (count === 1) return singleDragPreview
+  await multipleDragImage.decode()
+  const canvas = document.createElement('canvas')
+  // Canvas PNG 不保留模板的 144 dpi 元数据，按逻辑尺寸输出以免原生预览变大。
+  canvas.width = multipleDragImage.naturalWidth / 2
+  canvas.height = multipleDragImage.naturalHeight / 2
+  const ctx = canvas.getContext('2d')
+  ctx.drawImage(multipleDragImage, 0, 0, canvas.width, canvas.height)
+  // 与 Swift 模板的标签区域保持一致，替换 N 为实际数量。
+  ctx.clearRect(52, 12, canvas.width - 68, 24)
+  ctx.fillStyle = 'rgba(28, 28, 32, 0.94)'
+  ctx.fillRect(52, 12, canvas.width - 68, 24)
+  ctx.font = '500 13px -apple-system, BlinkMacSystemFont, sans-serif'
+  ctx.fillStyle = '#f2f2f6'
+  ctx.textBaseline = 'middle'
+  ctx.fillText(`${count} 个项目`, 52, 24, canvas.width - 70)
+  return canvas.toDataURL('image/png')
+}
+
 function sortEntries(list, key, dir) {
   const f = dir === 'asc' ? 1 : -1
+  // 文件与文件夹按所选规则统一混排（Finder/QSpace 惯例）
   return [...list].sort((a, b) => {
-    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1
     let c = 0
     if (key === 'size') c = a.size - b.size
     else if (key === 'mtime') c = a.mtime_ms - b.mtime_ms
@@ -109,37 +136,57 @@ export default function Pane({
   // ---------- 行原生拖拽（拖出到其他软件/本应用窗格） ----------
   const rowDragRef = useRef(null)
   const rowSuppressRef = useRef(false)
+  const [draggingPaths, setDraggingPaths] = useState(() => new Set())
   useEffect(() => {
+    let live = true
+    let suppressTimer
+    const finishDrag = (d) => {
+      if (!live || rowDragRef.current !== d) return
+      rowDragRef.current = null
+      setDraggingPaths(new Set())
+      suppressTimer = setTimeout(() => {
+        rowSuppressRef.current = false
+      }, 0)
+    }
     const onMove = (e) => {
       const d = rowDragRef.current
       if (!d || d.started) return
-      if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 6) {
+      if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) >= 3) {
         d.started = true
         rowSuppressRef.current = true
-        import('@crabnebula/tauri-plugin-drag').then(({ startDrag }) =>
-          startDrag({ item: d.paths }).catch(() => {})
-        ).finally(() => {
-          rowDragRef.current = null
-          setTimeout(() => {
-            rowSuppressRef.current = false
-          }, 0)
+        clearTimeout(suppressTimer)
+        setDraggingPaths(new Set(d.paths))
+        d.preview.then((icon) => {
+          if (!live || rowDragRef.current !== d) return
+          d.nativeStarted = true
+          // Promise 仅表示会话启动；结束/取消由原生回调通知。
+          return startDrag({ item: d.paths, icon }, () => finishDrag(d))
+        }).catch((error) => {
+          console.warn('无法启动文件拖拽', error)
+          finishDrag(d)
         })
       }
     }
     const onUp = () => {
-      rowDragRef.current = null
+      const d = rowDragRef.current
+      if (d && !d.nativeStarted) finishDrag(d)
     }
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup', onUp)
     return () => {
+      live = false
+      clearTimeout(suppressTimer)
+      rowDragRef.current = null
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
   }, [])
 
   const beginRowDrag = (e, entry) => {
+    if (rowDragRef.current?.started) return
     const paths = selection?.has(entry.path) && selection.size > 1 ? [...selection] : [entry.path]
-    rowDragRef.current = { x: e.clientX, y: e.clientY, paths, started: false }
+    const preview = makeDragPreview(paths.length).catch(() => multipleDragPreview)
+    rowDragRef.current = { x: e.clientX, y: e.clientY, paths, preview, started: false }
   }
 
   // ---------- 空白处拖拽框选（rubber band） ----------
@@ -705,10 +752,11 @@ export default function Pane({
               return (
                 <div
                   key={entry.path}
-                  className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${
+                  className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${
                     dropTarget === entry.path ? ' drop-target' : ''
                   }`}
                   style={{ transform: `translateY(${vi.start}px)` }}
+                  onDragStart={(e) => e.preventDefault()}
                   onMouseDown={(e) => {
                     if (e.button === 0 && !entry.isPseudo) beginRowDrag(e, entry)
                   }}
@@ -728,17 +776,7 @@ export default function Pane({
                     if (!selection?.has(entry.path)) onSelect(tab.id, new Set([entry.path]))
                     onMenu(tab.id, entry, e.clientX, e.clientY)
                   }}
-                  onMouseDown={(e) => {
-                    if (e.button === 0 && !entry.isPseudo) beginRowDrag(e, entry)
-                  }}
-                  onClick={(e) => {
-                    if (rowSuppressRef.current) {
-                      rowSuppressRef.current = false
-                      return
-                    }
-                    rowClick(e, entry, vi.index)
-                  }}
-                  onDoubleClick={() => !entry.isPseudo && onOpen(tab.id, entry)}                >
+                >
                   <div
                     className="row-name"
                     style={entry.depth ? { paddingLeft: entry.depth * 18 } : undefined}
