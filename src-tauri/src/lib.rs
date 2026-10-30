@@ -980,17 +980,31 @@ async fn read_text_preview(
             })
             .collect::<Vec<_>>()
             .join("\n");
-        // 分词：按非字母数字分段（library(forest → library + forest），行含任一词即命中
-        let words: Vec<String> = query
-            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .filter(|w| w.chars().count() >= 2 || w.chars().all(|c| c.is_ascii_digit()))
-            .map(|w| w.to_lowercase())
+        // 匹配规则：空格分隔 = AND；每个词含非字母数字字符时（如 library(forest）
+        // 拆为子片段，行须包含全部子片段；纯字母数字词整词匹配
+        let terms: Vec<Vec<String>> = query
+            .split_whitespace()
+            .filter(|w| !w.contains(':'))
+            .map(|w| {
+                let lw = w.to_lowercase();
+                if lw.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    vec![lw]
+                } else {
+                    lw.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .filter(|f| !f.is_empty())
+                        .map(|f| f.to_string())
+                        .collect()
+                }
+            })
             .collect();
         let mut match_lines = Vec::new();
-        if !words.is_empty() {
+        if !terms.is_empty() {
             for (i, line) in text.lines().enumerate() {
                 let lc = line.to_lowercase();
-                if words.iter().any(|w| lc.contains(w.as_str())) {
+                if terms
+                    .iter()
+                    .all(|frags| frags.iter().any(|f| lc.contains(f.as_str())))
+                {
                     match_lines.push((i + 1) as f64);
                     if match_lines.len() >= 20 {
                         break;

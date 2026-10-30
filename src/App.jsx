@@ -473,6 +473,24 @@ export default function App() {
         doneTimers.delete(row)
       }, 300))
     }
+    const hitTest = (position, selector) => {
+      if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return null
+      // Tauri 给出物理像素；将 DOM 边界放到同一坐标系，每次事件重读跨屏缩放比。
+      const ratio = window.devicePixelRatio || 1
+      for (const el of document.querySelectorAll(selector)) {
+        const rect = el.getBoundingClientRect()
+        if (!rect.width || !rect.height || window.getComputedStyle(el).visibility !== 'visible') continue
+        // 虚拟列表会保留滚动区外的行，只命中实际可见的部分。
+        const clip = el.closest('.rows, .sidebar')?.getBoundingClientRect()
+        const left = Math.max(0, rect.left, clip?.left ?? 0)
+        const top = Math.max(0, rect.top, clip?.top ?? 0)
+        const right = Math.min(window.innerWidth, rect.right, clip?.right ?? window.innerWidth)
+        const bottom = Math.min(window.innerHeight, rect.bottom, clip?.bottom ?? window.innerHeight)
+        if (position.x >= left * ratio && position.x < right * ratio &&
+            position.y >= top * ratio && position.y < bottom * ratio) return el
+      }
+      return null
+    }
     const highlightRow = (row, text) => {
       if (row === highlightedRow) return
       highlightedRow?.classList.remove('native-drop-target')
@@ -480,10 +498,9 @@ export default function App() {
       highlightedRow?.classList.add('native-drop-target')
       if (row) {
         const rect = row.getBoundingClientRect()
-        const tipWidth = Math.min(420, window.innerWidth - 24)
         setHoverTip({
-          x: Math.max(12 + tipWidth / 2, Math.min(window.innerWidth - 12 - tipWidth / 2, rect.left + rect.width / 2)),
-          y: Math.max(44, rect.top - 8),
+          x: rect.left + rect.width / 2,
+          y: rect.top - 8,
           text,
         })
       } else {
@@ -498,19 +515,13 @@ export default function App() {
         return
       }
       if (type === 'enter' || type === 'over') {
-        // Tauri 上报物理像素；每次读取缩放比，兼容跨屏拖拽。
-        const ratio = window.devicePixelRatio || 1
-        const el = document.elementFromPoint(position.x / ratio, position.y / ratio)
-        const row = el?.closest('.row')
-        const bookmark = el?.closest('.sb-item:not(.ws-item)')
-        const pane = el?.closest('.pane')
+        const target = hitTest(position, '.row, .sb-item:not(.ws-item)')
+        const row = target?.closest('.row')
+        const bookmark = target?.closest('.sb-item:not(.ws-item)')
         if (bookmark) {
           highlightRow(bookmark, `添加到「${bookmark.querySelector('span')?.textContent || bookmark.textContent}」`)
-        } else if (row?.querySelector('.disclosure')) {
-          highlightRow(row, `移动到「${row.querySelector('.name')?.textContent || ''}」`)
-        } else if (pane) {
-          const idx = [...document.querySelectorAll('.panes > .pane')].indexOf(pane)
-          highlightRow(pane, `移动到「窗格 ${idx + 1}」`)
+        } else if (row?.querySelector('.disclosure') && row.querySelector('.name')) {
+          highlightRow(row, `移动到「${row.querySelector('.name').textContent}」`)
         } else {
           highlightRow(null)
         }
@@ -520,8 +531,7 @@ export default function App() {
       highlightRow(null)
       const { paths } = ev.payload
       if (!paths?.length) return
-      const ratio = window.devicePixelRatio || 1
-      const el = document.elementFromPoint(ev.payload.position.x / ratio, ev.payload.position.y / ratio)
+      const el = hitTest(position, '.row, .sb-item') || hitTest(position, '.panes > .pane')
       if (!el) return
       // 命中侧边栏条目 → 添加书签
       const sbItem = el.closest('.sb-item')
