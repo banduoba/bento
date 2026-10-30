@@ -16,7 +16,7 @@ import BatchRenameDialog from './components/BatchRenameDialog'
 import ZipDialog, { normalizeZipPrefs, levelOf } from './components/ZipDialog'
 import SettingsDialog from './components/SettingsDialog'
 import SearchOverlay from './components/SearchOverlay'
-import { IconEye, IconEyeOff, IconSearch, IconChevronDown, IconSettings } from './icons'
+import { IconEye, IconEyeOff, IconSearch, IconChevronDown, IconSettings, IconPin } from './icons'
 
 const MIME = 'application/x-bento'
 
@@ -132,6 +132,7 @@ const defaultConfig = (home) => ({
   showHidden: false,
   showSidebar: true,
   autoRefresh: true,
+  alwaysOnTop: false,
   zipPrefs: normalizeZipPrefs(null),
   focusedIdx: 0,
   searchPrefs: { scope: 'global', sort: 'btime' },
@@ -184,6 +185,7 @@ function sanitizeConfig(saved, home) {
     showHidden: !!saved.showHidden,
     showSidebar: saved.showSidebar !== false,
     autoRefresh: saved.autoRefresh !== false,
+    alwaysOnTop: saved.alwaysOnTop === true,
     zipPrefs: normalizeZipPrefs(saved.zipPrefs),
     focusedIdx,
     searchPrefs: {
@@ -273,6 +275,11 @@ export default function App() {
   const toastTimer = useRef(null)
   const cfgRef = useRef(null)
   cfgRef.current = cfg
+  // 窗口置顶：配置变化（含启动恢复）时同步给原生窗口
+  useEffect(() => {
+    if (!hasTauri || !cfg) return
+    getCurrentWindow().setAlwaysOnTop(!!cfg.alwaysOnTop).catch((e) => trace(`setAlwaysOnTop failed: ${e}`))
+  }, [cfg?.alwaysOnTop])
 
   // ---------- 启动 ----------
   useEffect(() => {
@@ -1274,6 +1281,12 @@ export default function App() {
       return
     }
     if (meta && (e.key === 'r' || e.key === 'R')) { e.preventDefault(); refresh(); return }
+    if (meta && e.altKey && e.code === 'KeyT') {
+      // ⌥⌘T：窗口置顶（macOS 上 ⌥T 的 key 是 †，所以用 code）
+      e.preventDefault()
+      setCfg((c) => ({ ...c, alwaysOnTop: !c.alwaysOnTop }))
+      return
+    }
     if (meta && (e.key === 'f' || e.key === 'F') && e.altKey) {
       e.preventDefault()
       setSearchOpen(true)
@@ -1381,6 +1394,14 @@ export default function App() {
           </div>
         </div>
         <div className="tb-right">
+          <button
+            className={`iconbtn${cfg.alwaysOnTop ? ' on' : ''}`}
+            title={cfg.alwaysOnTop ? '取消窗口置顶 (⌥⌘T)' : '窗口置顶 (⌥⌘T)'}
+            aria-pressed={!!cfg.alwaysOnTop}
+            onClick={() => setCfg((c) => ({ ...c, alwaysOnTop: !c.alwaysOnTop }))}
+          >
+            <IconPin size={15} filled={!!cfg.alwaysOnTop} />
+          </button>
           <button
             className="iconbtn"
             title="聚焦搜索 (⌥⌘F)"

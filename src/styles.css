@@ -507,6 +507,7 @@ input, textarea {
   color: var(--text);
 }
 .navbtns button:hover, .iconbtn:hover { background: var(--hover-bg); }
+.iconbtn.on { color: var(--accent); }
 .navbtns button:disabled { color: var(--disabled-text); background: transparent; cursor: default; }
 
 .crumbs {

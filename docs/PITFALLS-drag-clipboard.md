@@ -104,3 +104,9 @@
 - 后端 `zip_paths(sources, destDir, options{name,level,password,separate}) -> Vec<String>`：统一用系统 `zip`（单个源也不再用 ditto，因为要支持级别/密码）；源同目录时 cwd=父目录+`-y`，分散时临时符号链接暂存；排除 `.DS_Store`；`单独压缩`每个源一个 zip；重名自动 `name 2.zip`。有单测 `zip_tests`（多源/单源/自定义名/单独/密码/跨目录）。
 - 密码：`zip -P`（传统 ZipCrypto，macOS 归档实用工具和 `unzip` 都能解；强度弱）。命令行参数在压缩期间对同机其他进程可见。「保持」会把密码**明文**写进 `config.json`，所以只有勾了「保持」才存。
 - 压缩结果通过 `showRowToast` 贴在新 zip 旁提示，并登记 ⌘Z（把生成的 zip 丢进废纸篓）。
+
+## 17. 窗口置顶
+- 工具栏图钉按钮 / ⌥⌘T 切换，`cfg.alwaysOnTop` 持久化；启动恢复和每次切换都走同一个 effect 调 `getCurrentWindow().setAlwaysOnTop()`。
+- 需要 capability `core:window:allow-set-always-on-top`（`core:default` 不含），缺了会静默失败（已 trace）。
+- ⌥⌘T 用 `e.code === 'KeyT'` 判断：macOS 上 ⌥T 的 `e.key` 是 `†`。
+- 验证窗口层级不用 GUI 权限：`CGWindowListCopyWindowInfo` 看主窗口 `kCGWindowLayer`，置顶=5，普通=0。
