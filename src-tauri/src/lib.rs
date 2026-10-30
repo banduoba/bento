@@ -1023,7 +1023,8 @@ async fn read_text_preview(
     .map_err(|e| e.to_string())?
 }
 
-/// 把文件引用写进系统剪贴板（Finder 等可直接粘贴文件本体；含引号的路径不支持）
+/// 把文件引用写进系统剪贴板（AppleScript alias 列表格式 = NSFilenamesPboardType，
+/// Finder/微信/邮件均可直接粘贴文件本体）
 #[tauri::command]
 async fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
     if paths.is_empty() {
@@ -1032,6 +1033,7 @@ async fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
     if paths.iter().any(|p| p.contains('"')) {
         return Err("路径包含引号，无法写入剪贴板".into());
     }
+    eprintln!("[clipboard] writing {} paths", paths.len());
     let list: Vec<String> = paths
         .iter()
         .map(|p| format!("POSIX file \"{}\"", p))
@@ -1041,6 +1043,11 @@ async fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
         .args(["-e", &script])
         .output()
         .map_err(|e| e.to_string())?;
+    eprintln!(
+        "[clipboard] osascript status={} stderr={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).into_owned());
     }

@@ -510,6 +510,7 @@ export default function App() {
     const un = getCurrentWindow().onDragDropEvent(async (ev) => {
       if (!live) return
       const { type, position } = ev.payload
+      trace(`dde ${type} @${Math.round(position.x)}x${Math.round(position.y)} ratio=${window.devicePixelRatio}`)
       if (type === 'cancelled' || type === 'leave') {
         highlightRow(null)
         return
