@@ -7,7 +7,7 @@ import { api, hasTauri } from '../api'
  * cfg.searchPaths 为空 = 搜索全部已索引位置；非空 = 结果限定在这些目录（及其子目录）内
  */
 export default function SettingsDialog({
-  open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, layout, onLayoutChange, onClose,
+  open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, onClose,
 }) {
   const [busy, setBusy] = useState(false)
   const [fda, setFda] = useState(null) // null=查询中
@@ -103,6 +103,17 @@ export default function SettingsDialog({
                   <button className="settings-toggle" role="switch" aria-checked={showHidden}
                     aria-labelledby="settings-hidden-title" aria-describedby="settings-hidden-description"
                     onClick={() => onShowHiddenChange(!showHidden)}>
+                    <span />
+                  </button>
+                </div>
+                <div className="settings-option">
+                  <div className="settings-label">
+                    <div className="settings-option-title" id="settings-autorefresh-title">自动刷新目录</div>
+                    <p id="settings-autorefresh-description">文件在外部新增、修改、删除时，窗格即时更新（只监听当前可见的目录）。关闭后仅在手动刷新（⌘R）或导航时更新。</p>
+                  </div>
+                  <button className="settings-toggle" role="switch" aria-checked={autoRefresh}
+                    aria-labelledby="settings-autorefresh-title" aria-describedby="settings-autorefresh-description"
+                    onClick={() => onAutoRefreshChange(!autoRefresh)}>
                     <span />
                   </button>
                 </div>

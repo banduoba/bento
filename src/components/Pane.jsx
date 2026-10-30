@@ -393,17 +393,21 @@ export default function Pane({
   }, [tick])
 
   // 文件系统监听：当前目录 + 展开的子目录有文件新增/修改/删除时自动刷新，无需 ⌘R
+  // 设置里「自动刷新目录」关闭时不登记监听（后端随之释放全部 FSEvents 流）
+  const autoRefresh = cfg.autoRefresh !== false
   const watchRef = useRef({})
-  watchRef.current = { tabId: tab.id, path: tab.path, showHidden: cfg.showHidden }
+  watchRef.current = { tabId: tab.id, path: tab.path, showHidden: cfg.showHidden, autoRefresh }
   useEffect(() => {
+    if (!autoRefresh) return
     const id = `pane-${tab.id}`
     setWatch(id, [tab.path, ...expandedDirs])
     return () => clearWatch(id)
-  }, [tab.id, tab.path, expandedDirs])
+  }, [tab.id, tab.path, expandedDirs, autoRefresh])
   useEffect(
     () =>
       onFsChange((dirs) => {
-        const { tabId, path, showHidden } = watchRef.current
+        const { tabId, path, showHidden, autoRefresh: on } = watchRef.current
+        if (!on) return
         const changed = new Set(dirs)
         if (changed.has(path)) {
           api
