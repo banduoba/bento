@@ -71,32 +71,39 @@ function SearchGuide({ noResults = false }) {
 }
 
 // 文件名拆掉通配符与筛选语法；内容预览按原样关键词高亮。
-function queryTerms(q) {
-  // 与 Rust readTextPreview 一致：按非字母数字分段，library(forest → library + forest
-  return [
-    ...new Set(
-      (q || '')
-        .split(/[^A-Za-z0-9_\u4e00-\u9fa5]+/)
-        .map((t) => t.trim())
-        .filter((t) => t.length >= 2 || /\d/.test(t))
-    ),
-  ]
+// 与 Rust readTextPreview 一致：空格拆词（AND），词含非字母数字字符时拆子片段（行须含全部子片段）
+function queryTermGroups(q) {
+  return (q || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => {
+      const lw = w.toLowerCase()
+      if (/^[a-z0-9_]+$/.test(lw)) return [lw]
+      return lw.split(/[^a-z0-9_\u4e00-\u9fa5]+/).filter(Boolean)
+    })
+    .filter((frags) => frags.length > 0)
 }
 
 function Highlight({ text, query, literal = false }) {
   const parts = useMemo(() => {
-    const frags = literal
-      ? queryTerms(query)
-      : [
-          ...new Set(
-            (query || '')
-              .trim()
-              .split(/\s+/)
-              .flatMap((t) => (t.includes(':') ? [] : t.split(/[*?]+/)))
-              .map((s) => s.trim())
-              .filter((s) => s.length >= 1)
-          ),
-        ]
+    let frags
+    if (literal) {
+      // 内容模式：空格拆词 AND；词含特殊字符时拆子片段（如 library(forest → library + forest）
+      const groups = queryTermGroups(query)
+      frags = [...new Set(groups.flat())]
+    } else {
+      frags = [
+        ...new Set(
+          (query || '')
+            .trim()
+            .split(/\s+/)
+            .flatMap((t) => (t.includes(':') ? [] : t.split(/[*?]+/)))
+            .map((s) => s.trim())
+            .filter((s) => s.length >= 1)
+        ),
+      ]
+    }
     if (!frags.length) return null
     const re = new RegExp(`(${frags.map(escapeRe).join('|')})`, 'gi')
     return text.split(re)
