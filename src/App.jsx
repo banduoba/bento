@@ -228,6 +228,7 @@ export default function App() {
   const [wsRenaming, setWsRenaming] = useState(null) // { id, value }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
+  const [hoverTip, setHoverTip] = useState(null) // { x, y, name } 原生拖拽目标提示
   const [undoToast, setUndoToast] = useState(null) // { label, fn } 可撤销操作提示
   const undoStackRef = useRef([]) // { label, undo: () => Promise }
   const flashTimer = useRef(null)
@@ -453,6 +454,16 @@ export default function App() {
       highlightedRow?.classList.remove('native-drop-target')
       highlightedRow = row
       highlightedRow?.classList.add('native-drop-target')
+      if (row) {
+        const rect = row.getBoundingClientRect()
+        setHoverTip({
+          x: rect.left + rect.width / 2,
+          y: rect.top - 8,
+          name: row.querySelector('.name')?.textContent || '',
+        })
+      } else {
+        setHoverTip(null)
+      }
     }
     const un = getCurrentWindow().onDragDropEvent(async (ev) => {
       if (!live) return
@@ -1243,6 +1254,11 @@ export default function App() {
 
       <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]} progress={progress} />
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
+      {hoverTip && (
+        <div className="drag-tip" style={{ left: hoverTip.x, top: hoverTip.y }}>
+          移动到「{hoverTip.name}」
+        </div>
+      )}
       {undoToast && (
         <div className="undo-toast">
           <span>

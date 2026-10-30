@@ -19,6 +19,17 @@ const SORTS = [
   { id: 'score', label: '相关度' },
 ]
 
+const FORMATS = [
+  { id: 'all', label: '全部' },
+  { id: 'folder', label: '文件夹' },
+  { id: 'image', label: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
+  { id: 'document', label: '文档', extensions: ['doc', 'docx', 'pdf', 'md', 'txt'] },
+  { id: 'spreadsheet', label: '表格', extensions: ['xls', 'xlsx', 'csv'] },
+  { id: 'presentation', label: '演示', extensions: ['ppt', 'pptx', 'key'] },
+  { id: 'video', label: '视频', extensions: ['mp4', 'mov', 'mkv'] },
+  { id: 'archive', label: '压缩包', extensions: ['zip', 'rar', '7z', 'dmg'] },
+]
+
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 const HISTORY_KEY = 'bento-search-history'
@@ -102,6 +113,7 @@ export default function SearchOverlay({
   const [query, setQuery] = useState('')
   const [history, setHistory] = useState(readHistory)
   const [results, setResults] = useState([])
+  const [format, setFormat] = useState('all')
   const [elapsed, setElapsed] = useState(null)
   const [busy, setBusy] = useState(false)
   const [selIdx, setSelIdx] = useState(0)
@@ -270,13 +282,21 @@ export default function SearchOverlay({
   }
 
   const sorted = useMemo(() => {
-    const arr = [...results]
+    const selectedFormat = FORMATS.find((f) => f.id === format)
+    const arr = results.filter((item) => {
+      if (format === 'all') return true
+      if (format === 'folder') return item.is_dir
+      if (item.is_dir) return false
+      const dot = item.name.lastIndexOf('.')
+      const ext = dot > 0 ? item.name.slice(dot + 1).toLowerCase() : ''
+      return selectedFormat.extensions.includes(ext)
+    })
     if (sortBy === 'btime') arr.sort((a, b) => (b.btime_ms || 0) - (a.btime_ms || 0))
     else if (sortBy === 'mtime') arr.sort((a, b) => (b.mtime_ms || 0) - (a.mtime_ms || 0))
     else if (sortBy === 'size') arr.sort((a, b) => (b.size || 0) - (a.size || 0))
     else if (sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
     return arr // score：保持引擎返回的相关度顺序
-  }, [results, sortBy])
+  }, [results, sortBy, format])
 
   const menuItems = (item) => [
     { label: '打开', action: () => choose(item) },
@@ -396,6 +416,23 @@ export default function SearchOverlay({
             )}
           </div>
           <span className="search-syntax"><code>* ?</code> 通配 · <code>ext:</code> 后缀 · <code>re:</code> 正则 · 空格 = 且</span>
+        </div>
+        <div className="search-formats" role="group" aria-label="结果格式过滤">
+          {FORMATS.map((f) => (
+            <button
+              key={f.id}
+              className={`seg-btn${format === f.id ? ' on' : ''}`}
+              aria-pressed={format === f.id}
+              title={f.extensions?.join(' · ')}
+              onClick={() => {
+                setFormat((current) => current === f.id ? 'all' : f.id)
+                setSelIdx(0)
+                setMenu(null)
+              }}
+            >
+              {f.label}
+            </button>
+          ))}
         </div>
         <div className="search-results">
           {!query.trim() ? (
