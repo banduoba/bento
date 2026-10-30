@@ -45,6 +45,8 @@ export default function Pane({
   cutSet,
   editPathSignal,
   flash,
+  reveal,
+  onRevealDone,
   onFocus,
   onNav,
   onBack,
@@ -103,6 +105,42 @@ export default function Pane({
   const pathInputRef = useRef(null)
   const innerRef = useRef(null)
 
+
+  // ---------- 行原生拖拽（拖出到其他软件/本应用窗格） ----------
+  const rowDragRef = useRef(null)
+  const rowSuppressRef = useRef(false)
+  useEffect(() => {
+    const onMove = (e) => {
+      const d = rowDragRef.current
+      if (!d || d.started) return
+      if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 6) {
+        d.started = true
+        rowSuppressRef.current = true
+        import('@crabnebula/tauri-plugin-drag').then(({ startDrag }) =>
+          startDrag({ item: d.paths }).catch(() => {})
+        ).finally(() => {
+          rowDragRef.current = null
+          setTimeout(() => {
+            rowSuppressRef.current = false
+          }, 0)
+        })
+      }
+    }
+    const onUp = () => {
+      rowDragRef.current = null
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  const beginRowDrag = (e, entry) => {
+    const paths = selection?.has(entry.path) && selection.size > 1 ? [...selection] : [entry.path]
+    rowDragRef.current = { x: e.clientX, y: e.clientY, paths, started: false }
+  }
 
   // ---------- 空白处拖拽框选（rubber band） ----------
   const rowsRef = useRef([])
@@ -228,6 +266,19 @@ export default function Pane({
   useEffect(() => {
     onRowsCache(tab.id, rows.filter((r) => !r.isPseudo))
   }, [rows, tab.id])
+
+  // 搜索定位：行就绪后选中目标并滚动到可见处
+  useEffect(() => {
+    if (!reveal || entries === null) return
+    const idx = rows.findIndex((r) => r.path === reveal.path)
+    if (idx === -1) return
+    onSelect(tab.id, new Set([reveal.path]))
+    try {
+      virt.scrollToIndex(idx, { align: 'center' })
+    } catch {}
+    onRevealDone()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reveal, rows])
 
   // 向上汇报统计
   useEffect(() => {
@@ -658,7 +709,16 @@ export default function Pane({
                     dropTarget === entry.path ? ' drop-target' : ''
                   }`}
                   style={{ transform: `translateY(${vi.start}px)` }}
-                  onClick={(e) => rowClick(e, entry, vi.index)}
+                  onMouseDown={(e) => {
+                    if (e.button === 0 && !entry.isPseudo) beginRowDrag(e, entry)
+                  }}
+                  onClick={(e) => {
+                    if (rowSuppressRef.current) {
+                      rowSuppressRef.current = false
+                      return
+                    }
+                    rowClick(e, entry, vi.index)
+                  }}
                   onDoubleClick={() => !entry.isPseudo && onOpen(tab.id, entry)}
                   onContextMenu={(e) => {
                     e.preventDefault()
@@ -668,22 +728,17 @@ export default function Pane({
                     if (!selection?.has(entry.path)) onSelect(tab.id, new Set([entry.path]))
                     onMenu(tab.id, entry, e.clientX, e.clientY)
                   }}
-                  draggable={!isRenaming && !entry.isPseudo}
-                  onDragStart={(e) => {
-                    e.dataTransfer.setData(MIME, dragData(entry))
-                    e.dataTransfer.effectAllowed = 'copyMove'
+                  onMouseDown={(e) => {
+                    if (e.button === 0 && !entry.isPseudo) beginRowDrag(e, entry)
                   }}
-                  onDragOver={(e) => {
-                    if (entry.is_dir && internalDrag(e)) {
-                      e.preventDefault()
-                      e.stopPropagation()
-                      e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move'
-                      setDropTarget(entry.path)
+                  onClick={(e) => {
+                    if (rowSuppressRef.current) {
+                      rowSuppressRef.current = false
+                      return
                     }
+                    rowClick(e, entry, vi.index)
                   }}
-                  onDragLeave={() => setDropTarget((t) => (t === entry.path ? null : t))}
-                  onDrop={(e) => entry.is_dir && handleDrop(e, entry.path)}
-                >
+                  onDoubleClick={() => !entry.isPseudo && onOpen(tab.id, entry)}                >
                   <div
                     className="row-name"
                     style={entry.depth ? { paddingLeft: entry.depth * 18 } : undefined}

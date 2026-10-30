@@ -15,8 +15,10 @@ export const api = hasTauri
       zipPaths: (sources, destDir) => invoke('zip_paths', { sources, destDir }),
       quickLook: (path) => invoke('quick_look', { path }),
       makeFile: (path) => invoke('make_file', { path }),
-      search: (query, scope, root, showHidden, roots) =>
-        invoke('search', { query, scope, root: root || null, showHidden, roots: roots || [] }),
+      search: (query, scope, root, showHidden, roots, mode) =>
+        invoke('search', { query, scope, root: root || null, showHidden, roots: roots || [], mode: mode || 'name' }),
+      copyFilesToClipboard: (paths) => invoke('copy_files_to_clipboard', { paths }),
+      openPrivacySettings: () => invoke('open_privacy_settings'),
       fsearchStatus: () => invoke('fsearch_status'),
       diskSpace: (path) => invoke('disk_space', { path }),
       homeDir: () => invoke('home_dir'),
