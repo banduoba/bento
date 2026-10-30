@@ -13,6 +13,7 @@ import Pane from './components/Pane'
 import StatusBar from './components/StatusBar'
 import ContextMenu from './components/ContextMenu'
 import BatchRenameDialog from './components/BatchRenameDialog'
+import ZipDialog, { normalizeZipPrefs, levelOf } from './components/ZipDialog'
 import SettingsDialog from './components/SettingsDialog'
 import SearchOverlay from './components/SearchOverlay'
 import { IconEye, IconEyeOff, IconSearch, IconChevronDown, IconSettings } from './icons'
@@ -131,6 +132,7 @@ const defaultConfig = (home) => ({
   showHidden: false,
   showSidebar: true,
   autoRefresh: true,
+  zipPrefs: normalizeZipPrefs(null),
   focusedIdx: 0,
   searchPrefs: { scope: 'global', sort: 'btime' },
   searchPaths: [],
@@ -182,6 +184,7 @@ function sanitizeConfig(saved, home) {
     showHidden: !!saved.showHidden,
     showSidebar: saved.showSidebar !== false,
     autoRefresh: saved.autoRefresh !== false,
+    zipPrefs: normalizeZipPrefs(saved.zipPrefs),
     focusedIdx,
     searchPrefs: {
       scope: ['pane', 'home', 'global'].includes(saved.searchPrefs?.scope) ? saved.searchPrefs.scope : 'global',
@@ -237,6 +240,7 @@ export default function App() {
   const [menu, setMenu] = useState(null) // { x, y, items }
   const [renaming, setRenaming] = useState(null) // { tabId, path, value }
   const [batchRename, setBatchRename] = useState(null) // { tabId, items }
+  const [zipDlg, setZipDlg] = useState(null) // { id, paths, dir, name } 「创建归档」对话框
   const [searchOpen, setSearchOpen] = useState(false)
   const [pathEditTick, setPathEditTick] = useState(0) // ⌘⇧G 让聚焦窗格进入路径编辑
   const [flashPane, setFlashPane] = useState(-1)
@@ -888,6 +892,56 @@ export default function App() {
     })
   }
 
+  // ---------- 压缩（QSpace 风格「创建归档」）----------
+  const runZip = (paths, dir, o) => {
+    clearTimeout(rowToastTimer.current)
+    setRowToast({ x: window.innerWidth / 2, y: 90, text: '正在压缩…', center: true })
+    api
+      .zipPaths(paths, dir, {
+        name: o.name,
+        level: o.level,
+        password: o.password || undefined,
+        separate: o.separate,
+      })
+      .then((created) => {
+        refresh()
+        if (!created?.length) {
+          setRowToast(null)
+          return
+        }
+        pushUndo(
+          created.length === 1 ? `压缩：${basename(created[0])}` : `压缩 ${created.length} 个`,
+          async () => {
+            await api.trash(created)
+          },
+          { silent: true }
+        )
+        showRowToast(created, created.length === 1 ? `已压缩：${basename(created[0])}` : `已压缩为 ${created.length} 个文件`)
+      })
+      .catch((e) => {
+        setRowToast(null)
+        alert(String(e))
+      })
+  }
+  // 默认文件名：单个项目 = 该项目名.zip；多个项目 = 当前文件夹名.zip
+  const zipDefaultName = (paths, dir) =>
+    paths.length === 1 ? `${basename(paths[0])}.zip` : `${basename(dir) || '归档'}.zip`
+  const zipMenuItems = (paths, dir, entry) => {
+    const p = normalizeZipPrefs(cfg.zipPrefs)
+    const name = zipDefaultName(paths, dir)
+    const openDlg = () => setZipDlg({ id: Date.now(), paths, dir, name })
+    const what = paths.length > 1 ? `${paths.length} 项` : `「${entry.name}」`
+    if (!p.oneClick) return [{ label: `压缩${what}…`, action: openDlg }]
+    return [
+      {
+        label: `压缩${what}`,
+        action: () =>
+          runZip(paths, dir, { name, level: levelOf(p), password: p.password, separate: p.separate && paths.length > 1 }),
+      },
+      { label: '压缩选项…', action: openDlg },
+    ]
+  }
+
   const doDuplicate = (tabId, paths) => {
     const list = paths?.length ? paths : selArr(tabId)
     const dest = locateTab(tabId)?.path
@@ -1008,14 +1062,7 @@ export default function App() {
             : startRename(tabId, entry.path, entry.name),
       },
       { label: '拷贝副本', shortcut: '⌘D', action: () => doDuplicate(tabId, paths) },
-      {
-        label: paths.length > 1 ? `压缩 ${paths.length} 项` : `压缩「${entry.name}」`,
-        action: () =>
-          api
-            .zipPaths(paths, parentDir)
-            .catch((e) => alert(String(e)))
-            .finally(refresh),
-      },
+      ...zipMenuItems(paths, parentDir, entry),
       { label: '移到废纸篓', danger: true, shortcut: '⌘⌫', action: () => doTrash(tabId, paths) },
       { sep: true },
       {
@@ -1541,6 +1588,22 @@ export default function App() {
         onLayoutChange={setLayout}
         onClose={() => setSettingsOpen(false)}
       />
+      {zipDlg && (
+        <ZipDialog
+          key={zipDlg.id}
+          count={zipDlg.paths.length}
+          dir={zipDlg.dir}
+          defaultName={zipDlg.name}
+          prefs={normalizeZipPrefs(cfg.zipPrefs)}
+          onCancel={() => setZipDlg(null)}
+          onSubmit={(o, saved) => {
+            const d = zipDlg
+            setZipDlg(null)
+            setCfg((c) => ({ ...c, zipPrefs: saved })) // 记住上次的压缩设置
+            runZip(d.paths, o.dir, o)
+          }}
+        />
+      )}
       {batchRename && (
         <BatchRenameDialog
           items={batchRename.items}
