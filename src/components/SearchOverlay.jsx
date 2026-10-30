@@ -216,7 +216,7 @@ export default function SearchOverlay({
 
   // 预览加载完成后滚动到第一处命中
   useEffect(() => {
-    if (preview && !preview.loading && preview.kind === 'text' && preview.matchLines.length) {
+    if (preview && !preview.loading && preview.kind === 'text' && preview.matchLines?.length) {
       requestAnimationFrame(() => firstHitRef.current?.scrollIntoView({ block: 'center' }))
     }
   }, [preview])
@@ -562,14 +562,14 @@ export default function SearchOverlay({
             {preview && preview.kind === 'text' && preview.text && (
               <>
                 <div className="sp-head" title={preview.path}>
-                  <span className="sp-matches">{preview.matchLines.length} 行命中</span>
+                  <span className="sp-matches">{preview.matchLines?.length ?? 0} 行命中</span>
                   <span className="sp-name">{preview.name}</span>
                   {preview.truncated && <span className="sp-truncated">（内容过大，仅显示前 256 KB）</span>}
                 </div>
                 <div className="sp-lines">
                   {preview.text.split('\n').map((text, i) => {
                     const no = i + 1
-                    const isMatch = preview.matchLines.includes(no)
+                    const isMatch = preview.matchLines?.includes(no)
                     return (
                       <div
                         key={no}

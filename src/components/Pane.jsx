@@ -22,7 +22,7 @@ async function makeDragPreview(count, isDir) {
   canvas.width = multipleDragImage.naturalWidth / 2
   canvas.height = multipleDragImage.naturalHeight / 2
   const ctx = canvas.getContext('2d')
-  ctx.drawImage(multipleDragImage, 0, 0, canvas.width, canvas.height)
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
   // 与 Swift 模板的标签区域保持一致，替换 N 为实际数量。
   ctx.clearRect(52, 12, canvas.width - 68, 24)
   ctx.fillStyle = 'rgba(28, 28, 32, 0.94)'
