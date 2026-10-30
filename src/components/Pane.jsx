@@ -72,7 +72,17 @@ export default function Pane({
   const [editingPath, setEditingPath] = useState(null) // 非空 = 地址栏编辑中
   const [collapsedCount, setCollapsedCount] = useState(0) // 面包屑溢出时折叠的前置层级数
   const [copiedPath, setCopiedPath] = useState(null) // 行内复制路径反馈
+  const [copyToast, setCopyToast] = useState(null) // 复制成功提示条（含内容）
   const copyTimer = useRef(null)
+  const toastTimer = useRef(null)
+  const showCopyToast = (path) => {
+    setCopiedPath(path)
+    setCopyToast(path)
+    clearTimeout(copyTimer.current)
+    copyTimer.current = setTimeout(() => setCopiedPath(null), 1200)
+    clearTimeout(toastTimer.current)
+    toastTimer.current = setTimeout(() => setCopyToast(null), 2200)
+  }
   const [moreMenu, setMoreMenu] = useState(null) // { x, y, segs } 折叠层级的悬停列表
   const moreTimer = useRef(null)
   const anchorRef = useRef(null)
@@ -618,9 +628,7 @@ export default function Pane({
                           onClick={(e) => {
                             e.stopPropagation()
                             copyText(entry.path)
-                            setCopiedPath(entry.path)
-                            clearTimeout(copyTimer.current)
-                            copyTimer.current = setTimeout(() => setCopiedPath(null), 1200)
+                            showCopyToast(entry.path)
                           }}
                         >
                           {copiedPath === entry.path ? <IconCheck size={13} /> : <IconCopy size={13} />}
@@ -658,6 +666,12 @@ export default function Pane({
               {c.label}
             </button>
           ))}
+        </div>
+      )}
+      {copyToast && (
+        <div className="copy-toast" title={copyToast}>
+          <IconCheck size={13} />
+          <span className="copy-toast-text">已复制：{copyToast}</span>
         </div>
       )}
       {marqueeRect && (

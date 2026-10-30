@@ -610,6 +610,39 @@ input, textarea {
   letter-spacing: 0.2px;
 }
 
+/* 复制成功提示条（含复制内容） */
+.copy-toast {
+  position: absolute;
+  bottom: 30px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 86%;
+  padding: 7px 14px;
+  border-radius: 8px;
+  background: rgba(28, 28, 32, 0.92);
+  color: #f2f2f6;
+  font-size: 12px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+  animation: toastIn 140ms ease-out;
+}
+.copy-toast svg { flex: none; color: #30d158; }
+.copy-toast-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
 /* 行内复制路径按钮：悬停行时出现在名字后 */
 .row-copy {
   border: none;
