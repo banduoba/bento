@@ -1,41 +1,175 @@
-<img src="app-icon.png" height="56" align="top" alt="Bento icon">
+<p align="right">
+  <strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a>
+</p>
 
-# Bento
+<p align="center">
+  <img src="./docs/assets/hero.svg" width="100%" alt="Bento — a fast multi-pane file manager for macOS">
+</p>
 
-Bento —— 轻量多窗格文件管理器（macOS）。多窗格如便当分格，各归其位。QSpace 的开源简化复刻。
+<p align="center">
+  <a href="#install"><img alt="Platform" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0A1530?style=flat-square&logo=apple&logoColor=white"></a>
+  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4A9BF7?style=flat-square&labelColor=0A1530"></a>
+  <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8D8?style=flat-square&labelColor=0A1530&logo=tauri&logoColor=white">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-backend-F0A050?style=flat-square&labelColor=0A1530&logo=rust&logoColor=white">
+  <img alt="React 19" src="https://img.shields.io/badge/React-19-4A9BF7?style=flat-square&labelColor=0A1530&logo=react&logoColor=white">
+</p>
 
-A lightweight multi-pane file manager for macOS, inspired by QSpace.
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#keyboard-shortcuts">Shortcuts</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#status--limitations">Limitations</a> ·
+  <a href="#acknowledgements">Credits</a>
+</p>
 
-![platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-black) ![stack](https://img.shields.io/badge/stack-Tauri%202%20%2B%20Rust%20%2B%20React%2019-24C8D8)
+<p align="center">
+  <img src="./docs/assets/screenshot-main.png" width="100%" alt="Bento showing four panes: documents, projects, pictures and downloads">
+</p>
 
-![Bento 截图](docs/screenshot-main.png)
+## Overview
 
-## 功能 / Features
+**Bento** is a lightweight multi-pane file manager for macOS. It puts several folders on screen at once — like the compartments of a bento box — so moving, comparing and organising files stops being a game of window juggling.
 
-- **多窗格**：10 种布局预设（左右分栏、四宫格、1+2 等），⌘1/⌘2/⌘4 快速切换
-- **标签页**：每个窗格支持 Finder 式标签页（⌘T 新建 / ⌘W 关闭）
-- **工作区**：侧边栏多工作区，各自记忆窗格布局与打开的目录
-- **全局搜索**：集成 [fsearch](https://github.com/noahdunnagan/fsearch) 引擎（getattrlistbulk 全盘索引 + FSEvents 实时更新 + 模糊容错，毫秒级查询），支持 `*`/`?` 通配符、`ext:jpg` 后缀过滤、`re:` 正则
-- **可编辑地址栏**：⌘L 直接编辑路径跳转，长路径自动折叠为 `»` 悬停展开
-- **文件操作**：复制/剪切/粘贴（APFS clonefile 秒级拷贝）、批量重命名（替换/添加/格式化 + 实时预览）、压缩 zip、快速查看、废纸篓
-- **书签与卷**：常用目录右键收藏；侧边栏列出所有挂载卷
-- **状态持久化**：窗口大小/位置、布局、标签、路径、排序全部自动记忆
+It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface, keeps the Finder conventions you already know, and adds the things power users miss: split layouts, per-pane tabs, instant search, real drag & drop with other apps, and a QSpace-style archive dialog.
 
-## 开发 / Development
+> Bento is inspired by [QSpace](https://qspace.awehunt.com/). It is an independent open-source project and is not affiliated with QSpace.
+
+## Features
+
+| | |
+| --- | --- |
+| **Multi-pane layouts** | 10 presets — single, side-by-side, stacked, 2×2, and several 3-pane arrangements. Switch with <kbd>⌘1</kbd> <kbd>⌘2</kbd> <kbd>⌘4</kbd> or the layout picker. |
+| **Tabs & workspaces** | Every pane has its own Finder-style tabs. Save whole layouts (panes, tabs, paths) as named workspaces in the sidebar. |
+| **Instant search** | Global file-name search backed by the [fsearch](https://github.com/noahdunnagan/fsearch) index — fuzzy matching, `*` / `?` wildcards, `ext:` filters and `re:` regular expressions — plus **content search** with a side preview that highlights matching lines. |
+| **Native drag & drop** | Drag files out to Finder or any other app, drop files in from anywhere, or move them between panes. It works even when Bento sits behind other windows, and drop targets are highlighted as you hover. |
+| **Real clipboard** | <kbd>⌘C</kbd> puts real file URLs on the system pasteboard, so <kbd>⌘V</kbd> in Finder and other apps pastes the files themselves. |
+| **Fast file operations** | APFS `clonefile` makes same-volume copies instant. Undo with <kbd>⌘Z</kbd>, duplicates are named `name 副本.ext`, `副本1`, `副本2`, and deletions go to the Trash. |
+| **Create Archive** | A QSpace-style dialog: choose location and name, speed / size / custom compression level, optional password, one-click mode and per-item archives. |
+| **Batch rename** | Replace, add, format (with counters and dates) and change case, with a live before/after preview. |
+| **Flexible columns** | Name · Modified · Created · Size · Kind. Drag column borders to resize, right-click the header to choose columns — settings are **per pane**. Long names are shortened in the middle (`Product…admap.pptx`) and secondary columns hide automatically in narrow panes. |
+| **Live folders** | Panes refresh as files change on disk (FSEvents), including expanded sub-folders. Can be switched off in Settings. |
+| **Keyboard-first** | Editable address bar (<kbd>⌘L</kbd>), arrow-key navigation, inline folder expansion, Quick Look on <kbd>Space</kbd>, always-on-top pin (<kbd>⌥⌘T</kbd>). |
+| **Remembers everything** | Window frame, layout, tabs, paths, sort order, column widths and preferences are restored on launch. Follows the system light / dark appearance. |
+
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/feature-archive.png" alt="The Create Archive dialog">
+      <p align="center"><sub><b>Create Archive</b> — compression level, password, one-click mode</sub></p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/feature-columns.png" alt="Right-click the header to choose columns">
+      <p align="center"><sub><b>Columns</b> — right-click the header to choose what to show</sub></p>
+    </td>
+  </tr>
+</table>
+
+## Install
+
+Pre-built binaries are not published yet, so Bento is built from source. It takes a few minutes the first time.
+
+**Requirements**
+
+- macOS on Apple Silicon (the tested target)
+- [Node.js](https://nodejs.org/) 18 or newer
+- [Rust](https://rustup.rs/) (stable) and the Xcode Command Line Tools (`xcode-select --install`)
+
+**Build**
 
 ```bash
-npm install        # 安装前端依赖
-npm run dev        # 开发模式（Rust 增量编译）
-npm run build      # 构建正式版 .app / .dmg
+git clone https://github.com/banduoba/bento.git
+cd bento
+npm install
+npm run build
 ```
 
-要求：Node 18+、Rust、Xcode CLT。仅支持 macOS（Apple Silicon 优先）。
+The app and a disk image are written to `src-tauri/target/release/bundle/` (`macos/Bento.app` and `dmg/`). Drag `Bento.app` into `/Applications`.
 
-## 技术栈 / Stack
+**Develop**
 
-- **后端**：Rust + Tauri 2（rayon 并行目录扫描、clonefile 零拷贝、fsearch 索引）
-- **前端**：React 19 + Vite + @tanstack/react-virtual（虚拟滚动）
+```bash
+npm run dev        # Tauri dev mode with hot reload
+```
+
+**First launch**
+
+- The app is ad-hoc signed, so macOS may ask you to confirm the first launch (*right-click → Open*).
+- Grant **Full Disk Access** in *System Settings → Privacy & Security* if you want global and content search to cover protected locations. Bento shows a hint in Settings when it is missing.
+- After replacing the app with a new build, macOS may drop that permission — remove and re-add Bento in the list.
+
+## Keyboard shortcuts
+
+<details open>
+<summary><b>Common shortcuts</b></summary>
+
+| Shortcut | Action |
+| --- | --- |
+| <kbd>⌘1</kbd> <kbd>⌘2</kbd> <kbd>⌘4</kbd> | One / two / four pane layout |
+| <kbd>⌘T</kbd> · <kbd>⌘W</kbd> · <kbd>⌃Tab</kbd> | New tab · close tab · next tab |
+| <kbd>⌘K</kbd> or <kbd>⌥⌘F</kbd> | Open search |
+| <kbd>⌘L</kbd> or <kbd>⇧⌘G</kbd> | Edit the path |
+| <kbd>⌘[</kbd> · <kbd>⌘]</kbd> | Back · forward |
+| <kbd>⌘C</kbd> · <kbd>⌘X</kbd> · <kbd>⌘V</kbd> · <kbd>⌘D</kbd> | Copy · cut · paste · duplicate |
+| <kbd>⌘⌫</kbd> · <kbd>⌘Z</kbd> | Move to Trash · undo |
+| <kbd>⇧⌘N</kbd> | New folder |
+| <kbd>↩</kbd> or <kbd>F2</kbd> | Rename |
+| <kbd>Space</kbd> | Quick Look |
+| <kbd>↑</kbd> <kbd>↓</kbd> · <kbd>→</kbd> <kbd>←</kbd> | Move selection · expand / collapse or enter / leave a folder |
+| <kbd>⌫</kbd> | Go to parent folder |
+| <kbd>⌘A</kbd> · <kbd>Esc</kbd> | Select all · clear selection |
+| <kbd>⌘R</kbd> | Refresh |
+| <kbd>⇧⌘.</kbd> | Show / hide hidden files |
+| <kbd>⌥⌘S</kbd> | Toggle sidebar |
+| <kbd>⌥⌘T</kbd> | Keep window on top |
+| <kbd>⌘,</kbd> | Settings |
+
+</details>
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI["React 19 UI<br/>panes · tabs · dialogs"] -- "Tauri IPC" --> CMD["Rust commands<br/>src-tauri/src/lib.rs"]
+    CMD --> FS["File operations<br/>clonefile · zip · trash"]
+    CMD --> IDX["fsearch index<br/>name + content search"]
+    CMD --> WATCH["FSEvents watcher<br/>live folder refresh"]
+    CMD --> MAC["AppKit bridge<br/>NSPasteboard · native drag"]
+```
+
+- **Frontend** — React 19, Vite 7, [@tanstack/react-virtual](https://tanstack.com/virtual) for virtualised lists.
+- **Backend** — Rust on Tauri 2: parallel directory scans (rayon), APFS `clonefile`, the fsearch engine, `notify` (FSEvents) for live updates, and `objc2` for the native pasteboard and window behaviour.
+- **Drag & drop** — a native `NSDraggingSession` via [tauri-plugin-drag](https://github.com/crabnebula-dev/drag-rs) for dragging out, and Tauri's window drag-drop events for dragging in.
+
+```text
+src/                     React UI (App, Pane, dialogs, column and drag helpers)
+src-tauri/src/lib.rs     Rust commands: files, search, clipboard, watcher, archive
+src-tauri/tauri.conf.json  Window and bundle configuration
+docs/                    Engineering notes and README assets
+```
+
+Hard-won implementation notes — coordinate systems for native drops, a window-state deadlock, pasteboard formats and more — are collected in [`docs/PITFALLS-drag-clipboard.md`](./docs/PITFALLS-drag-clipboard.md).
+
+## Status & limitations
+
+Bento is young software (`0.1.0`). Know before you use it:
+
+- The interface is currently **Simplified Chinese only**.
+- Apple Silicon on a recent macOS is the tested configuration; Intel Macs are untested.
+- Local files only — there is no SFTP / SMB / cloud connection support.
+- Archive passwords use traditional ZipCrypto (readable by macOS and `unzip`, but a weak cipher), and they are passed to `zip` on the command line while compressing. The *Keep* option stores the password in plain text in the config file.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `npm run build` and, for Rust changes, `cargo test` in `src-tauri/` before submitting. For UI changes, a screenshot or short clip helps a lot.
+
+## Acknowledgements
+
+- [QSpace](https://qspace.awehunt.com/) for the interaction design that inspired this project
+- [fsearch](https://github.com/noahdunnagan/fsearch) — the indexing and content-search engine
+- [Tauri](https://tauri.app/), [tauri-plugin-drag](https://github.com/crabnebula-dev/drag-rs), [notify](https://github.com/notify-rs/notify), [rayon](https://github.com/rayon-rs/rayon), [objc2](https://github.com/madsmtm/objc2)
+- [React](https://react.dev/), [Vite](https://vite.dev/) and [TanStack Virtual](https://tanstack.com/virtual)
 
 ## License
 
-MIT
+[MIT](./LICENSE) © banduoba

@@ -778,8 +778,9 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   overflow: hidden;
   white-space: nowrap;
 }
-.row-name .name-stem { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.row-name .name-ext { flex: none; white-space: nowrap; }
+/* white-space: pre —— 前段末尾/末段开头的空格（"Meeting " + "Notes.md"）否则会被折叠掉，显示成 MeetingNotes.md */
+.row-name .name-stem { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.row-name .name-ext { flex: none; white-space: pre; }
 .row-size, .row-kind, .row-date {
   font-size: 12px;
   color: var(--text-2);
