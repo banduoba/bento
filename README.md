@@ -6,6 +6,8 @@ A lightweight multi-pane file manager for macOS, inspired by QSpace.
 
 ![platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-black) ![stack](https://img.shields.io/badge/stack-Tauri%202%20%2B%20Rust%20%2B%20React%2019-24C8D8)
 
+![Bento 截图](docs/screenshot-main.png)
+
 ## 功能 / Features
 
 - **多窗格**：10 种布局预设（左右分栏、四宫格、1+2 等），⌘1/⌘2/⌘4 快速切换
