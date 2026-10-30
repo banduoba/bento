@@ -323,13 +323,6 @@ async fn trash(paths: Vec<String>, app: AppHandle) -> Result<Vec<TrashEntry>, St
     Ok(entries)
 }
 
-fn basename_of(p: &str) -> String {
-    Path::new(p)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| p.to_string())
-}
-
 /// 新建文件夹，自动命名「未命名文件夹」「未命名文件夹 2」…，返回实际路径
 #[tauri::command]
 async fn make_dir(path: String) -> Result<String, String> {
@@ -654,7 +647,7 @@ async fn search(
     if q.is_empty() {
         return Ok(Vec::new());
     }
-    let limit = limit.unwrap_or(300).min(1000);
+    let limit = limit.unwrap_or(200).min(1000);
     // 内容模式：委托 fsearch grep（三词索引）
     if scope == "global" && mode.as_deref() == Some("content") {
         return search_content(q, root, Some(limit), roots).await;
@@ -832,8 +825,15 @@ async fn search_content(
             return Ok(Vec::new());
         }
         let query = fsearch::Query::parse(&format!("{}grep:{}", filters, pattern), &home)?;
+        let t0 = std::time::Instant::now();
         let g = fsearch::Grep::new(&pattern, fsearch::GrepMode::Literal)?;
         let (res, _) = eng.grep(&query, &g)?;
+        eprintln!(
+            "[search] content \"{}\": {} files, {} ms",
+            pattern,
+            res.files.len(),
+            t0.elapsed().as_millis()
+        );
         let mut out: Vec<SearchItem> = res
             .files
             .iter()
@@ -872,10 +872,10 @@ async fn search_content(
                 out.retain(|item| roots.iter().any(|r| item.path.starts_with(r.as_str())));
             }
         }
-        if let Some(r) = root {
+                out.truncate(limit);
+if let Some(r) = root {
             out.retain(|item| item.path.starts_with(r.as_str()));
         }
-        out.truncate(limit);
         Ok(out)
     })
     .await
@@ -904,6 +904,7 @@ async fn read_text_preview(
     query: String,
     max_bytes: Option<usize>,
 ) -> Result<TextPreview, String> {
+    let _ = max_bytes; // 预览统一 256KB 上限，参数保留兼容前端
     tauri::async_runtime::spawn_blocking(move || {
         let p = Path::new(&path);
         if is_image_path(p) {
@@ -948,7 +949,21 @@ async fn read_text_preview(
                 match_lines: Vec::new(),
             });
         }
-        let text = String::from_utf8_lossy(&bytes[..take.min(bytes.len())]).into_owned();
+        let full = String::from_utf8_lossy(&bytes[..take.min(bytes.len())]).into_owned();
+        // 逐行截断（单行超长——如压缩 JS——会拖垮前端渲染）并限制总行数
+        let text: String = full
+            .lines()
+            .take(3000)
+            .map(|l| {
+                if l.chars().count() > 300 {
+                    let t: String = l.chars().take(300).collect();
+                    format!("{} …", t)
+                } else {
+                    l.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let words: Vec<String> = query
             .split_whitespace()
             .filter(|w| !w.contains(':'))
@@ -1130,6 +1145,7 @@ pub fn run() {
             make_file,
             search,
             search_content,
+            read_text_preview,
             dir_activity,
             copy_files_to_clipboard,
             open_privacy_settings,
