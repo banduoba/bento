@@ -343,7 +343,6 @@ input, textarea {
 .sb-item svg { flex: none; color: var(--accent); }
 .sb-system-icon { flex: none; border-radius: 3px; object-fit: contain; }
 .sb-item.drive svg { color: var(--muted-icon); }
-.sb-drop { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 6px; }
 
 /* ---------- 窗格区 ---------- */
 .panes {
@@ -693,11 +692,63 @@ input, textarea {
 .pane.focused .row.selected:hover { box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.16); }
 .row.cut { opacity: 0.45; }
 .row.dragging { opacity: 0.45; }
-.row.native-drop-target {
+.row.native-drop-target,
+.pane.focused .row.native-drop-target,
+.sb-item.native-drop-target,
+.sb-item.sb-drop {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
   border-radius: 6px;
-  background: rgba(10, 132, 255, 0.08);
+  background: var(--row-sel-focus);
+  box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.16);
+}
+/* 在既有图标槽显示投放箭头，不挤动文件名或列宽。 */
+.row.native-drop-target .disclosure,
+.sb-item.native-drop-target,
+.sb-item.sb-drop {
+  position: relative;
+}
+.row.native-drop-target .disclosure svg { visibility: hidden; }
+.row.native-drop-target .disclosure::after,
+.sb-item.native-drop-target::after,
+.sb-item.sb-drop::after {
+  content: '↓';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 16px;
+  height: 18px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+  pointer-events: none;
+}
+.sb-item.native-drop-target::after,
+.sb-item.sb-drop::after { left: 8px; }
+
+.row.drop-done, .sb-item.drop-done {
+  border-radius: 6px;
+  animation: dropDone 300ms ease-out;
+}
+@keyframes dropDone {
+  0%, 30% {
+    background: var(--row-sel-focus);
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+  100% { box-shadow: inset 0 0 0 2px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .row.drop-done, .sb-item.drop-done {
+    animation: none;
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+    background: var(--row-sel-focus);
+  }
 }
 .row.drop-target { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 5px; }
 
@@ -1542,6 +1593,7 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
   transform: translate(-50%, -100%);
   max-width: min(420px, calc(100vw - 24px));
   padding: 7px 13px;
+  line-height: 18px;
   border-radius: 999px;
   pointer-events: none;
   white-space: nowrap;

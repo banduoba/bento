@@ -228,7 +228,7 @@ export default function App() {
   const [wsRenaming, setWsRenaming] = useState(null) // { id, value }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
-  const [hoverTip, setHoverTip] = useState(null) // { x, y, name } 原生拖拽目标提示
+  const [hoverTip, setHoverTip] = useState(null) // { x, y, text } 原生拖拽目标提示
   const [undoToast, setUndoToast] = useState(null) // { label, fn } 可撤销操作提示
   const undoStackRef = useRef([]) // { label, undo: () => Promise }
   const flashTimer = useRef(null)
@@ -448,7 +448,32 @@ export default function App() {
   useEffect(() => {
     if (!hasTauri) return
     let highlightedRow = null
+    let dragPaths = []
     let live = true
+    const doneTimers = new Map()
+    const paneDestination = (el) => {
+      const paneEl = el.closest('.pane')
+      if (!paneEl) return null
+      const idx = [...document.querySelectorAll('.pane')].indexOf(paneEl)
+      const pane = cfgRef.current?.panes[idx]
+      return pane?.tabs[pane.active]?.path
+    }
+    const transferMode = (dest, paths) => {
+      const volOf = (p) => p.match(/^\/Volumes\/[^/]+/)?.[0] || '/'
+      return paths.every((p) => volOf(p) === volOf(dest)) ? 'move' : 'copy'
+    }
+    const flashDone = (row) => {
+      if (!live || !row?.isConnected) return
+      clearTimeout(doneTimers.get(row))
+      row.classList.remove('drop-done')
+      // 连续投放到同一行时，重新开始确认动画。
+      void row.offsetWidth
+      row.classList.add('drop-done')
+      doneTimers.set(row, setTimeout(() => {
+        row.classList.remove('drop-done')
+        doneTimers.delete(row)
+      }, 300))
+    }
     const highlightRow = (row) => {
       if (row === highlightedRow) return
       highlightedRow?.classList.remove('native-drop-target')
@@ -456,10 +481,13 @@ export default function App() {
       highlightedRow?.classList.add('native-drop-target')
       if (row) {
         const rect = row.getBoundingClientRect()
+        const dest = paneDestination(row)
+        const tipWidth = Math.min(420, window.innerWidth - 24)
         setHoverTip({
-          x: rect.left + rect.width / 2,
-          y: rect.top - 8,
-          name: row.querySelector('.name')?.textContent || '',
+          x: Math.max(12 + tipWidth / 2, Math.min(window.innerWidth - 12 - tipWidth / 2, rect.left + rect.width / 2)),
+          y: Math.max(44, rect.top - 8),
+          // 保留原生 drop 的现有语义：窗格目录接收文件，侧边栏添加书签。
+          text: dest ? `${transferMode(dest, dragPaths) === 'move' ? '移动' : '拷贝'}到「${basename(dest) || dest}」` : '添加到书签',
         })
       } else {
         setHoverTip(null)
@@ -470,17 +498,22 @@ export default function App() {
       const { type, position } = ev.payload
       if (type === 'cancelled' || type === 'leave') {
         highlightRow(null)
+        dragPaths = []
         return
       }
       if (type === 'enter' || type === 'over') {
+        if (type === 'enter') dragPaths = ev.payload.paths || []
         const ratio = window.devicePixelRatio || 1
-        const row = document.elementFromPoint(position.x / ratio, position.y / ratio)?.closest('.row')
+        const el = document.elementFromPoint(position.x / ratio, position.y / ratio)
+        const row = el?.closest('.row')
+        const bookmark = el?.closest('.sb-item:not(.ws-item)')
         // 文件夹行带有展开按钮；普通文件与窗格空白不作为高亮目标。
-        highlightRow(row?.querySelector('.disclosure') ? row : null)
+        highlightRow(bookmark || (row?.querySelector('.disclosure') ? row : null))
         return
       }
       if (type !== 'drop') return
       highlightRow(null)
+      dragPaths = []
       const { paths } = ev.payload
       if (!paths?.length) return
       const ratio = window.devicePixelRatio || 1
@@ -496,21 +529,24 @@ export default function App() {
         return
       }
       // 命中窗格 → 传入文件/移动
-      const paneEl = el.closest('.pane')
-      if (!paneEl) return
-      const idx = [...document.querySelectorAll('.pane')].indexOf(paneEl)
-      if (idx === -1) return
-      const dest = cfgRef.current.panes[idx]?.tabs[cfgRef.current.panes[idx].active]?.path
+      const dest = paneDestination(el)
       if (!dest) return
-      const volOf = (p) => p.match(/^\/Volumes\/[^/]+/)?.[0] || '/'
-      const sameVol = paths.every((p) => volOf(p) === volOf(dest))
       // 同卷移动、跨卷复制（Finder 惯例）；来自 Finder 的外部文件默认复制
-      const mode = sameVol ? 'move' : 'copy'
-      transferInto(dest, paths, mode)
+      const mode = transferMode(dest, paths)
+      const row = el.closest('.row')
+      const target = row?.querySelector('.disclosure') ? row : null
+      transferInto(dest, paths, mode, () => {
+        if (target?.isConnected && paneDestination(target) === dest) flashDone(target)
+      })
     })
     return () => {
       live = false
       highlightRow(null)
+      for (const [row, timer] of doneTimers) {
+        clearTimeout(timer)
+        row.classList.remove('drop-done')
+      }
+      doneTimers.clear()
       un.then((f) => f()).catch(() => {})
     }
   }, [])
@@ -640,7 +676,7 @@ export default function App() {
     if (bad.length) alert(bad.map((b) => `${basename(b.source)}: ${b.error}`).join('\n'))
   }
 
-  const transferInto = async (dest, paths, mode) => {
+  const transferInto = async (dest, paths, mode, onSuccess) => {
     if (!paths?.length) return
     modeRef.current = mode
     try {
@@ -648,6 +684,7 @@ export default function App() {
       reportErrors(results)
       // 记录成功的操作供 ⌘Z 撤销
       const ok = (results || []).filter((r) => r.ok)
+      if (ok.length === paths.length) onSuccess?.()
       if (mode === 'move' && ok.length) {
         const moves = ok
         pushUndo(
@@ -1256,7 +1293,7 @@ export default function App() {
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
       {hoverTip && (
         <div className="drag-tip" style={{ left: hoverTip.x, top: hoverTip.y }}>
-          移动到「{hoverTip.name}」
+          {hoverTip.text}
         </div>
       )}
       {undoToast && (

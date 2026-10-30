@@ -214,26 +214,6 @@ export default function SearchOverlay({
     }
   }, [open, query, scope, root, showHidden, searchPaths, mode])
 
-  // 内容模式：选中结果变化 → 读取文件内容预览
-  useEffect(() => {
-    if (mode !== 'content' || !open) return
-    const item = sorted[selIdx]
-    if (!item) {
-      setPreview(null)
-      return
-    }
-    let live = true
-    firstHitRef.current = null
-    setPreview({ loading: true, path: item.path, name: item.name })
-    api
-      .readTextPreview(item.path, query)
-      .then((d) => live && setPreview({ ...d, path: item.path, name: item.name }))
-      .catch(() => live && setPreview({ kind: 'error', text: '', matchLines: [], path: item.path, name: item.name }))
-    return () => {
-      live = false
-    }
-  }, [selIdx, results, mode, open, query])
-
   // 预览加载完成后滚动到第一处命中
   useEffect(() => {
     if (preview && !preview.loading && preview.kind === 'text' && preview.matchLines.length) {
@@ -327,6 +307,27 @@ export default function SearchOverlay({
     else if (sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
     return arr // score：保持引擎返回的相关度顺序
   }, [results, sortBy, format])
+
+  // 内容模式：选中结果变化 → 读取文件内容预览
+  useEffect(() => {
+    if (mode !== 'content' || !open) return
+    const item = sorted[selIdx]
+    if (!item) {
+      setPreview(null)
+      return
+    }
+    let live = true
+    firstHitRef.current = null
+    setPreview({ loading: true, path: item.path, name: item.name })
+    api
+      .readTextPreview(item.path, query)
+      .then((d) => live && setPreview({ ...d, path: item.path, name: item.name }))
+      .catch(() => live && setPreview({ kind: 'error', text: '', matchLines: [], path: item.path, name: item.name }))
+    return () => {
+      live = false
+    }
+  }, [selIdx, sorted, mode, open, query])
+
 
   const menuItems = (item) => [
     { label: '打开', action: () => choose(item) },
