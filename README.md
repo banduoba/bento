@@ -1,6 +1,8 @@
-# Bento 🍱
+<img src="app-icon.png" height="56" align="top" alt="Bento icon">
 
-Bento（便当）—— 轻量多窗格文件管理器（macOS）。多窗格如便当分格，各归其位。QSpace 的开源简化复刻。
+# Bento
+
+Bento —— 轻量多窗格文件管理器（macOS）。多窗格如便当分格，各归其位。QSpace 的开源简化复刻。
 
 A lightweight multi-pane file manager for macOS, inspired by QSpace.
 
