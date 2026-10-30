@@ -148,6 +148,34 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{}-{}", name, std::process::id()))
 }
 
+/// 拷贝/移动时目标重名的命名：「name 副本.ext」，再重名依次「name 副本1.ext」「name 副本2.ext」…
+/// 对已带「副本[N]」后缀的名字先去掉后缀再编号（「a 副本.txt」再拷 → 「a 副本1.txt」，而不是「a 副本 副本.txt」）
+fn copy_name_path(dir: &Path, name: &str) -> PathBuf {
+    let candidate = dir.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let base = match stem.rfind(" 副本") {
+        Some(i) if stem[i + " 副本".len()..].chars().all(|c| c.is_ascii_digit()) => &stem[..i],
+        _ => stem,
+    };
+    let first = dir.join(format!("{} 副本{}", base, ext));
+    if !first.exists() {
+        return first;
+    }
+    for i in 1..10000u32 {
+        let c = dir.join(format!("{} 副本{}{}", base, i, ext));
+        if !c.exists() {
+            return c;
+        }
+    }
+    dir.join(format!("{}-{}", name, std::process::id()))
+}
+
 fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
     if src.is_dir() {
         fs::create_dir_all(dst)?;
@@ -246,7 +274,7 @@ async fn transfer(
                     error: None,
                 }
             } else {
-                let dp = unique_path(&dest_dir, &name);
+                let dp = copy_name_path(&dest_dir, &name);
                 let res = if dp.starts_with(&sp) {
                     Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -1184,6 +1212,33 @@ mod preview_tests {
         let json = serde_json::to_value(TextPreview::empty("text")).unwrap();
         assert!(json.get("matchLines").is_some() && json.get("hiddenHits").is_some());
         assert!(json.get("match_lines").is_none());
+    }
+}
+
+#[cfg(test)]
+mod copy_name_tests {
+    use super::*;
+
+    #[test]
+    fn copies_get_副本_then_numbered() {
+        let d = std::env::temp_dir().join(format!("bento-copyname-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        let mk = |n: &str| fs::write(d.join(n), "x").unwrap();
+        let name = |p: PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+        mk("a.txt");
+        assert_eq!(name(copy_name_path(&d, "b.txt")), "b.txt"); // 不重名原样
+        assert_eq!(name(copy_name_path(&d, "a.txt")), "a 副本.txt");
+        mk("a 副本.txt");
+        assert_eq!(name(copy_name_path(&d, "a.txt")), "a 副本1.txt");
+        mk("a 副本1.txt");
+        assert_eq!(name(copy_name_path(&d, "a.txt")), "a 副本2.txt");
+        // 拷贝一个已是副本的文件：不叠加「副本 副本」
+        assert_eq!(name(copy_name_path(&d, "a 副本.txt")), "a 副本2.txt");
+        // 无扩展名 / 文件夹
+        fs::create_dir_all(d.join("dir")).unwrap();
+        assert_eq!(name(copy_name_path(&d, "dir")), "dir 副本");
+        let _ = fs::remove_dir_all(&d);
     }
 }
 

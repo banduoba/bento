@@ -90,3 +90,10 @@
 - 「种类」由前端扩展名表映射（`format.js::kindOf`），查不到显示「XXX 文件」。
 - 压缩：`ditto` 一次只能压缩一个源（报 `Can't archive multiple sources`）。多选改为：临时目录里建符号链接 → `zip -r`（不加 `-y`，跟随链接存真实内容）；单个源仍用 `ditto --keepParent`。有回归测试 `zip_tests`。
 - 调试 UI 的快办法：`npx vite --port N` 后用 headless Chrome 打开（api.js 有 mock 数据），`emulate({viewport})` 调宽度，`page.mouse` 右键/拖拽；比 macOS 辅助功能自动化稳定（系统权限还可能丢）。
+
+## 15. 对齐 QSpace：列顺序/默认列、中间省略、相对日期、副本命名
+- 列顺序：名称 | 修改日期 | 创建日期 | 大小 | 种类；默认显示 修改日期/大小/种类，创建日期按需右键勾选。默认宽度压到 130/72/104，名称最小 160，所以 ~600px 的窗格能同时放下三列。
+- 旧配置迁移：窗格带 `colsVersion`，<2 的旧列设置（当时默认「全显示」）直接丢弃套用新默认；之后只要用户改过就写 `colsVersion: 2`。以后再改默认列要继续升版本号。
+- 文件名中间省略：拆成「前段 + 末段」两个 span，前段 `overflow:hidden; text-overflow:ellipsis`、末段 `flex:none`，纯 CSS 就能得到 `前面…后面.ext`；末段 = 扩展名+5 字符，至少 8 字符、至少 30% 名长；用 `Array.from` 按字符切避免劈开 emoji。容器要 `overflow:hidden`，否则窄列时末段会溢出盖住下一列。
+- 日期与 QSpace 一致：今天/昨天只显示 `今天 10:16`，其余 `2026/9/25 00:07`（月日不补零）。
+- 拷贝/移动重名命名（Rust `copy_name_path`）：`name 副本.ext` → `name 副本1.ext` → `name 副本2.ext`…；对已带「副本[N]」的名字先去掉后缀再编号，不叠加「副本 副本」。只用于拷贝/移动（`transfer`）；压缩包、新建文件夹、废纸篓仍用 `unique_path`（`name 2`）。有单测 `copy_name_tests`。

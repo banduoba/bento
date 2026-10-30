@@ -774,6 +774,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   display: flex;
   flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
   white-space: nowrap;
 }
 .row-name .name-stem { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
