@@ -282,52 +282,45 @@ async fn transfer(
     .map_err(|e| e.to_string())?
 }
 
-/// 回退废纸篓：native 失败（外置/他人卷无 .Trashes）时，
-/// 把文件移入 Bento 自己的回收站目录（可从该目录找回）
-fn bento_trash_fallback(p: &str, app_dir: &Path) -> Result<(), String> {
-    let src = Path::new(p);
-    let name = src
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "file".into());
-    let trash_dir = app_dir.join("Trash");
-    fs::create_dir_all(&trash_dir).map_err(|e| format!("创建回收站目录失败: {}", e))?;
-    let dest = unique_path(&trash_dir, &name);
-    do_transfer(src, &dest, "move").map_err(|e| format!("移入 Bento 回收站失败: {}", e))?;
-    Ok(())
+/// 自管废纸篓：主盘文件移入 ~/.Trash（与 Finder 一致），挂载卷/其他用户目录
+/// 移入 Bento 回收站（应用数据目录）。返回原始位置与实际废纸篓位置，供 ⌘Z 撤销。
+#[derive(Serialize, Clone)]
+struct TrashEntry {
+    original: String,
+    trashed: String,
+}
+
+fn bento_trash_dir(app_dir: &Path) -> std::path::PathBuf {
+    app_dir.join("Trash")
 }
 
 #[tauri::command]
-async fn trash(paths: Vec<String>, app: AppHandle) -> Result<Vec<String>, String> {
-    let app_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?;
-    let mut used_fallback = Vec::new();
+async fn trash(paths: Vec<String>, app: AppHandle) -> Result<Vec<TrashEntry>, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let home = std::env::var("HOME").unwrap_or_default();
-    // 与 QSpace 一致的体验：授予「完全磁盘访问权限」后走系统废纸篓（含"放回"能力）；
-    // 未授权时，主目录之外的路径（挂载卷/其他用户目录）受 TCC 门控，原生废纸篓会弹密码框
-    // 且必然失败 → 直接移入 Bento 回收站（应用数据目录，可找回），全程无弹窗
-    let fda = fsearch::has_full_disk_access();
+    let mut entries = Vec::new();
     for p in &paths {
-        let outside_home = !home.is_empty() && !p.starts_with(home.as_str());
-        if p.starts_with("/Volumes/") || (!fda && outside_home) {
-            bento_trash_fallback(p, &app_dir)
-                .map_err(|fe| format!("移到废纸篓失败: {}", fe))?;
-            used_fallback.push(basename_of(p));
-            continue;
-        }
-        if let Err(e) = trash::delete(p) {
-            bento_trash_fallback(p, &app_dir)
-                .map_err(|fe| format!("移到废纸篓失败: {}；{}", e, fe))?;
-            used_fallback.push(basename_of(p));
-        }
+        let src = Path::new(p);
+        let name = src
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "file".into());
+        // 主盘（home 内）→ ~/.Trash；否则 → Bento 回收站（该卷可能无可写 .Trashes）
+        let in_home = !home.is_empty() && p.starts_with(home.as_str());
+        let trash_root = if in_home {
+            PathBuf::from(&home).join(".Trash")
+        } else {
+            bento_trash_dir(&app_dir)
+        };
+        fs::create_dir_all(&trash_root).map_err(|e| format!("创建废纸篓目录失败: {}", e))?;
+        let dest = unique_path(&trash_root, &name);
+        do_transfer(src, &dest, "move").map_err(|e| format!("移到废纸篓失败: {}", e))?;
+        entries.push(TrashEntry {
+            original: p.clone(),
+            trashed: dest.to_string_lossy().into_owned(),
+        });
     }
-    if used_fallback.is_empty() {
-        Ok(Vec::new())
-    } else {
-        Ok(used_fallback)
-    }
+    Ok(entries)
 }
 
 fn basename_of(p: &str) -> String {
