@@ -302,10 +302,14 @@ async fn trash(paths: Vec<String>, app: AppHandle) -> Result<Vec<String>, String
         .app_data_dir()
         .map_err(|e| e.to_string())?;
     let mut used_fallback = Vec::new();
+    let home = std::env::var("HOME").unwrap_or_default();
+    // 与 QSpace 一致的体验：授予「完全磁盘访问权限」后走系统废纸篓（含"放回"能力）；
+    // 未授权时，主目录之外的路径（挂载卷/其他用户目录）受 TCC 门控，原生废纸篓会弹密码框
+    // 且必然失败 → 直接移入 Bento 回收站（应用数据目录，可找回），全程无弹窗
+    let fda = fsearch::has_full_disk_access();
     for p in &paths {
-        // 挂载卷（/Volumes/...）通常没有可写的 .Trashes：原生废纸篓会弹密码框且必然失败，
-        // 直接移入 Bento 回收站（应用数据目录，可找回）
-        if p.starts_with("/Volumes/") {
+        let outside_home = !home.is_empty() && !p.starts_with(home.as_str());
+        if p.starts_with("/Volumes/") || (!fda && outside_home) {
             bento_trash_fallback(p, &app_dir)
                 .map_err(|fe| format!("移到废纸篓失败: {}", fe))?;
             used_fallback.push(basename_of(p));
