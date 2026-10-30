@@ -105,6 +105,7 @@ export default function Pane({
   const [copyToast, setCopyToast] = useState(null) // { path, x, y, placeLeft } 锚定按钮的提示条
   const [expandedDirs, setExpandedDirs] = useState(() => new Set()) // 树形展开的文件夹
   const [kidsVersion, setKidsVersion] = useState(0)
+  const [activity, setActivity] = useState({}) // dirPath -> 递归活动时间(ms)，后台懒加载
   const kidsRef = useRef({}) // dirPath -> 子条目数组（null=载入中）
   const copyTimer = useRef(null)
   const toastTimer = useRef(null)
@@ -288,8 +289,11 @@ export default function Pane({
     if (match) return sortEntries(base.filter((e) => match(e.name)), tab.sortKey, tab.sortDir)
     // 树形展开：已展开文件夹的子条目就地插入
     const build = (list, depth) => {
+      const withTimes = list.map((e) =>
+        e.is_dir && activity[e.path] != null ? { ...e, mtime_ms: activity[e.path], btime_ms: activity[e.path] } : e
+      )
       const out = []
-      for (const e of sortEntries(list, tab.sortKey, tab.sortDir)) {
+      for (const e of sortEntries(withTimes, tab.sortKey, tab.sortDir)) {
         out.push({ ...e, depth })
         if (e.is_dir && expandedDirs.has(e.path)) {
           const kids = kidsRef.current[e.path]
@@ -301,7 +305,7 @@ export default function Pane({
       return out
     }
     return build(base, 0)
-  }, [entries, filter, tab.sortKey, tab.sortDir, expandedDirs, kidsVersion])
+  }, [entries, filter, tab.sortKey, tab.sortDir, expandedDirs, kidsVersion, activity])
   rowsRef.current = rows
 
   const entryMap = useMemo(() => {
@@ -314,6 +318,34 @@ export default function Pane({
   useEffect(() => {
     onRowsCache(tab.id, rows.filter((r) => !r.isPseudo))
   }, [rows, tab.id])
+
+  // 目录活动时间：后台递归计算（限预算），完成后按活动时间重排
+  useEffect(() => {
+    if (!entries?.length) return
+    const dirs = entries.filter((e) => e.is_dir).map((e) => e.path).slice(0, 200)
+    if (!dirs.length) return
+    let live = true
+    api
+      .dirActivity(dirs)
+      .then((list) => {
+        if (!live || !list?.length) return
+        setActivity((prev) => {
+          const next = { ...prev }
+          let changed = false
+          for (const d of list) {
+            if (next[d.path] !== d.mtime_ms) {
+              next[d.path] = d.mtime_ms
+              changed = true
+            }
+          }
+          return changed ? next : prev
+        })
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
+  }, [entries, tick])
 
   // 搜索定位：行就绪后选中目标并滚动到可见处
   useEffect(() => {

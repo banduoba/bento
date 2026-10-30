@@ -1048,6 +1048,89 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
   gap: 10px;
   margin-top: 14px;
 }
+/* 分区式批量重命名面板 */
+.batch-rename-dialog {
+  width: 640px;
+  max-height: calc(88vh - 24px);
+  overflow-y: auto;
+  padding: 0;
+}
+.batch-rename-header { padding: 22px 24px 18px; }
+.batch-rename-header .modal-title { margin: 0; text-align: left; font-size: 16px; }
+.batch-rename-header p { margin-top: 6px; font-size: 12px; color: var(--text-2); }
+.batch-rename-modes {
+  display: flex;
+  gap: 3px;
+  margin: 0 24px 18px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--fill-bg);
+}
+.batch-rename-modes .seg-btn { flex: 1; padding: 7px 8px; font-size: 12px; }
+.batch-rename-controls {
+  min-height: 174px;
+  padding: 18px 24px;
+  border-top: 1px solid var(--border);
+}
+.batch-rename-inputs { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.batch-rename-field { display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--text-2); }
+.batch-rename-field input, .batch-rename-number input {
+  min-width: 0;
+  width: 100%;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  outline: none;
+  background: var(--control-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 9px 11px;
+  transition: border-color var(--ui-duration) var(--ui-ease), box-shadow var(--ui-duration) var(--ui-ease);
+}
+.batch-rename-field input:focus, .batch-rename-number input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.18);
+}
+.batch-rename-options { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px; margin-top: 16px; }
+.batch-rename-option, .batch-rename-number, .batch-rename-date {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.batch-rename-segments { display: flex; gap: 2px; padding: 3px; background: var(--fill-bg); border-radius: 8px; }
+.batch-rename-segments .seg-btn { padding: 5px 10px; }
+.batch-rename-case .seg-btn { flex: 1; padding: 9px 10px; font-size: 12px; }
+.batch-rename-number input { width: 64px; padding: 5px 7px; font-variant-numeric: tabular-nums; }
+.batch-rename-date { margin-left: auto; color: var(--text); cursor: pointer; }
+.batch-rename-date input { width: 14px; height: 14px; accent-color: var(--accent); }
+.batch-rename-note { margin-top: 12px; color: var(--text-2); font-size: 11.5px; line-height: 1.5; }
+.batch-rename-preview { border-top: 1px solid var(--border); padding: 16px 24px 8px; background: var(--soft-bg); }
+.batch-rename-preview-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.batch-rename-preview-heading h3 { font-size: 12px; font-weight: 600; }
+.batch-rename-preview-heading > span { font-size: 11px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.batch-rename-columns, .batch-rename-dialog .preview-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr);
+  gap: 10px;
+}
+.batch-rename-columns { padding: 0 0 6px; color: var(--text-2); font-size: 11px; }
+.batch-rename-dialog .modal-preview { border: 0; padding: 0; margin: 0; }
+.batch-rename-dialog .preview-line { padding: 6px 0; border-top: 1px solid var(--result-border); }
+.batch-rename-dialog .preview-line > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.batch-rename-dialog .preview-line .arrow { text-align: center; }
+.batch-rename-validation { min-height: 24px; padding-top: 6px; }
+.batch-rename-dialog .modal-error { margin: 0; line-height: 1.5; }
+.batch-rename-dialog .modal-footer { margin: 0; padding: 14px 24px; border-top: 1px solid var(--border); }
+
+@media (max-width: 560px) {
+  .batch-rename-header, .batch-rename-controls, .batch-rename-preview { padding-left: 16px; padding-right: 16px; }
+  .batch-rename-modes { margin-left: 16px; margin-right: 16px; flex-wrap: wrap; }
+  .batch-rename-modes .seg-btn { flex-basis: 40%; }
+  .batch-rename-inputs { grid-template-columns: minmax(0, 1fr); }
+}
+
 .btn {
   font: inherit;
   font-size: 13px;
@@ -1175,6 +1258,15 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
   border-bottom: 1px solid var(--border);
   background: var(--soft-bg);
 }
+.search-formats {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.search-formats .seg-btn { padding: 3px 9px; font-size: 11px; }
 .search-status { flex: 1; min-width: 180px; }
 .search-count { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
 .search-syntax { color: var(--text-2); }
@@ -1423,22 +1515,34 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .tb-group.disabled { opacity: 0.5; pointer-events: none; }
 
 /* 撤销提示条 */
-.undo-toast {
+.undo-toast, .drag-tip {
   position: fixed;
+  z-index: 210;
+  background: rgba(28, 28, 32, 0.94);
+  color: #f2f2f6;
+  font-size: 12.5px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.32);
+}
+.undo-toast {
   bottom: 40px;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 210;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 8px 16px;
   border-radius: 10px;
-  background: rgba(28, 28, 32, 0.94);
-  color: #f2f2f6;
-  font-size: 12.5px;
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.32);
   animation: toastIn 140ms ease-out;
+}
+.drag-tip {
+  transform: translate(-50%, -100%);
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 7px 13px;
+  border-radius: 999px;
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .undo-toast b { font-weight: 600; max-width: 260px; display: inline-block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
 .undo-btn {

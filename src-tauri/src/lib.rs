@@ -738,6 +738,68 @@ async fn log_debug(msg: String) {
     eprintln!("[webview] {msg}");
 }
 
+#[derive(Serialize, Clone)]
+struct DirActivity {
+    path: String,
+    mtime_ms: f64,
+}
+
+/// 递归计算目录「活动时间」：自身与全部子孙条目的最新修改时间。
+/// 限时预算（默认 400ms/目录）+ 条目上限，防止巨型目录卡住。
+#[tauri::command]
+async fn dir_activity(paths: Vec<String>, budget_ms: Option<u64>) -> Result<Vec<DirActivity>, String> {
+    let budget = std::time::Duration::from_millis(budget_ms.unwrap_or(400));
+    tauri::async_runtime::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        let mut out = Vec::new();
+        for p in &paths {
+            let root = Path::new(p);
+            let mut max = fs::metadata(root)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as f64)
+                .unwrap_or(0.0);
+            let mut stack = vec![root.to_path_buf()];
+            let mut visited = 0usize;
+            while let Some(dir) = stack.pop() {
+                if start.elapsed() > budget || visited > 20000 {
+                    break;
+                }
+                if let Ok(rd) = fs::read_dir(&dir) {
+                    for e in rd.filter_map(|e| e.ok()) {
+                        visited += 1;
+                        if visited > 20000 {
+                            break;
+                        }
+                        if let Ok(md) = e.metadata() {
+                            if let Ok(t) = md.modified() {
+                                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                                    let ms = d.as_millis() as f64;
+                                    if ms > max {
+                                        max = ms;
+                                    }
+                                }
+                            }
+                            // 不跟随符号链接，防循环
+                            if md.is_dir() {
+                                stack.push(e.path());
+                            }
+                        }
+                    }
+                }
+            }
+            out.push(DirActivity {
+                path: p.clone(),
+                mtime_ms: max,
+            });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 文件内容搜索（fsearch grep 三词索引）
 #[tauri::command]
 async fn search_content(
@@ -973,6 +1035,7 @@ pub fn run() {
             make_file,
             search,
             search_content,
+            dir_activity,
             copy_files_to_clipboard,
             open_privacy_settings,
             disk_space,

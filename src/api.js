@@ -20,6 +20,7 @@ export const api = hasTauri
       copyFilesToClipboard: (paths) => invoke('copy_files_to_clipboard', { paths }),
       openPrivacySettings: () => invoke('open_privacy_settings'),
       fsearchStatus: () => invoke('fsearch_status'),
+      dirActivity: (paths) => invoke('dir_activity', { paths }),
       diskSpace: (path) => invoke('disk_space', { path }),
       homeDir: () => invoke('home_dir'),
       loadConfig: () => invoke('load_config'),
@@ -159,6 +160,8 @@ function mockApi() {
       )
     },
     fsearchStatus: () => Promise.resolve({ ready: true, entries: 0, full_disk_access: true }),
+    dirActivity: (paths) =>
+      Promise.resolve(paths.map((p) => ({ path: p, mtime_ms: Date.now() - Math.random() * 1e8 }))),
     // mock 与真实保持同签名
     diskSpace: () => Promise.resolve(500e9),
     homeDir: () => Promise.resolve('/Users/demo'),
