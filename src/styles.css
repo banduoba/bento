@@ -610,6 +610,26 @@ input, textarea {
   letter-spacing: 0.2px;
 }
 
+/* 行内复制路径按钮：悬停行时出现在名字后 */
+.row-copy {
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  visibility: hidden;
+  flex: none;
+  padding: 0;
+}
+.row:hover .row-copy { visibility: visible; }
+.row-copy:hover { background: rgba(0, 0, 0, 0.09); color: var(--text); }
+.row-copy.copied { visibility: visible; color: var(--accent); }
+
 .rename-input {
   font: inherit;
   border: 1.5px solid var(--accent);

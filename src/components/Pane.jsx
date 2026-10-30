@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { api, fileSrc } from '../api'
-import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher } from '../format'
-import { IconArrowUp, IconChevronLeft, IconChevronRight, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
+import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher, copyText } from '../format'
+import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
 
 const MIME = 'application/x-bento'
 
@@ -71,6 +71,8 @@ export default function Pane({
   const [dropTarget, setDropTarget] = useState(null) // 'bg' | 文件夹路径
   const [editingPath, setEditingPath] = useState(null) // 非空 = 地址栏编辑中
   const [collapsedCount, setCollapsedCount] = useState(0) // 面包屑溢出时折叠的前置层级数
+  const [copiedPath, setCopiedPath] = useState(null) // 行内复制路径反馈
+  const copyTimer = useRef(null)
   const [moreMenu, setMoreMenu] = useState(null) // { x, y, segs } 折叠层级的悬停列表
   const moreTimer = useRef(null)
   const anchorRef = useRef(null)
@@ -605,7 +607,25 @@ export default function Pane({
                         draggable={false}
                       />
                     ) : (
-                      <span className="name">{entry.name}</span>
+                      <>
+                        <span className="name">{entry.name}</span>
+                        <button
+                          className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
+                          title="复制路径"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          draggable={false}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            copyText(entry.path)
+                            setCopiedPath(entry.path)
+                            clearTimeout(copyTimer.current)
+                            copyTimer.current = setTimeout(() => setCopiedPath(null), 1200)
+                          }}
+                        >
+                          {copiedPath === entry.path ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                        </button>
+                      </>
                     )}
                   </div>
                   <span className="row-size">{entry.is_dir ? '--' : fmtSize(entry.size)}</span>

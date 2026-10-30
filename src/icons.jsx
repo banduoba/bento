@@ -55,6 +55,12 @@ export const IconChevronDown = (p) => (
 export const IconPencil = (p) => (
   <svg {...S(p)}><path d="M4 20h4L19.5 8.5a2.12 2.12 0 0 0-3-3L5 17z" /><path d="m13.5 6.5 3 3" /></svg>
 )
+export const IconCopy = (p) => (
+  <svg {...S(p)}><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5.5 15H5a1.5 1.5 0 0 1-1.5-1.5v-8A1.5 1.5 0 0 1 5 4h8A1.5 1.5 0 0 1 14.5 5.5V6" /></svg>
+)
+export const IconCheck = (p) => (
+  <svg {...S(p)}><path d="m5 12.5 4.5 4.5L19 7" /></svg>
+)
 export const IconFolder = (p) => (
   <svg width={p.size || 26} height={p.size || 26} viewBox="0 0 24 24">
     <path
