@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { startDrag } from '@crabnebula/tauri-plugin-drag'
+const trace = (m) => window.__TAURI_INTERNALS__
+  ? window.__TAURI_INTERNALS__.invoke('append_trace_log', { msg: m }).catch(() => {})
+  : Promise.resolve()
 import singleDragPreview from '../assets/drag/1.png?inline'
 import singleFileDragPreview from '../assets/drag/1-file.png?inline'
 import multipleDragPreview from '../assets/drag/n.png?inline'

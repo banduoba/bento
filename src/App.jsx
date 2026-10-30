@@ -17,7 +17,10 @@ import { IconEye, IconEyeOff, IconSearch, IconChevronDown, IconSettings } from '
 const MIME = 'application/x-bento'
 
 // 调试埋点：写进 dev 日志（stderr）
-const trace = (m) => invoke('log_debug', { msg: m }).catch(() => {})
+const trace = (m) => {
+  invoke('append_trace_log', { msg: m }).catch(() => {})
+  invoke('log_debug', { msg: m }).catch(() => {})
+}
 
 // 输入框文本编辑辅助（无系统编辑菜单时 WKWebView 输入框原生 ⌘C/⌘V 失效）
 function applyInputValue(el, value, selStart, selEnd) {
