@@ -164,7 +164,7 @@ Hard-won implementation notes — coordinate systems for native drops, a window-
 
 ## Status & limitations
 
-Bento is young software (`0.1.0`). Know before you use it:
+Bento is young software (`0.2.0`). Know before you use it:
 
 - The interface is currently **Simplified Chinese only**.
 - Apple Silicon on a recent macOS is the tested configuration; Intel Macs are untested.
