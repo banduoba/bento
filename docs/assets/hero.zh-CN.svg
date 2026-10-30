@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="Bento — 轻量快速的 macOS 多窗格文件管理器">
+  <title>Bento</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0A1530"/><stop offset="1" stop-color="#16326B"/></linearGradient>
+    <radialGradient id="glowO" cx="0.85" cy="0.95" r="0.55"><stop offset="0" stop-color="#F0A050" stop-opacity="0.38"/><stop offset="1" stop-color="#F0A050" stop-opacity="0"/></radialGradient>
+    <radialGradient id="glowB" cx="0.1" cy="0.05" r="0.6"><stop offset="0" stop-color="#4A9BF7" stop-opacity="0.35"/><stop offset="1" stop-color="#4A9BF7" stop-opacity="0"/></radialGradient>
+    <linearGradient id="icon" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4C9CF8"/><stop offset="1" stop-color="#2456BE"/></linearGradient>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E88F5E"/><stop offset="1" stop-color="#F1B352"/></linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#FFFFFF" stroke-opacity="0.05"/></pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#000000" flood-opacity="0.45"/></filter>
+  </defs>
+  <rect width="1280" height="420" rx="22" fill="url(#bg)"/>
+  <rect width="1280" height="420" rx="22" fill="url(#grid)"/>
+  <rect width="1280" height="420" rx="22" fill="url(#glowB)"/>
+  <rect width="1280" height="420" rx="22" fill="url(#glowO)"/>
+  <!-- app icon -->
+  <g transform="translate(88,104)" filter="url(#shadow)">
+    <rect width="176" height="176" rx="40" fill="url(#icon)"/>
+    <rect x="28" y="34" width="120" height="108" rx="12" fill="#FFFFFF"/>
+    <rect x="40" y="48" width="44" height="36" rx="6" fill="url(#tile)"/>
+    <rect x="92" y="48" width="44" height="36" rx="6" fill="#E6E6E6"/>
+    <rect x="40" y="92" width="44" height="36" rx="6" fill="#E6E6E6"/>
+    <rect x="92" y="92" width="44" height="36" rx="6" fill="#E6E6E6"/>
+  </g>
+  <!-- text -->
+  <text x="300" y="196" font-family="-apple-system, 'SF Pro Display', 'Helvetica Neue', 'PingFang SC', Arial, sans-serif" font-size="88" font-weight="800" fill="#FFFFFF" letter-spacing="-2">Bento</text>
+  <text x="302" y="244" font-family="-apple-system, 'SF Pro Display', 'Helvetica Neue', 'PingFang SC', Arial, sans-serif" font-size="24" font-weight="500" fill="#E4ECFF">轻量快速的 macOS 多窗格文件管理器</text>
+  <text x="302" y="280" font-family="-apple-system, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC', Arial, sans-serif" font-size="17" fill="#9FB3DD">Rust 驱动 · 键盘优先 · 原生拖拽 · 即时搜索</text>
+  <g font-family="-apple-system, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC', Arial, sans-serif">
+<g transform="translate(300,318)"><rect width="90" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.09" stroke="#FFFFFF" stroke-opacity="0.18"/><text x="45.0" y="22.5" text-anchor="middle" font-size="15" font-weight="600" fill="#DCE6FF">多窗格</text></g>
+<g transform="translate(402,318)"><rect width="90" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.09" stroke="#FFFFFF" stroke-opacity="0.18"/><text x="45.0" y="22.5" text-anchor="middle" font-size="15" font-weight="600" fill="#DCE6FF">标签页</text></g>
+<g transform="translate(504,318)"><rect width="90" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.09" stroke="#FFFFFF" stroke-opacity="0.18"/><text x="45.0" y="22.5" text-anchor="middle" font-size="15" font-weight="600" fill="#DCE6FF">工作区</text></g>
+<g transform="translate(606,318)"><rect width="108" height="34" rx="17" fill="#FFFFFF" fill-opacity="0.09" stroke="#FFFFFF" stroke-opacity="0.18"/><text x="54.0" y="22.5" text-anchor="middle" font-size="15" font-weight="600" fill="#DCE6FF">即时搜索</text></g>
+  </g>
+  <!-- window schematic -->
+  <g transform="translate(872,96) scale(0.84)" filter="url(#shadow)">
+    <rect width="420" height="280" rx="16" fill="#E9EEF8"/>
+    <circle cx="22" cy="20" r="5.5" fill="#FF5F57"/><circle cx="40" cy="20" r="5.5" fill="#FEBC2E"/><circle cx="58" cy="20" r="5.5" fill="#28C840"/>
+    <rect x="14" y="40" width="194" height="112" rx="10" fill="#FFFFFF" fill-opacity="0.96"/><rect x="14" y="40" width="194" height="112" rx="10" fill="none" stroke="#4A9BF7" stroke-width="3"/><rect x="26" y="52" width="87.3" height="8" rx="4" fill="#C9D3E6"/><rect x="26" y="76" width="14" height="14" rx="4" fill="#4A8FEA"/><rect x="48" y="79" width="69.84" height="8" rx="4" fill="#DDE4F2"/><rect x="154" y="79" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="26" y="96" width="14" height="14" rx="4" fill="#9FB4D8"/><rect x="48" y="99" width="55.84" height="8" rx="4" fill="#DDE4F2"/><rect x="154" y="99" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="26" y="116" width="14" height="14" rx="4" fill="#9FB4D8"/><rect x="48" y="119" width="69.84" height="8" rx="4" fill="#DDE4F2"/><rect x="154" y="119" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="26" y="136" width="14" height="14" rx="4" fill="#4A8FEA"/><rect x="48" y="139" width="55.84" height="8" rx="4" fill="#DDE4F2"/><rect x="154" y="139" width="40" height="8" rx="4" fill="#E8ECF5"/>
+    <rect x="214" y="40" width="192" height="112" rx="10" fill="#FFFFFF" fill-opacity="0.96"/><rect x="226" y="52" width="86.4" height="8" rx="4" fill="#C9D3E6"/><rect x="226" y="76" width="14" height="14" rx="4" fill="#4A8FEA"/><rect x="248" y="79" width="69.12" height="8" rx="4" fill="#DDE4F2"/><rect x="352" y="79" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="226" y="96" width="14" height="14" rx="4" fill="#F3A15A"/><rect x="248" y="99" width="55.120000000000005" height="8" rx="4" fill="#DDE4F2"/><rect x="352" y="99" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="226" y="116" width="14" height="14" rx="4" fill="#9FB4D8"/><rect x="248" y="119" width="69.12" height="8" rx="4" fill="#DDE4F2"/><rect x="352" y="119" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="226" y="136" width="14" height="14" rx="4" fill="#4A8FEA"/><rect x="248" y="139" width="55.120000000000005" height="8" rx="4" fill="#DDE4F2"/><rect x="352" y="139" width="40" height="8" rx="4" fill="#E8ECF5"/>
+    <rect x="14" y="158" width="194" height="112" rx="10" fill="#FFFFFF" fill-opacity="0.96"/><rect x="26" y="170" width="87.3" height="8" rx="4" fill="#C9D3E6"/><rect x="26" y="194" width="14" height="14" rx="4" fill="#4A8FEA"/><rect x="48" y="197" width="69.84" height="8" rx="4" fill="#DDE4F2"/><rect x="154" y="197" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="26" y="214" width="14" height="14" rx="4" fill="#9FB4D8"/><rect x="48" y="217" width="55.84" height="8" rx="4" fill="#DDE4F2"/><rect x="154" y="217" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="26" y="234" width="14" height="14" rx="4" fill="#9FB4D8"/><rect x="48" y="237" width="69.84" height="8" rx="4" fill="#DDE4F2"/><rect x="154" y="237" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="26" y="254" width="14" height="14" rx="4" fill="#4A8FEA"/><rect x="48" y="257" width="55.84" height="8" rx="4" fill="#DDE4F2"/><rect x="154" y="257" width="40" height="8" rx="4" fill="#E8ECF5"/>
+    <rect x="214" y="158" width="192" height="112" rx="10" fill="#FFFFFF" fill-opacity="0.96"/><rect x="226" y="170" width="86.4" height="8" rx="4" fill="#C9D3E6"/><rect x="226" y="194" width="14" height="14" rx="4" fill="#4A8FEA"/><rect x="248" y="197" width="69.12" height="8" rx="4" fill="#DDE4F2"/><rect x="352" y="197" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="226" y="214" width="14" height="14" rx="4" fill="#9FB4D8"/><rect x="248" y="217" width="55.120000000000005" height="8" rx="4" fill="#DDE4F2"/><rect x="352" y="217" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="226" y="234" width="14" height="14" rx="4" fill="#9FB4D8"/><rect x="248" y="237" width="69.12" height="8" rx="4" fill="#DDE4F2"/><rect x="352" y="237" width="40" height="8" rx="4" fill="#E8ECF5"/><rect x="226" y="254" width="14" height="14" rx="4" fill="#4A8FEA"/><rect x="248" y="257" width="55.120000000000005" height="8" rx="4" fill="#DDE4F2"/><rect x="352" y="257" width="40" height="8" rx="4" fill="#E8ECF5"/>
+  </g>
+</svg>

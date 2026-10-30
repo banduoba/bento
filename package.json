@@ -2,7 +2,7 @@
   "name": "bento",
   "productName": "Bento",
   "version": "0.1.0",
-  "description": "Bento — 轻量多窗格文件管理器（QSpace 简化复刻）",
+  "description": "Bento — a lightweight multi-pane file manager for macOS",
   "private": true,
   "type": "module",
   "scripts": {

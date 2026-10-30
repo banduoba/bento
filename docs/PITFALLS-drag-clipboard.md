@@ -110,3 +110,8 @@
 - 需要 capability `core:window:allow-set-always-on-top`（`core:default` 不含），缺了会静默失败（已 trace）。
 - ⌥⌘T 用 `e.code === 'KeyT'` 判断：macOS 上 ⌥T 的 `e.key` 是 `†`。
 - 验证窗口层级不用 GUI 权限：`CGWindowListCopyWindowInfo` 看主窗口 `kCGWindowLayer`，置顶=5，普通=0。
+
+## 18. README 素材与一个由截图发现的显示 bug
+- README 用的是真实应用截图：造一个假 HOME（`HOME=/Users/Shared/demo ./bento`）隔离配置，预先写好 `config.json` 的窗格路径和 `.window-state.json` 的窗口大小，`touch -t`/`os.utime` 固定修改时间；用 `screencapture -l <窗口ID>` 截窗口（不需要辅助功能权限，被遮挡也能截；去掉 `-o` 带阴影）。窗口 ID 用 `CGWindowListCopyWindowInfo` 按 pid 查。
+- 对话框、列菜单等无法在真机里自动点出来的界面，用 `vite` + headless Chrome 的 mock 数据截图（`deviceScaleFactor: 2`，`page.screenshot({clip})`）。
+- 截图时发现文件名中间省略的 bug：`Meeting Notes.md` 显示成 `MeetingNotes.md`。原因是拆成「前段 + 末段」后，前段末尾的空格在 `white-space: nowrap` 下被折叠。修复：`.name-stem` / `.name-ext` 用 `white-space: pre`。
