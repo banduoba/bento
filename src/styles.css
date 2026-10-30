@@ -730,6 +730,11 @@ input, textarea {
 }
 .sb-item.native-drop-target::after,
 .sb-item.sb-drop::after { left: 8px; }
+/* 拖到窗格空白处：整窗格描边（目标 = 该窗格当前目录） */
+.pane.native-drop-target {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  z-index: 1;
+}
 
 .row.drop-done, .sb-item.drop-done {
   border-radius: 6px;
@@ -822,6 +827,10 @@ input, textarea {
   animation: toastIn 140ms ease-out;
 }
 .copy-toast.place-left { transform: translate(-100%, -50%); }
+/* 贴在文件行旁边的提示：文字从左往右读，不用 rtl 省略（rtl 用于长路径） */
+.row-toast { z-index: 220; }
+.row-toast .copy-toast-text { direction: ltr; }
+.row-toast.center { transform: translate(-50%, -50%); }
 .copy-toast svg { flex: none; color: #30d158; }
 .copy-toast-text {
   white-space: nowrap;

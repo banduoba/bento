@@ -127,6 +127,9 @@ version = "0.1.0"
 dependencies = [
  "fsearch",
  "libc",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "rayon",
  "regex",
  "serde",

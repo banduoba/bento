@@ -3,7 +3,7 @@ import { api, fileSrc } from '../api'
 import { fmtDate, fmtSize, isImage, extColor, copyText } from '../format'
 import { IconFolder, IconSearch } from '../icons'
 import ContextMenu from './ContextMenu'
-import { startDrag } from '@crabnebula/tauri-plugin-drag'
+import { makeDragPreview, runNativeDrag } from '../nativeDrag'
 
 const SCOPES = [
   { id: 'global', label: '全局' },
@@ -70,28 +70,22 @@ function SearchGuide({ noResults = false }) {
   )
 }
 
-// 文件名拆掉通配符与筛选语法；内容预览按原样关键词高亮。
-// 与 Rust readTextPreview 一致：空格拆词（AND），词含非字母数字字符时拆子片段（行须含全部子片段）
-function queryTermGroups(q) {
+// 内容预览高亮：与 Rust content_pattern/LineMatcher 一致——整串字面量（含 ':' 的词是过滤器，不参与；
+// 双引号去掉），不拆词，大小写不敏感（仅用于着色，命中行以后端 matchLines 为准）。
+function contentPattern(q) {
   return (q || '')
-    .trim()
     .split(/\s+/)
-    .filter(Boolean)
-    .map((w) => {
-      const lw = w.toLowerCase()
-      if (/^[a-z0-9_]+$/.test(lw)) return [lw]
-      return lw.split(/[^a-z0-9_\u4e00-\u9fa5]+/).filter(Boolean)
-    })
-    .filter((frags) => frags.length > 0)
+    .filter((w) => w && !w.includes(':'))
+    .join(' ')
+    .replace(/"/g, '')
 }
 
 function Highlight({ text, query, literal = false }) {
   const parts = useMemo(() => {
     let frags
     if (literal) {
-      // 内容模式：空格拆词 AND；词含特殊字符时拆子片段（如 library(forest → library + forest）
-      const groups = queryTermGroups(query)
-      frags = [...new Set(groups.flat())]
+      const pat = contentPattern(query)
+      frags = pat ? [pat] : []
     } else {
       frags = [
         ...new Set(
@@ -276,8 +270,9 @@ export default function SearchOverlay({
       if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 6) {
         d.started = true
         suppressClickRef.current = true
-        startDrag({ item: [d.item.path] })
-          .catch(() => {})
+        // 之前漏传 icon（插件要求必填）→ 会话从未启动；改用共用的预览图 + 全程 trace
+        makeDragPreview(1, !!d.item.is_dir)
+          .then((icon) => runNativeDrag([d.item.path], icon))
           .finally(() => {
             dragRef.current = null
             setTimeout(() => {
@@ -555,7 +550,7 @@ export default function SearchOverlay({
                         {item.dir}
                       </span>
                       {mode === 'content' && item.matches != null && (
-                        <span className="search-matches">{item.matches} 行命中</span>
+                        <span className="search-matches">{item.matches >= 20 ? '20+' : item.matches} 行命中</span>
                       )}
                     </span>
                   </span>
@@ -595,7 +590,15 @@ export default function SearchOverlay({
                   >
                     复制路径
                   </button>
-                  {preview.truncated && <span className="sp-truncated">（内容过大，仅显示前 256 KB）</span>}
+                  {preview.truncated && (
+                    <span className="sp-truncated">
+                      （内容过大，仅显示前 256 KB）
+                      {preview.hiddenHits > 0 &&
+                        (preview.matchLines?.length
+                          ? `另有 ${preview.hiddenHits} 行命中位于已截断部分之外`
+                          : `命中位于已截断部分之外（共 ${preview.hiddenHits} 行），预览区内无命中`)}
+                    </span>
+                  )}
                 </div>
                 <div className="sp-lines">
                   {preview.text.split('\n').map((text, i) => {
