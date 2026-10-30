@@ -1232,3 +1232,5 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
   text-overflow: ellipsis;
   margin-top: 2px;
 }
+
+.tb-group.disabled { opacity: 0.5; pointer-events: none; }

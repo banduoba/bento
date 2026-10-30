@@ -1144,6 +1144,8 @@ export default function App() {
         showHidden={cfg.showHidden}
           scope={cfg.searchPrefs?.scope || 'global'}
           sortBy={cfg.searchPrefs?.sort || 'btime'}
+          mode={cfg.searchPrefs?.mode || 'name'}
+          onModeChange={(v) => setCfg((c) => ({ ...c, searchPrefs: { ...c.searchPrefs, mode: v } }))}
           searchPaths={cfg.searchPaths || []}
           onScopeChange={(v) => setCfg((c) => ({ ...c, searchPrefs: { ...c.searchPrefs, scope: v } }))}
           onSortChange={(v) => setCfg((c) => ({ ...c, searchPrefs: { ...c.searchPrefs, sort: v } }))}
