@@ -73,7 +73,10 @@ export default function SearchOverlay({
   menuRef.current = menu
 
   useEffect(() => {
-    if (open) inputRef.current?.focus()
+    if (open && inputRef.current) {
+      inputRef.current.focus()
+      inputRef.current.select() // 选中上一次的搜索词，直接输入即替换
+    }
   }, [open])
 
   // Esc：有右键菜单先关菜单，否则关浮层
