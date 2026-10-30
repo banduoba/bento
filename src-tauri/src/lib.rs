@@ -980,9 +980,10 @@ async fn read_text_preview(
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // 分词：按非字母数字分段（library(forest → library + forest），行含任一词即命中
         let words: Vec<String> = query
-            .split_whitespace()
-            .filter(|w| !w.contains(':'))
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|w| w.chars().count() >= 2 || w.chars().all(|c| c.is_ascii_digit()))
             .map(|w| w.to_lowercase())
             .collect();
         let mut match_lines = Vec::new();

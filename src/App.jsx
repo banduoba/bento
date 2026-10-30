@@ -448,13 +448,12 @@ export default function App() {
   useEffect(() => {
     if (!hasTauri) return
     let highlightedRow = null
-    let dragPaths = []
     let live = true
     const doneTimers = new Map()
     const paneDestination = (el) => {
       const paneEl = el.closest('.pane')
       if (!paneEl) return null
-      const idx = [...document.querySelectorAll('.pane')].indexOf(paneEl)
+      const idx = [...document.querySelectorAll('.panes > .pane')].indexOf(paneEl)
       const pane = cfgRef.current?.panes[idx]
       return pane?.tabs[pane.active]?.path
     }
@@ -474,20 +473,18 @@ export default function App() {
         doneTimers.delete(row)
       }, 300))
     }
-    const highlightRow = (row) => {
+    const highlightRow = (row, text) => {
       if (row === highlightedRow) return
       highlightedRow?.classList.remove('native-drop-target')
       highlightedRow = row
       highlightedRow?.classList.add('native-drop-target')
       if (row) {
         const rect = row.getBoundingClientRect()
-        const dest = paneDestination(row)
         const tipWidth = Math.min(420, window.innerWidth - 24)
         setHoverTip({
           x: Math.max(12 + tipWidth / 2, Math.min(window.innerWidth - 12 - tipWidth / 2, rect.left + rect.width / 2)),
           y: Math.max(44, rect.top - 8),
-          // 保留原生 drop 的现有语义：窗格目录接收文件，侧边栏添加书签。
-          text: dest ? `${transferMode(dest, dragPaths) === 'move' ? '移动' : '拷贝'}到「${basename(dest) || dest}」` : '添加到书签',
+          text,
         })
       } else {
         setHoverTip(null)
@@ -498,22 +495,29 @@ export default function App() {
       const { type, position } = ev.payload
       if (type === 'cancelled' || type === 'leave') {
         highlightRow(null)
-        dragPaths = []
         return
       }
       if (type === 'enter' || type === 'over') {
-        if (type === 'enter') dragPaths = ev.payload.paths || []
+        // Tauri 上报物理像素；每次读取缩放比，兼容跨屏拖拽。
         const ratio = window.devicePixelRatio || 1
         const el = document.elementFromPoint(position.x / ratio, position.y / ratio)
         const row = el?.closest('.row')
         const bookmark = el?.closest('.sb-item:not(.ws-item)')
-        // 文件夹行带有展开按钮；普通文件与窗格空白不作为高亮目标。
-        highlightRow(bookmark || (row?.querySelector('.disclosure') ? row : null))
+        const pane = el?.closest('.pane')
+        if (bookmark) {
+          highlightRow(bookmark, `添加到「${bookmark.querySelector('span')?.textContent || bookmark.textContent}」`)
+        } else if (row?.querySelector('.disclosure')) {
+          highlightRow(row, `移动到「${row.querySelector('.name')?.textContent || ''}」`)
+        } else if (pane) {
+          const idx = [...document.querySelectorAll('.panes > .pane')].indexOf(pane)
+          highlightRow(pane, `移动到「窗格 ${idx + 1}」`)
+        } else {
+          highlightRow(null)
+        }
         return
       }
       if (type !== 'drop') return
       highlightRow(null)
-      dragPaths = []
       const { paths } = ev.payload
       if (!paths?.length) return
       const ratio = window.devicePixelRatio || 1
@@ -1047,6 +1051,42 @@ export default function App() {
     const paneRows = rowsCache.current[tid] || []
     const firstEntry = () => paneRows.find((x) => x.path === paths[0])
 
+    if (!searchOpen && !settingsOpen && !batchRename && !menu && !e.altKey && !e.ctrlKey && !e.shiftKey) {
+      if (!meta && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+        e.preventDefault()
+        const rows = paneRows.filter((r) => !r.isPseudo)
+        if (!rows.length) return
+        const current = rows.findIndex((r) => r.path === paths[0])
+        const down = e.key === 'ArrowDown'
+        const next = current === -1
+          ? (down ? 0 : rows.length - 1)
+          : Math.max(0, Math.min(rows.length - 1, current + (down ? 1 : -1)))
+        const path = rows[next].path
+        onSelect(tid, new Set([path]))
+        requestAnimationFrame(() => {
+          const pane = document.querySelectorAll('.panes > .pane')[focusIdx]
+          const row = pane?.querySelector('.row.selected')
+          if (row) row.scrollIntoView({ block: 'nearest' })
+          else {
+            const scroller = pane?.querySelector('.rows')
+            if (scroller) setRevealReq({ tabId: tid, path, nonce: Date.now(), scrollTop: scroller.scrollTop })
+          }
+        })
+        return
+      }
+      if ((!meta && e.key === 'ArrowRight') || (meta && e.key === 'ArrowDown')) {
+        e.preventDefault()
+        const entry = firstEntry()
+        if (entry?.is_dir && !entry.isPseudo) openEntry(tid, entry)
+        return
+      }
+      if ((!meta && e.key === 'ArrowLeft') || (meta && e.key === 'ArrowUp')) {
+        e.preventDefault()
+        nav(tid, parentPath(tab.path))
+        return
+      }
+    }
+
     if (meta && !e.shiftKey && e.key === 'c') { e.preventDefault(); doCopyCut(tid, 'copy'); return }
     if (meta && !e.shiftKey && e.key === 'x') { e.preventDefault(); doCopyCut(tid, 'move'); return }
     if (meta && !e.shiftKey && e.key === 'v') { e.preventDefault(); doPaste(tid); return }
@@ -1094,13 +1134,12 @@ export default function App() {
     }
     if (meta && e.key === '[') { e.preventDefault(); navBack(tid); return }
     if (meta && e.key === ']') { e.preventDefault(); navForward(tid); return }
-    if (meta && e.key === 'ArrowUp') { e.preventDefault(); nav(tid, parentPath(tab.path)); return }
     if (meta && (e.key === '1' || e.key === '2' || e.key === '4')) {
       e.preventDefault()
       setLayout({ 1: '1', 2: '2c', 4: '4' }[e.key])
       return
     }
-    if (meta && (e.key === 'o' || e.key === 'ArrowDown')) {
+    if (meta && e.key === 'o') {
       e.preventDefault()
       const entry = firstEntry()
       if (entry) openEntry(tid, entry)
@@ -1259,7 +1298,21 @@ export default function App() {
               editPathSignal={i === focusIdx ? pathEditTick : 0}
               flash={i === flashPane}
               reveal={revealReq && revealReq.tabId === p.tabs[p.active]?.id ? revealReq : null}
-              onRevealDone={() => setRevealReq(null)}
+              onRevealDone={() => {
+                // 虚拟行先由 Pane 挂载，再从原滚动位置按 nearest 对齐。
+                if (revealReq?.scrollTop != null) {
+                  const scrollTop = revealReq.scrollTop
+                  requestAnimationFrame(() => {
+                    const scroller = document.querySelectorAll('.panes > .pane')[i]?.querySelector('.rows')
+                    const row = scroller?.querySelector('.row.selected')
+                    if (row) {
+                      scroller.scrollTop = scrollTop
+                      row.scrollIntoView({ block: 'nearest' })
+                    }
+                  })
+                }
+                setRevealReq(null)
+              }}
               onFocus={setFocused}
               onNav={nav}
               onBack={navBack}
