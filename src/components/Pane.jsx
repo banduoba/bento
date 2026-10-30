@@ -515,9 +515,19 @@ export default function Pane({
             title="输入路径后回车跳转，Esc 取消"
             onChange={(e) => setEditingPath(e.target.value)}
             onKeyDown={(e) => {
-              e.stopPropagation()
-              if (e.key === 'Enter') commitPathEdit()
-              if (e.key === 'Escape') setEditingPath(null)
+              if (e.key === 'Enter') {
+                e.preventDefault()
+                e.stopPropagation()
+                commitPathEdit()
+                return
+              }
+              if (e.key === 'Escape') {
+                e.stopPropagation()
+                setEditingPath(null)
+                return
+              }
+              // 普通按键不外泄；⌘ 组合键（⌘C/⌘V/⌘A…）放行给全局文本快捷键
+              if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
             }}
             onFocus={(e) => e.currentTarget.select()}
             onBlur={commitPathEdit}
@@ -581,10 +591,12 @@ export default function Pane({
             onChange={(e) => onFilter(tab.id, e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Escape') {
+                e.stopPropagation()
                 onFilter(tab.id, '')
                 e.target.blur()
+                return
               }
-              e.stopPropagation()
+              if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
             }}
           />
         </div>
@@ -700,9 +712,18 @@ export default function Pane({
                         value={renamingHere.value}
                         onChange={(e) => onRenameChange(e.target.value)}
                         onKeyDown={(e) => {
-                          e.stopPropagation()
-                          if (e.key === 'Enter') onRenameCommit()
-                          if (e.key === 'Escape') onRenameCancel()
+                          if (e.key === 'Enter') {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            onRenameCommit()
+                            return
+                          }
+                          if (e.key === 'Escape') {
+                            e.stopPropagation()
+                            onRenameCancel()
+                            return
+                          }
+                          if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
                         }}
                         onBlur={onRenameCommit}
                         onClick={(e) => e.stopPropagation()}
