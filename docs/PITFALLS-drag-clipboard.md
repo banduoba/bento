@@ -63,3 +63,21 @@
 - `trace.log`：`~/Library/Application Support/com.bento.app/trace.log`，记录 `row-dragstart`、`startDrag invoke/started/ended/ERROR`、`dde enter/drop`（含坐标、命中元素、plan）、`clipboard ok/FAILED`。
 - `error.log`：前端 window.onerror 持久化。
 - 过滤 over 噪声：`grep -v "dde over" trace.log | tail -30`。
+
+## 12. 目录自动刷新（FSEvents）
+- 之前窗格只在导航/⌘R/自己的操作后刷新，外部新增、修改文件不会显示。
+- 现在：前端各窗格把「当前目录 + 展开的子目录」登记到 `src/fsWatch.js`，取并集交给后端 `set_watched`（notify/FSEvents）；后端只保留「被监听目录的直接子项」事件，150ms 合并后发 `fs-changed`，窗格静默重读，列表签名（路径/大小/mtime）没变就不重渲染。
+- 坑：
+  - FSEvents 在 OS 层是递归的，监听大目录（如主目录）会收到整棵树的事件，所以后端必须按「父目录 ∈ 监听集合」过滤；根目录 `/` 不监听。
+  - FSEvents 报告真实路径（`/tmp` → `/private/tmp`），监听集合要用 `canonicalize` 后的路径，并回传前端传入的原始路径。
+  - 不要在持有 `watched` 锁时调用 `watch/unwatch`：通知线程回调里也要拿这把锁。
+  - 异步重读返回时标签页/目录可能已变，要核对 tabId+path 再写入；展开目录缓存已被清掉（`undefined`）时丢弃过期结果。
+  - 旧的「tick 时重读展开目录」逻辑在 Promise 回调里改 `changed` 却在回调外判断，永远不触发重渲染，已改成 `Promise.all`。
+
+## 13. 启动卡死（死锁）：save_window_state 必须在主线程跑
+- 现象：启动后窗口整个无响应 60s+（macOS 卡死报告：主线程在 run loop observer 回调里阻塞于 `pthread_mutex` → `psynch_mutexwait`，持锁线程是 tokio worker，卡在 `dispatch_semaphore_wait`）。
+- 根因：前端 resize/move 防抖后调用 `save_window_state`，原先是 `async` 命令 → 在 tokio 线程执行。tauri-plugin-window-state 的 `save_window_state` 持有 `WindowStateCache` 锁，同时通过 `outer_position()` 等 getter **同步等待主线程**；而主线程恰好在处理窗口 Moved/Resized 事件，事件回调里也要拿同一把锁 → 互相等待。启动时恢复窗口位置/大小最容易触发。
+- 与目录监听、拖拽补丁无关（出问题的安装包里还没有目录监听）。
+- 修法：命令改成同步 `fn`（Tauri 同步命令在主线程执行），持锁者就不会再等主线程。
+- 经验：凡是会「持锁 + 同步调用窗口 getter/`run_on_main_thread` 后阻塞等待」的逻辑，不要放在 async 命令（tokio 线程）里；macOS 卡死报告在 `/Library/Logs/DiagnosticReports/*.hang`，看主线程被哪个 turnstile 的哪个线程阻塞，再看该线程栈。
+- Rust 的 `std` mpsc/park 在 macOS 上底层是 dispatch semaphore，所以栈里的 `_dispatch_semaphore_wait_slow` 不一定是 GCD，可能就是普通的阻塞等待。

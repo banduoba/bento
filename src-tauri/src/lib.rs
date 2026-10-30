@@ -1207,9 +1207,12 @@ async fn open_privacy_settings() -> Result<(), String> {
     Ok(())
 }
 
-/// 立即保存窗口大小/位置（前端在 resize/move 防抖后调用）
+/// 立即保存窗口大小/位置（前端在 resize/move 防抖后调用）。
+/// 必须是同步命令（Tauri 会在主线程执行）：插件的 save_window_state 持有状态缓存锁的同时，
+/// 要通过 outer_position 等 getter 同步等待主线程；若在 tokio 线程执行，而主线程恰好在窗口
+/// Moved/Resized 事件里等同一把锁，就互相死锁（启动恢复窗口位置时实测卡死 60s+，见 PITFALLS）。
 #[tauri::command]
-async fn save_window_state(app: AppHandle) -> Result<(), String> {
+fn save_window_state(app: AppHandle) -> Result<(), String> {
     use tauri_plugin_window_state::{AppHandleExt, StateFlags};
     app.save_window_state(StateFlags::all())
         .map_err(|e| e.to_string())
@@ -1257,6 +1260,86 @@ async fn save_config(app: AppHandle, config: serde_json::Value) -> Result<(), St
         serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())
+}
+
+/// 目录监听：窗格当前目录 + 展开的子目录由前端登记（set_watched），文件增删改时（FSEvents，
+/// 150ms 合并）向前端发 `fs-changed`（变化所在的目录列表），窗格即时刷新，无需手动 ⌘R。
+struct FsWatcher {
+    watcher: std::sync::Mutex<notify::RecommendedWatcher>,
+    /// 规范化路径（FSEvents 报告真实路径，如 /private/tmp）→ 前端传入的原始路径
+    watched: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<String>>>>,
+}
+
+impl FsWatcher {
+    fn new(app: AppHandle) -> notify::Result<Self> {
+        use std::collections::{HashMap, HashSet};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+        let watched: Arc<Mutex<HashMap<PathBuf, Vec<String>>>> = Arc::default();
+        let pending: Arc<Mutex<HashSet<String>>> = Arc::default();
+        let scheduled = Arc::new(AtomicBool::new(false));
+        let (w2, p2, s2) = (watched.clone(), pending.clone(), scheduled.clone());
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            let Ok(ev) = res else { return };
+            if matches!(ev.kind, notify::EventKind::Access(_)) {
+                return;
+            }
+            let mut hit = false;
+            {
+                let map = w2.lock().unwrap();
+                for p in &ev.paths {
+                    // 只关心「被监听目录的直接子项」变化；FSEvents 在 OS 层是递归的，其余事件丢弃
+                    if let Some(orig) = p.parent().and_then(|d| map.get(d)) {
+                        p2.lock().unwrap().extend(orig.iter().cloned());
+                        hit = true;
+                    }
+                }
+            }
+            if hit && !s2.swap(true, Ordering::SeqCst) {
+                let (app, p3, s3) = (app.clone(), p2.clone(), s2.clone());
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    s3.store(false, Ordering::SeqCst);
+                    let dirs: Vec<String> = p3.lock().unwrap().drain().collect();
+                    if !dirs.is_empty() {
+                        let _ = app.emit("fs-changed", dirs);
+                    }
+                });
+            }
+        })?;
+        Ok(Self { watcher: Mutex::new(watcher), watched })
+    }
+}
+
+#[tauri::command]
+fn set_watched(paths: Vec<String>, state: tauri::State<'_, FsWatcher>) -> Result<(), String> {
+    use notify::{RecursiveMode, Watcher};
+    use std::collections::HashMap;
+    let mut want: HashMap<PathBuf, Vec<String>> = HashMap::new();
+    for p in paths {
+        // 根目录监听会收到整盘事件，不监听
+        if p == "/" {
+            continue;
+        }
+        if let Ok(c) = fs::canonicalize(&p) {
+            want.entry(c).or_default().push(p);
+        }
+    }
+    // 不在持锁时调用 watch/unwatch：通知线程回调里要拿 watched 锁，避免互相等待
+    let current: Vec<PathBuf> = state.watched.lock().unwrap().keys().cloned().collect();
+    {
+        let mut w = state.watcher.lock().unwrap();
+        for old in current.iter().filter(|k| !want.contains_key(*k)) {
+            let _ = w.unwatch(old);
+        }
+        for new in want.keys().filter(|k| !current.contains(k)) {
+            if let Err(e) = w.watch(new, RecursiveMode::NonRecursive) {
+                eprintln!("[watch] {} failed: {e}", new.display());
+            }
+        }
+    }
+    *state.watched.lock().unwrap() = want;
+    Ok(())
 }
 
 /// 后台窗口也能直接拖出文件：Bento 被其他软件遮住时，点按/拖动 Bento 的可见部分不应把整个窗口
@@ -1310,6 +1393,7 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             enable_background_drag(app);
+            app.manage(FsWatcher::new(app.handle().clone()).expect("fs watcher"));
             // 自定义菜单：不带任何会与前端冲突的标准快捷键
             // （默认菜单的 ⌘W 关窗 / ⌘R 刷新 / ⌘C 拷贝 会抢先拦截按键事件）
             let about = PredefinedMenuItem::about(app, None, None)?;
@@ -1372,6 +1456,7 @@ pub fn run() {
             read_text_preview,
             dir_activity,
             copy_files_to_clipboard,
+            set_watched,
             open_privacy_settings,
             disk_space,
             home_dir,

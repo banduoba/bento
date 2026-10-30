@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
 import { api, fileSrc } from '../api'
+import { setWatch, clearWatch, onFsChange } from '../fsWatch'
 import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher, copyText } from '../format'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
 
@@ -356,22 +357,68 @@ export default function Pane({
     kidsRef.current = {}
   }, [tab.id])
 
-  // 手动刷新（tick）时重新拉取已展开目录的内容
-  useEffect(() => {
-    const paths = Object.keys(kidsRef.current)
+  // 重新拉取已展开目录的内容（手动刷新 tick / 文件系统变化）；内容没变就不触发重渲染
+  const entriesSig = (list) => list.map((e) => `${e.path}|${e.size}|${e.mtime_ms}|${e.is_dir}`).join('\n')
+  const reloadKids = (only) => {
+    const paths = Object.keys(kidsRef.current).filter(
+      (p) => kidsRef.current[p] !== null && (!only || only.has(p))
+    )
     if (!paths.length) return
-    let changed = false
-    for (const p of paths) {
-      api
-        .listDir(p, cfg.showHidden)
-        .then((r) => {
-          kidsRef.current[p] = r.entries
+    Promise.all(
+      paths.map((p) =>
+        api
+          .listDir(p, cfg.showHidden)
+          .then((r) => [p, r.entries])
+          .catch(() => null)
+      )
+    ).then((res) => {
+      let changed = false
+      for (const x of res) {
+        if (!x) continue
+        const [p, list] = x
+        const old = kidsRef.current[p]
+        // old 为 undefined = 期间已折叠/切换标签页，丢弃过期结果
+        if (old && entriesSig(old) !== entriesSig(list)) {
+          kidsRef.current[p] = list
           changed = true
-        })
-        .catch(() => {})
-    }
-    if (changed) setKidsVersion((v) => v + 1)
+        }
+      }
+      if (changed) setKidsVersion((v) => v + 1)
+    })
+  }
+  const reloadKidsRef = useRef(reloadKids)
+  reloadKidsRef.current = reloadKids
+  useEffect(() => {
+    reloadKids()
   }, [tick])
+
+  // 文件系统监听：当前目录 + 展开的子目录有文件新增/修改/删除时自动刷新，无需 ⌘R
+  const watchRef = useRef({})
+  watchRef.current = { tabId: tab.id, path: tab.path, showHidden: cfg.showHidden }
+  useEffect(() => {
+    const id = `pane-${tab.id}`
+    setWatch(id, [tab.path, ...expandedDirs])
+    return () => clearWatch(id)
+  }, [tab.id, tab.path, expandedDirs])
+  useEffect(
+    () =>
+      onFsChange((dirs) => {
+        const { tabId, path, showHidden } = watchRef.current
+        const changed = new Set(dirs)
+        if (changed.has(path)) {
+          api
+            .listDir(path, showHidden)
+            .then((r) => {
+              const cur = watchRef.current
+              if (cur.tabId !== tabId || cur.path !== path) return
+              setEntries((prev) => (prev && entriesSig(prev) === entriesSig(r.entries) ? prev : r.entries))
+            })
+            .catch(() => {})
+        }
+        reloadKidsRef.current(changed)
+      }),
+    []
+  )
 
   // 展开/折叠文件夹
   const toggleExpand = (e, entry) => {
