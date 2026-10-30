@@ -228,6 +228,8 @@ export default function App() {
   const [wsRenaming, setWsRenaming] = useState(null) // { id, value }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
+  const [undoToast, setUndoToast] = useState(null) // { label, fn } 可撤销操作提示
+  const undoStackRef = useRef([]) // { label, undo: () => Promise }
   const flashTimer = useRef(null)
 
   // 闪烁提示：让用户一眼看到导航发生在哪个窗格
@@ -606,12 +608,49 @@ export default function App() {
     if (!paths?.length) return
     modeRef.current = mode
     try {
-      reportErrors(await api.transfer(paths, dest, mode))
+      const results = await api.transfer(paths, dest, mode)
+      reportErrors(results)
+      // 记录成功的移动操作供 ⌘Z 撤销（移回原位置）
+      if (mode === 'move') {
+        const moves = (results || []).filter((r) => r.ok)
+        if (moves.length) {
+          undoStackRef.current.push({
+            label: moves.length === 1 ? basename(moves[0].dest) : `${moves.length} 个项目`,
+            undo: async () => {
+              await api.transfer(
+                moves.map((m) => m.dest),
+                moves[0].source.slice(0, moves[0].source.lastIndexOf('/')),
+                'move'
+              )
+            },
+          })
+          if (undoStackRef.current.length > 30) undoStackRef.current.shift()
+          setUndoToast({
+            label: moves.length === 1 ? basename(moves[0].dest) : `${moves.length} 个项目`,
+          })
+          setTimeout(() => setUndoToast(null), 4000)
+        }
+      }
     } catch (e) {
       alert(`操作失败: ${e}`)
     }
     if (mode === 'move') setClip(null)
     refresh()
+  }
+
+  // ⌘Z：撤销最近一次移动
+  const undoLast = async () => {
+    const op = undoStackRef.current.pop()
+    if (!op) return
+    try {
+      await op.undo()
+      setUndoToast({ label: op.label, undone: true })
+      setTimeout(() => setUndoToast(null), 2500)
+      refresh()
+    } catch (e) {
+      alert(`撤销失败: ${e}`)
+      refresh()
+    }
   }
 
   const doTrash = (tabId, paths) => {
@@ -862,6 +901,12 @@ export default function App() {
       setMenu(null)
       setLayoutPickerOpen(false)
       setSettingsOpen(true)
+      return
+    }
+    // ⌘Z：撤销最近一次移动
+    if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault()
+      undoLast()
       return
     }
     // ⌘K：打开/聚焦搜索面板（浏览器习惯）
@@ -1138,6 +1183,25 @@ export default function App() {
 
       <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]} progress={progress} />
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
+      {undoToast && (
+        <div className="undo-toast">
+          <span>
+            {undoToast.undone ? '已撤销：' : '已移动：'}
+            <b>{undoToast.label}</b>
+          </span>
+          {!undoToast.undone && (
+            <button
+              className="undo-btn"
+              onClick={() => {
+                setUndoToast(null)
+                undoLast()
+              }}
+            >
+              撤销
+            </button>
+          )}
+        </div>
+      )}
       <SearchOverlay
         open={searchOpen}
         root={focusedTab?.path || home}

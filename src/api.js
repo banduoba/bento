@@ -66,7 +66,30 @@ function mockApi() {
       if (!entries) return Promise.reject(new Error(`无法读取目录 ${path}`))
       return Promise.resolve({ entries: fillPath(path, entries) })
     },
-    transfer: () => Promise.resolve([]),
+    transfer: (sources, dest, mode) => {
+      for (const p of sources) {
+        const parent = p.slice(0, p.lastIndexOf('/'))
+        const name = p.slice(p.lastIndexOf('/') + 1)
+        const entry = (TREE[parent] || []).find((e) => e.name === name)
+        if (!entry) continue
+        if (mode === 'move') {
+          TREE[parent] = TREE[parent].filter((e) => e.name !== name)
+          ;(TREE[dest] = TREE[dest] || []).push(entry)
+        } else {
+          const list = (TREE[dest] = TREE[dest] || [])
+          let n = name
+          let i = 2
+          const dot = name.lastIndexOf('.')
+          while (list.some((e) => e.name === n)) {
+            n = dot > 0 ? `${name.slice(0, dot)} ${i++}${name.slice(dot)}` : `${name} ${i++}`
+          }
+          list.push({ ...entry, name: n, path: `${dest}/${n}` })
+        }
+      }
+      return Promise.resolve(
+        sources.map((p) => ({ source: p, dest: `${dest}/${p.slice(p.lastIndexOf('/') + 1)}`, ok: true }))
+      )
+    },
     trash: (paths) => {
       for (const p of paths || []) {
         const parent = p.slice(0, p.lastIndexOf('/'))
