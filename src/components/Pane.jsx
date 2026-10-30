@@ -155,6 +155,7 @@ export default function Pane({
       if (!d || d.started) return
       if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) >= 3) {
         d.started = true
+        trace(`row-dragstart ${d.paths.length} paths`)
         rowSuppressRef.current = true
         clearTimeout(suppressTimer)
         setDraggingPaths(new Set(d.paths))
