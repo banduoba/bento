@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 
 /// fsearch 引擎（getattrlistbulk 全盘索引 + FSEvents 实时更新 + 模糊匹配）
@@ -148,8 +148,25 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{}-{}", name, std::process::id()))
 }
 
-/// 拷贝/移动时目标重名的命名：「name 副本.ext」，再重名依次「name 副本1.ext」「name 副本2.ext」…
-/// 对已带「副本[N]」后缀的名字先去掉后缀再编号（「a 副本.txt」再拷 → 「a 副本1.txt」，而不是「a 副本 副本.txt」）
+/// 拷贝/移动时目标重名的命名：「name copy.ext」，再重名依次「name copy 1.ext」「name copy 2.ext」…
+/// 对已带「copy[ N]」后缀的名字（以及旧版的中文「副本[N]」）先去掉后缀再编号
+/// （「a copy.txt」再拷 → 「a copy 1.txt」，而不是「a copy copy.txt」）
+fn strip_copy_suffix(stem: &str) -> &str {
+    if let Some(i) = stem.rfind(" copy") {
+        let rest = &stem[i + " copy".len()..];
+        let numbered = rest.strip_prefix(' ').map_or(false, |d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()));
+        if rest.is_empty() || numbered {
+            return &stem[..i];
+        }
+    }
+    if let Some(i) = stem.rfind(" 副本") {
+        if stem[i + " 副本".len()..].chars().all(|c| c.is_ascii_digit()) {
+            return &stem[..i];
+        }
+    }
+    stem
+}
+
 fn copy_name_path(dir: &Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
     if !candidate.exists() {
@@ -159,16 +176,13 @@ fn copy_name_path(dir: &Path, name: &str) -> PathBuf {
         Some(i) if i > 0 => (&name[..i], &name[i..]),
         _ => (name, ""),
     };
-    let base = match stem.rfind(" 副本") {
-        Some(i) if stem[i + " 副本".len()..].chars().all(|c| c.is_ascii_digit()) => &stem[..i],
-        _ => stem,
-    };
-    let first = dir.join(format!("{} 副本{}", base, ext));
+    let base = strip_copy_suffix(stem);
+    let first = dir.join(format!("{} copy{}", base, ext));
     if !first.exists() {
         return first;
     }
     for i in 1..10000u32 {
-        let c = dir.join(format!("{} 副本{}{}", base, i, ext));
+        let c = dir.join(format!("{} copy {}{}", base, i, ext));
         if !c.exists() {
             return c;
         }
@@ -1262,7 +1276,7 @@ mod copy_name_tests {
     use super::*;
 
     #[test]
-    fn copies_get_副本_then_numbered() {
+    fn copies_get_copy_suffix_then_numbered() {
         let d = std::env::temp_dir().join(format!("bento-copyname-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
@@ -1270,16 +1284,23 @@ mod copy_name_tests {
         let name = |p: PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
         mk("a.txt");
         assert_eq!(name(copy_name_path(&d, "b.txt")), "b.txt"); // 不重名原样
-        assert_eq!(name(copy_name_path(&d, "a.txt")), "a 副本.txt");
-        mk("a 副本.txt");
-        assert_eq!(name(copy_name_path(&d, "a.txt")), "a 副本1.txt");
-        mk("a 副本1.txt");
-        assert_eq!(name(copy_name_path(&d, "a.txt")), "a 副本2.txt");
-        // 拷贝一个已是副本的文件：不叠加「副本 副本」
-        assert_eq!(name(copy_name_path(&d, "a 副本.txt")), "a 副本2.txt");
+        assert_eq!(name(copy_name_path(&d, "a.txt")), "a copy.txt");
+        mk("a copy.txt");
+        assert_eq!(name(copy_name_path(&d, "a.txt")), "a copy 1.txt");
+        mk("a copy 1.txt");
+        assert_eq!(name(copy_name_path(&d, "a.txt")), "a copy 2.txt");
+        // 拷贝一个已是 copy 的文件：不叠加「copy copy」
+        assert_eq!(name(copy_name_path(&d, "a copy.txt")), "a copy 2.txt");
+        // 旧版中文「副本」后缀同样被识别，改用英文编号
+        mk("old 副本.txt");
+        mk("old.txt");
+        assert_eq!(name(copy_name_path(&d, "old 副本.txt")), "old copy.txt");
+        // 名字里恰好含 copy 单词但不是后缀：原样保留
+        mk("copyright notes.txt");
+        assert_eq!(name(copy_name_path(&d, "copyright notes.txt")), "copyright notes copy.txt");
         // 无扩展名 / 文件夹
         fs::create_dir_all(d.join("dir")).unwrap();
-        assert_eq!(name(copy_name_path(&d, "dir")), "dir 副本");
+        assert_eq!(name(copy_name_path(&d, "dir")), "dir copy");
         let _ = fs::remove_dir_all(&d);
     }
 }
@@ -1626,7 +1647,16 @@ pub fn run() {
             app.manage(FsWatcher::new(app.handle().clone()).expect("fs watcher"));
             // 自定义菜单：不带任何会与前端冲突的标准快捷键
             // （默认菜单的 ⌘W 关窗 / ⌘R 刷新 / ⌘C 拷贝 会抢先拦截按键事件）
-            let about = PredefinedMenuItem::about(app, None, None)?;
+            // 「关于」面板全英文：内容在此显式给出，面板自带标签（Version 等）的语言由 src-tauri/Info.plist 的
+            // CFBundleLocalizations=en 决定（否则会跟随系统语言变成中文）
+            let about_meta = AboutMetadataBuilder::new()
+                .name(Some("Bento"))
+                .version(Some(env!("CARGO_PKG_VERSION")))
+                .copyright(Some("Copyright © 2026 banduoba. Released under the MIT License."))
+                .comments(Some("A lightweight multi-pane file manager for macOS."))
+                .website(Some("https://github.com/banduoba/bento"))
+                .build();
+            let about = PredefinedMenuItem::about(app, Some("About Bento"), Some(about_meta))?;
             let quit = PredefinedMenuItem::quit(app, None)?;
             let app_menu = SubmenuBuilder::new(app, "Bento")
                 .item(&about)
@@ -1634,12 +1664,12 @@ pub fn run() {
                 .item(&quit)
                 .build()?;
 
-            let close_item = MenuItemBuilder::with_id("close-win", "关闭窗口").build(app)?;
-            let file_menu = SubmenuBuilder::new(app, "文件").item(&close_item).build()?;
+            let close_item = MenuItemBuilder::with_id("close-win", "Close Window").build(app)?;
+            let file_menu = SubmenuBuilder::new(app, "File").item(&close_item).build()?;
 
             let minimize = PredefinedMenuItem::minimize(app, None)?;
             let maximize = PredefinedMenuItem::maximize(app, None)?;
-            let window_menu = SubmenuBuilder::new(app, "窗口")
+            let window_menu = SubmenuBuilder::new(app, "Window")
                 .item(&minimize)
                 .item(&maximize)
                 .build()?;
