@@ -731,6 +731,23 @@ async fn log_debug(msg: String) {
     eprintln!("[webview] {msg}");
 }
 
+/// 拖拽/交互 trace 落盘：诊断原生拖拽链路（低频事件专用）
+#[tauri::command]
+async fn append_trace_log(msg: String, app: AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let ms = now.as_millis();
+    let secs = (ms / 1000) as i64;
+    let ms_part = ms % 1000;
+    // 简易本地时间格式化（秒级转 ISO 由前端传入，这里记录相对毫秒足够定位时序）
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("trace.log")) {
+        let _ = writeln!(f, "[{}.{:03}] {}", secs, ms_part, msg);
+    }
+    Ok(())
+}
+
 /// 前端错误持久化：写入应用数据目录 error.log（安装版无 stderr 也能诊断）
 #[tauri::command]
 async fn append_error_log(msg: String, app: AppHandle) -> Result<(), String> {
@@ -1190,6 +1207,7 @@ pub fn run() {
             disk_space,
             home_dir,
             log_debug,
+            append_trace_log,
             append_error_log,
             save_window_state,
             fsearch_status,
