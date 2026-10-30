@@ -6,7 +6,7 @@ import { IconDrive, IconFolder, IconHouse } from '../icons'
 
 const trace = (m) => invoke('log_debug', { msg: m }).catch(() => {})
 
-const MIME = 'application/x-fspace'
+const MIME = 'application/x-bento'
 
 // 模块级组件：避免内嵌组件每次渲染重建导致元素重挂载（曾吞掉 click 事件）
 function FavItem({ icon, label, path, removable, active, dropping, setDropKey, onOpen, onMenu, onDropPin }) {

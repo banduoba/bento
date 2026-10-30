@@ -4,7 +4,7 @@ import { api, fileSrc } from '../api'
 import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher } from '../format'
 import { IconArrowUp, IconChevronLeft, IconChevronRight, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
 
-const MIME = 'application/x-fspace'
+const MIME = 'application/x-bento'
 
 function sortEntries(list, key, dir) {
   const f = dir === 'asc' ? 1 : -1

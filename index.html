@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Fspace</title>
+    <title>Bento</title>
   </head>
   <body>
     <div id="root"></div>
@@ -12,9 +12,9 @@
       ;(function () {
         var send = function (msg) {
           try {
-            var prev = localStorage.getItem('fspace-last-error') || ''
+            var prev = localStorage.getItem('bento-last-error') || ''
             var next = (prev ? prev + '\n' : '') + msg
-            localStorage.setItem('fspace-last-error', next.slice(-4000))
+            localStorage.setItem('bento-last-error', next.slice(-4000))
           } catch (err2) {}
           try {
             window.__TAURI_INTERNALS__.invoke('log_debug', { msg: msg })

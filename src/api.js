@@ -122,14 +122,14 @@ function mockApi() {
     // 浏览器测试视图也用 localStorage 记住工作区/布局，行为与真实 app 一致
     loadConfig: () => {
       try {
-        return Promise.resolve(JSON.parse(localStorage.getItem('fspace-mock-config') || 'null'))
+        return Promise.resolve(JSON.parse(localStorage.getItem('bento-mock-config') || 'null'))
       } catch {
         return Promise.resolve(null)
       }
     },
     saveConfig: (config) => {
       try {
-        localStorage.setItem('fspace-mock-config', JSON.stringify(config))
+        localStorage.setItem('bento-mock-config', JSON.stringify(config))
       } catch {}
       return Promise.resolve()
     },

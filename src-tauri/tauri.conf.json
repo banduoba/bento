@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Fspace",
+  "productName": "Bento",
   "version": "0.1.0",
-  "identifier": "com.fspace.app",
+  "identifier": "com.bento.app",
   "build": {
     "beforeDevCommand": "npm run vite:dev",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Fspace",
+        "title": "Bento",
         "width": 1280,
         "height": 820,
         "minWidth": 760,

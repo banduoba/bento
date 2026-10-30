@@ -711,7 +711,7 @@ pub fn run() {
             // （默认菜单的 ⌘W 关窗 / ⌘R 刷新 / ⌘C 拷贝 会抢先拦截按键事件）
             let about = PredefinedMenuItem::about(app, None, None)?;
             let quit = PredefinedMenuItem::quit(app, None)?;
-            let app_menu = SubmenuBuilder::new(app, "Fspace")
+            let app_menu = SubmenuBuilder::new(app, "Bento")
                 .item(&about)
                 .separator()
                 .item(&quit)

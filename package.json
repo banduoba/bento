@@ -1,8 +1,8 @@
 {
-  "name": "fspace",
-  "productName": "Fspace",
+  "name": "bento",
+  "productName": "Bento",
   "version": "0.1.0",
-  "description": "轻量多窗格文件管理器（QSpace 简化复刻）",
+  "description": "Bento — 轻量多窗格文件管理器（QSpace 简化复刻）",
   "private": true,
   "type": "module",
   "scripts": {

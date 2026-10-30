@@ -1,11 +1,11 @@
 [package]
-name = "fspace"
+name = "bento"
 version = "0.1.0"
-description = "轻量多窗格文件管理器"
+description = "Bento — 轻量多窗格文件管理器"
 edition = "2021"
 
 [lib]
-name = "fspace_lib"
+name = "bento_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

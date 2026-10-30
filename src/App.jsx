@@ -13,7 +13,7 @@ import BatchRenameDialog from './components/BatchRenameDialog'
 import SearchOverlay from './components/SearchOverlay'
 import { IconEye, IconEyeOff, IconSearch, IconChevronDown } from './icons'
 
-const MIME = 'application/x-fspace'
+const MIME = 'application/x-bento'
 
 // 调试埋点：写进 dev 日志（stderr）
 const trace = (m) => invoke('log_debug', { msg: m }).catch(() => {})
@@ -929,14 +929,14 @@ export default function App() {
 
   const cutSet = useMemo(() => new Set(clip?.mode === 'move' ? clip.paths : []), [clip])
 
-  if (!cfg) return <div className="boot">Fspace 启动中…</div>
+  if (!cfg) return <div className="boot">Bento 启动中…</div>
 
   const focusedTab = activeTabOf(focusIdx)
 
   return (
     <div className="app">
       <div className="titlebar" onMouseDown={titlebarMouseDown}>
-        <div className="tb-title">Fspace</div>
+        <div className="tb-title">Bento</div>
         <div className="tb-center">
           <div className="layout-pick-wrap">
             <button className="layout-btn" title="窗口布局" onClick={() => setLayoutPickerOpen((o) => !o)}>
