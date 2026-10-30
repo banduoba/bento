@@ -90,6 +90,8 @@ export default function SearchOverlay({
   searchPaths,
   scope,
   sortBy,
+  mode = 'name',
+  onModeChange,
   onScopeChange,
   onSortChange,
   onClose,
@@ -162,7 +164,14 @@ export default function SearchOverlay({
       // 防抖完成、实际提交搜索时记录，保留 Enter 打开结果的既有语义。
       setHistory((items) => normalizeHistory([q, ...items]))
       try {
-        const r = await api.search(q, scope, scope === 'pane' ? root : null, showHidden, searchPaths)
+        const r = await api.search(
+          q,
+          mode === 'content' ? 'global' : scope,
+          mode === 'content' || scope !== 'pane' ? null : root,
+          showHidden,
+          searchPaths,
+          mode
+        )
         if (tokenRef.current !== token) return
         setResults(r || [])
         setSelIdx(0)
@@ -289,10 +298,15 @@ export default function SearchOverlay({
           {busy && <span className="search-busy">搜索中…</span>}
         </div>
         <div className="search-toolbar">
-          <div className="tb-group">
+          <div className={`tb-group${mode === 'content' ? ' disabled' : ''}`}>
             <span className="tb-label">范围</span>
             {SCOPES.map((s) => (
-              <button key={s.id} className={`seg-btn${scope === s.id ? ' on' : ''}`} onClick={() => onScopeChange(s.id)}>
+              <button
+                key={s.id}
+                className={`seg-btn${scope === s.id ? ' on' : ''}`}
+                disabled={mode === 'content'}
+                onClick={() => onScopeChange(s.id)}
+              >
                 {s.label}
               </button>
             ))}
