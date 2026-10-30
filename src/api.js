@@ -130,14 +130,34 @@ function mockApi() {
     openTerminal: () => Promise.resolve(),
     zipPaths: () => Promise.resolve(''),
     quickLook: () => Promise.resolve(),
-    search: (q) =>
-      Promise.resolve(
+    search: (q, scope, root, showHidden, roots, mode) => {
+      if (mode === 'content') {
+        // 模拟内容命中：返回带行号与文本的结果（供两栏内容框验收）
+        return Promise.resolve(
+          Object.entries(TREE)
+            .flatMap(([dir, es]) => fillPath(dir, es))
+            .filter((e) => !e.is_dir && e.name.toLowerCase().includes((q || '').toLowerCase()))
+            .slice(0, 20)
+            .map((e, i) => ({
+              ...e,
+              dir: e.path.slice(0, e.path.length - e.name.length - 1),
+              btime_ms: e.mtime_ms,
+              lines: [
+                { no: 3 + (i % 5), text: `... 示例内容包含「${q}」的匹配行，用于预览高亮 ...` },
+                { no: 4 + (i % 5), text: `    another line mentioning ${q} inside the file body` },
+              ],
+              matches: 2 + (i % 3),
+            }))
+        )
+      }
+      return Promise.resolve(
         Object.entries(TREE)
           .flatMap(([dir, es]) => fillPath(dir, es))
           .filter((e) => e.name.toLowerCase().includes((q || '').toLowerCase()))
           .map((e) => ({ ...e, dir: e.path.slice(0, e.path.length - e.name.length - 1), btime_ms: e.mtime_ms }))
           .slice(0, 100)
-      ),
+      )
+    },
     fsearchStatus: () => Promise.resolve({ ready: true, entries: 0, full_disk_access: true }),
     // mock 与真实保持同签名
     diskSpace: () => Promise.resolve(500e9),

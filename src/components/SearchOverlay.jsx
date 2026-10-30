@@ -102,6 +102,7 @@ export default function SearchOverlay({
   const [query, setQuery] = useState('')
   const [history, setHistory] = useState(readHistory)
   const [results, setResults] = useState([])
+  const [elapsed, setElapsed] = useState(null)
   const [busy, setBusy] = useState(false)
   const [selIdx, setSelIdx] = useState(0)
   const [idxStatus, setIdxStatus] = useState(null) // fsearch 引擎状态
@@ -169,6 +170,7 @@ export default function SearchOverlay({
     }
     setBusy(true)
     clearTimeout(timerRef.current)
+    const t0 = performance.now()
     timerRef.current = setTimeout(async () => {
       // 防抖完成、实际提交搜索时记录，保留 Enter 打开结果的既有语义。
       setHistory((items) => normalizeHistory([q, ...items]))
@@ -184,6 +186,7 @@ export default function SearchOverlay({
         if (tokenRef.current !== token) return
         setResults(r || [])
         setSelIdx(0)
+        setElapsed(Math.round(performance.now() - t0))
       } catch {
         if (tokenRef.current === token) setResults([])
       } finally {
@@ -374,7 +377,13 @@ export default function SearchOverlay({
         </div>
         <div className="search-meta">
           <div className="search-status" aria-live="polite">
-            <span className="search-count">{!query.trim() ? '最近搜索' : busy ? '搜索中…' : `${sorted.length} 个结果`}</span>
+            <span className="search-count">
+            {!query.trim()
+              ? '最近搜索'
+              : busy
+                ? '搜索中…'
+                : `${sorted.length} 个结果${elapsed != null ? ` · ${elapsed} ms` : ''}`}
+          </span>
             {scope === 'global' && idxStatus && !idxStatus.ready && (
               <span className="search-idx-hint">
                 {' '}· 全局索引建立中（已收录 {idxStatus.entries.toLocaleString()} 条），当前结果来自系统索引
@@ -458,9 +467,18 @@ export default function SearchOverlay({
                       {resultActions(item)}
                       {item.matches != null && <span className="search-matches">{item.matches} 处匹配</span>}
                     </span>
-                    <span className="search-preview" title={item.preview || ''}>
-                      <Highlight text={item.preview || ''} query={query} literal />
-                    </span>
+                    {item.lines?.length ? (
+                      item.lines.map((l) => (
+                        <span className="search-content-line" key={l.no}>
+                          <span className="line-no">{l.no}</span>
+                          <span className="line-text" title={l.text}>
+                            <Highlight text={l.text} query={query} literal />
+                          </span>
+                        </span>
+                      ))
+                    ) : (
+                      <span className="search-preview">二进制文件，无文本预览</span>
+                    )}
                   </span>
                 ) : <>
                   <span className="search-date">{fmtDate(item.btime_ms)}</span>
