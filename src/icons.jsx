@@ -34,6 +34,12 @@ export const IconEye = (p) => (
 export const IconEyeOff = (p) => (
   <svg {...S(p)}><path d="M4 4l16 16" /><path d="M9.9 5.9A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a17.6 17.6 0 0 1-2.4 3.2M6.1 7.6A16.9 16.9 0 0 0 2.5 12S6 18.5 12 18.5a9 9 0 0 0 3.4-.7" /></svg>
 )
+export const IconPin = (p) => (
+  <svg {...S(p)} fill={p.filled ? 'currentColor' : 'none'}>
+    <path d="M9 4h6l-1 5 3 3v2H7v-2l3-3z" />
+    <path d="M12 14v6" />
+  </svg>
+)
 export const IconLayout1 = (p) => (
   <svg {...S(p)}><rect x="4" y="4" width="16" height="16" rx="2" /></svg>
 )
