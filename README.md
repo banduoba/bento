@@ -67,7 +67,19 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 
 ## Install
 
-Pre-built binaries are not published yet, so Bento is built from source. It takes a few minutes the first time.
+### Download
+
+Grab the latest `.dmg` from the **[Releases page](https://github.com/banduoba/bento/releases/latest)**, open it and drag **Bento** into `/Applications` (Apple Silicon, macOS).
+
+The build is not notarized by Apple, so macOS may block the first launch. Either *right-click → Open*, or clear the download quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Bento.app
+```
+
+### Build from source
+
+Prefer to build it yourself? It takes a few minutes the first time.
 
 **Requirements**
 
