@@ -91,12 +91,12 @@
 - 压缩：`ditto` 一次只能压缩一个源（报 `Can't archive multiple sources`）。多选改为：临时目录里建符号链接 → `zip -r`（不加 `-y`，跟随链接存真实内容）；单个源仍用 `ditto --keepParent`。有回归测试 `zip_tests`。
 - 调试 UI 的快办法：`npx vite --port N` 后用 headless Chrome 打开（api.js 有 mock 数据），`emulate({viewport})` 调宽度，`page.mouse` 右键/拖拽；比 macOS 辅助功能自动化稳定（系统权限还可能丢）。
 
-## 15. 对齐 QSpace：列顺序/默认列、中间省略、相对日期、副本命名
+## 15. 对齐 QSpace：列顺序/默认列、中间省略、相对日期、copy 命名
 - 列顺序：名称 | 修改日期 | 创建日期 | 大小 | 种类；默认显示 修改日期/大小/种类，创建日期按需右键勾选。默认宽度压到 130/72/104，名称最小 160，所以 ~600px 的窗格能同时放下三列。
 - 旧配置迁移：窗格带 `colsVersion`，<2 的旧列设置（当时默认「全显示」）直接丢弃套用新默认；之后只要用户改过就写 `colsVersion: 2`。以后再改默认列要继续升版本号。
 - 文件名中间省略：拆成「前段 + 末段」两个 span，前段 `overflow:hidden; text-overflow:ellipsis`、末段 `flex:none`，纯 CSS 就能得到 `前面…后面.ext`；末段 = 扩展名+5 字符，至少 8 字符、至少 30% 名长；用 `Array.from` 按字符切避免劈开 emoji。容器要 `overflow:hidden`，否则窄列时末段会溢出盖住下一列。
 - 日期与 QSpace 一致：今天/昨天只显示 `今天 10:16`，其余 `2026/9/25 00:07`（月日不补零）。
-- 拷贝/移动重名命名（Rust `copy_name_path`）：`name 副本.ext` → `name 副本1.ext` → `name 副本2.ext`…；对已带「副本[N]」的名字先去掉后缀再编号，不叠加「副本 副本」。只用于拷贝/移动（`transfer`）；压缩包、新建文件夹、废纸篓仍用 `unique_path`（`name 2`）。有单测 `copy_name_tests`。
+- 拷贝/移动重名命名（Rust `copy_name_path`）：`name copy.ext` → `name copy 1.ext` → `name copy 2.ext`…（最初是中文「副本」，按要求改成英文，生成的文件名不带中文）；对已带「copy[ N]」或旧版「副本[N]」的名字先去掉后缀再编号，不叠加「copy copy」。只用于拷贝/移动（`transfer`）；压缩包、新建文件夹、废纸篓仍用 `unique_path`（`name 2`）。有单测 `copy_name_tests`。
 
 ## 16. 「创建归档」对话框（复刻 QSpace）
 - 入口：右键「压缩…」→ `ZipDialog`（位置 / 文件名 / 速度快·体积小·自定义(1-9 级) / 添加密码+保持 / 开启一键压缩 / 单独压缩）。默认文件名：单个项目=`项目名.zip`，多个项目=`当前文件夹名.zip`。
@@ -115,3 +115,9 @@
 - README 用的是真实应用截图：造一个假 HOME（`HOME=/Users/Shared/demo ./bento`）隔离配置，预先写好 `config.json` 的窗格路径和 `.window-state.json` 的窗口大小，`touch -t`/`os.utime` 固定修改时间；用 `screencapture -l <窗口ID>` 截窗口（不需要辅助功能权限，被遮挡也能截；去掉 `-o` 带阴影）。窗口 ID 用 `CGWindowListCopyWindowInfo` 按 pid 查。
 - 对话框、列菜单等无法在真机里自动点出来的界面，用 `vite` + headless Chrome 的 mock 数据截图（`deviceScaleFactor: 2`，`page.screenshot({clip})`）。
 - 截图时发现文件名中间省略的 bug：`Meeting Notes.md` 显示成 `MeetingNotes.md`。原因是拆成「前段 + 末段」后，前段末尾的空格在 `white-space: nowrap` 下被折叠。修复：`.name-stem` / `.name-ext` 用 `white-space: pre`。
+
+## 19. 「关于」面板与系统文案跟随系统语言变中文
+- 现象：在中文系统上，About 面板的标签（版本等）、系统菜单项、原生对话框都是中文。
+- 原因：标签语言由 App bundle 的本地化决定，而 Tauri 默认 bundle 没声明本地化，系统就按用户语言选。`PredefinedMenuItem::about(Some(name), Some(AboutMetadata))` 只能控制面板里的**内容**。
+- 做法：`src-tauri/Info.plist`（Tauri 打包时自动合并）声明 `CFBundleDevelopmentRegion=en`、`CFBundleLocalizations=[en]`；About 内容（名称/版本/版权/简介/网址）在 `lib.rs` 里显式写英文；自定义菜单标题（File / Close Window / Window）也改英文以免菜单栏中英混杂。
+- 副作用：原生文件选择面板等系统界面也变英文（应用自身界面仍是中文）。

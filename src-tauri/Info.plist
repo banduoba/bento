@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- 固定为英文本地化：系统菜单项（About / Quit / Hide…）、「关于」面板标签与原生对话框不再跟随系统语言显示中文 -->
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string>
+  </array>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © 2026 banduoba. Released under the MIT License.</string>
+</dict>
+</plist>

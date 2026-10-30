@@ -44,7 +44,7 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | **Instant search** | Global file-name search backed by the [fsearch](https://github.com/noahdunnagan/fsearch) index — fuzzy matching, `*` / `?` wildcards, `ext:` filters and `re:` regular expressions — plus **content search** with a side preview that highlights matching lines. |
 | **Native drag & drop** | Drag files out to Finder or any other app, drop files in from anywhere, or move them between panes. It works even when Bento sits behind other windows, and drop targets are highlighted as you hover. |
 | **Real clipboard** | <kbd>⌘C</kbd> puts real file URLs on the system pasteboard, so <kbd>⌘V</kbd> in Finder and other apps pastes the files themselves. |
-| **Fast file operations** | APFS `clonefile` makes same-volume copies instant. Undo with <kbd>⌘Z</kbd>, duplicates are named `name 副本.ext`, `副本1`, `副本2`, and deletions go to the Trash. |
+| **Fast file operations** | APFS `clonefile` makes same-volume copies instant. Undo with <kbd>⌘Z</kbd>, duplicates are named `name copy.ext`, `name copy 1.ext`, `name copy 2.ext`, and deletions go to the Trash. |
 | **Create Archive** | A QSpace-style dialog: choose location and name, speed / size / custom compression level, optional password, one-click mode and per-item archives. |
 | **Batch rename** | Replace, add, format (with counters and dates) and change case, with a live before/after preview. |
 | **Flexible columns** | Name · Modified · Created · Size · Kind. Drag column borders to resize, right-click the header to choose columns — settings are **per pane**. Long names are shortened in the middle (`Product…admap.pptx`) and secondary columns hide automatically in narrow panes. |
@@ -164,7 +164,7 @@ Hard-won implementation notes — coordinate systems for native drops, a window-
 
 ## Status & limitations
 
-Bento is young software (`0.2.0`). Know before you use it:
+Bento is young software (`0.2.1`). Know before you use it:
 
 - The interface is currently **Simplified Chinese only**.
 - Apple Silicon on a recent macOS is the tested configuration; Intel Macs are untested.
