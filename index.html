@@ -17,6 +17,9 @@
             localStorage.setItem('bento-last-error', next.slice(-4000))
           } catch (err2) {}
           try {
+            window.__TAURI_INTERNALS__.invoke('append_error_log', { msg: msg })
+          } catch (err3) {}
+          try {
             window.__TAURI_INTERNALS__.invoke('log_debug', { msg: msg })
           } catch (err) {
             console.error('[no-tauri]', msg)
