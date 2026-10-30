@@ -5,11 +5,19 @@ const MODES = [
   { id: 'replace', label: '替换文本' },
   { id: 'add', label: '添加文本' },
   { id: 'format', label: '格式化名称' },
+  { id: 'case', label: '转换大小写' },
 ]
+
+function modificationDate(mtimeMs) {
+  if (!Number.isFinite(mtimeMs)) return ''
+  const date = new Date(mtimeMs)
+  if (Number.isNaN(date.getTime())) return ''
+  return `${String(date.getFullYear()).padStart(4, '0')}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`
+}
 
 /**
  * 批量重命名对话框（Finder/QSpace 风格）
- * items: [{ path, name, isDir }]，newName 计算保留扩展名
+ * items: [{ path, name, isDir, mtime_ms }]，newName 计算保留扩展名
  */
 export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const [mode, setMode] = useState('replace')
@@ -20,6 +28,8 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const [fmtName, setFmtName] = useState('文件')
   const [startNum, setStartNum] = useState(1)
   const [digits, setDigits] = useState(2)
+  const [addDate, setAddDate] = useState(false)
+  const [caseStyle, setCaseStyle] = useState('upper')
   const [busy, setBusy] = useState(false)
 
   const results = useMemo(
@@ -33,12 +43,20 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
           if (find) base = stem.split(find).join(replaceWith)
         } else if (mode === 'add') {
           base = addPos === 'before' ? addText + stem : stem + addText
-        } else {
+        } else if (mode === 'format') {
           base = fmtName + String(Math.max(startNum, 0) + i).padStart(Math.min(Math.max(digits, 1), 6), '0')
+        } else if (mode === 'case') {
+          if (caseStyle === 'upper') base = stem.toUpperCase()
+          else if (caseStyle === 'lower') base = stem.toLowerCase()
+          else base = stem.toLowerCase().replace(/(^|[^\p{L}\p{M}\p{N}])\p{L}/gu, (letter) => letter.toUpperCase())
+        }
+        if (addDate && (mode === 'add' || mode === 'format')) {
+          const date = modificationDate(it.mtime_ms)
+          if (date) base += `_${date}`
         }
         return { ...it, newBase: base, newName: base + ext }
       }),
-    [items, mode, find, replaceWith, addText, addPos, fmtName, startNum, digits]
+    [items, mode, find, replaceWith, addText, addPos, fmtName, startNum, digits, addDate, caseStyle]
   )
 
   const lowerNames = results.map((r) => r.newName.toLowerCase())
@@ -82,7 +100,7 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
         <div className="modal-title">重新命名 {items.length} 个项目</div>
         <div className="modal-body">
           <div className="modal-row">
-            <select value={mode} onChange={(e) => setMode(e.target.value)} className="modal-select">
+            <select aria-label="重命名模式" value={mode} onChange={(e) => setMode(e.target.value)} className="modal-select">
               {MODES.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.label}
@@ -146,6 +164,25 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
                   onChange={(e) => setDigits(+e.target.value || 2)}
                 />
               </label>
+            </div>
+          )}
+
+          {(mode === 'add' || mode === 'format') && (
+            <div className="modal-row date">
+              <label>
+                <input type="checkbox" checked={addDate} onChange={(e) => setAddDate(e.target.checked)} />
+                添加日期（修改日期，yyyyMMdd）
+              </label>
+            </div>
+          )}
+
+          {mode === 'case' && (
+            <div className="modal-row">
+              <select aria-label="转换方式" value={caseStyle} onChange={(e) => setCaseStyle(e.target.value)}>
+                <option value="upper">全部大写</option>
+                <option value="lower">全部小写</option>
+                <option value="title">首字母大写（每个词）</option>
+              </select>
             </div>
           )}
         </div>

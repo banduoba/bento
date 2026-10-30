@@ -248,6 +248,7 @@ export default function App() {
   const rowsCache = useRef({}) // tabId -> 当前排序后的条目数组
   const modeRef = useRef('copy')
   const progTimer = useRef(null)
+  const toastTimer = useRef(null)
   const cfgRef = useRef(null)
   cfgRef.current = cfg
 
@@ -634,32 +635,42 @@ export default function App() {
     try {
       const results = await api.transfer(paths, dest, mode)
       reportErrors(results)
-      // 记录成功的移动操作供 ⌘Z 撤销（移回原位置）
-      if (mode === 'move') {
-        const moves = (results || []).filter((r) => r.ok)
-        if (moves.length) {
-          undoStackRef.current.push({
-            label: moves.length === 1 ? basename(moves[0].dest) : `${moves.length} 个项目`,
-            undo: async () => {
-              await api.transfer(
-                moves.map((m) => m.dest),
-                moves[0].source.slice(0, moves[0].source.lastIndexOf('/')),
-                'move'
-              )
-            },
-          })
-          if (undoStackRef.current.length > 30) undoStackRef.current.shift()
-          setUndoToast({
-            label: moves.length === 1 ? basename(moves[0].dest) : `${moves.length} 个项目`,
-          })
-          setTimeout(() => setUndoToast(null), 4000)
-        }
+      // 记录成功的操作供 ⌘Z 撤销
+      const ok = (results || []).filter((r) => r.ok)
+      if (mode === 'move' && ok.length) {
+        const moves = ok
+        pushUndo(
+          moves.length === 1 ? `移动：${basename(moves[0].dest)}` : `移动 ${moves.length} 个项目`,
+          async () => {
+            for (const m of moves) {
+              await api.transfer([m.dest], m.source.slice(0, m.source.lastIndexOf('/')), 'move')
+            }
+          }
+        )
+      }
+      if (mode === 'copy' && ok.length) {
+        const copies = ok.map((r) => r.dest)
+        pushUndo(
+          copies.length === 1 ? `拷贝：${basename(copies[0])}` : `拷贝 ${copies.length} 个项目`,
+          async () => {
+            await api.trash(copies)
+          }
+        )
       }
     } catch (e) {
       alert(`操作失败: ${e}`)
     }
     if (mode === 'move') setClip(null)
     refresh()
+  }
+
+  // 统一记录可撤销操作并提示（4 秒）
+  const pushUndo = (label, undo) => {
+    undoStackRef.current.push({ label, undo })
+    if (undoStackRef.current.length > 30) undoStackRef.current.shift()
+    setUndoToast({ label })
+    clearTimeout(toastTimer.current)
+    toastTimer.current = setTimeout(() => setUndoToast(null), 4000)
   }
 
   // ⌘Z：撤销最近一次移动
@@ -682,6 +693,20 @@ export default function App() {
     if (!list.length) return
     api
       .trash(list)
+      .then((entries) => {
+        if (entries?.length) {
+          pushUndo(
+            entries.length === 1
+              ? `废纸篓：${basename(entries[0].original)}`
+              : `废纸篓 ${entries.length} 个项目`,
+            async () => {
+              for (const e of entries) {
+                await api.transfer([e.trashed], e.original.slice(0, e.original.lastIndexOf('/')), 'move')
+              }
+            }
+          )
+        }
+      })
       .catch((e) => alert(String(e)))
       .finally(() => {
         setSel((s) => ({ ...s, [tabId]: new Set() }))
@@ -728,6 +753,9 @@ export default function App() {
         refresh()
         setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
         setRenaming({ tabId, path: created, value: basename(created), selectAll: true })
+        pushUndo(`新建文件夹：${basename(created)}`, async () => {
+          await api.trash([created])
+        })
       })
       .catch((e) => alert(String(e)))
   }
@@ -741,6 +769,9 @@ export default function App() {
         refresh()
         setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
         setRenaming({ tabId, path: created, value: basename(created), selectAll: true })
+        pushUndo(`新建文件：${basename(created)}`, async () => {
+          await api.trash([created])
+        })
       })
       .catch((e) => alert(String(e)))
   }
@@ -772,6 +803,11 @@ export default function App() {
     if (!value || value.trim() === current) return
     api
       .rename(path, value)
+      .then((newPath) => {
+        pushUndo(`重命名：${current} → ${value}`, async () => {
+          await api.rename(newPath, current)
+        })
+      })
       .catch((e) => alert(String(e)))
       .finally(() => {
         setSel((s) => ({ ...s, [tabId]: new Set() }))
