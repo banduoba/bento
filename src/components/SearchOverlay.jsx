@@ -49,6 +49,7 @@ export default function SearchOverlay({
   open,
   root,
   showHidden,
+  searchPaths,
   scope,
   sortBy,
   onScopeChange,
@@ -108,7 +109,7 @@ export default function SearchOverlay({
     clearTimeout(timerRef.current)
     timerRef.current = setTimeout(async () => {
       try {
-        const r = await api.search(q, scope, scope === 'pane' ? root : null, showHidden)
+        const r = await api.search(q, scope, scope === 'pane' ? root : null, showHidden, searchPaths)
         if (tokenRef.current !== token) return
         setResults(r || [])
         setSelIdx(0)
@@ -119,7 +120,7 @@ export default function SearchOverlay({
       }
     }, 250)
     return () => clearTimeout(timerRef.current)
-  }, [query, scope, root, showHidden])
+  }, [query, scope, root, showHidden, searchPaths])
 
   // 全局范围时轮询 fsearch 索引状态（未建好时结果来自系统索引，需要提示）
   useEffect(() => {

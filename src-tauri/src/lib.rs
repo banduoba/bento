@@ -280,12 +280,55 @@ async fn transfer(
     .map_err(|e| e.to_string())?
 }
 
-#[tauri::command]
-async fn trash(paths: Vec<String>) -> Result<(), String> {
-    for p in &paths {
-        trash::delete(p).map_err(|e| format!("移到废纸篓失败: {}", e))?;
-    }
+/// 回退废纸篓：native 失败（外置/他人卷无 .Trashes）时，
+/// 把文件移入 Bento 自己的回收站目录（可从该目录找回）
+fn bento_trash_fallback(p: &str, app_dir: &Path) -> Result<(), String> {
+    let src = Path::new(p);
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    let trash_dir = app_dir.join("Trash");
+    fs::create_dir_all(&trash_dir).map_err(|e| format!("创建回收站目录失败: {}", e))?;
+    let dest = unique_path(&trash_dir, &name);
+    do_transfer(src, &dest, "move").map_err(|e| format!("移入 Bento 回收站失败: {}", e))?;
     Ok(())
+}
+
+#[tauri::command]
+async fn trash(paths: Vec<String>, app: AppHandle) -> Result<Vec<String>, String> {
+    let app_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    let mut used_fallback = Vec::new();
+    for p in &paths {
+        // 挂载卷（/Volumes/...）通常没有可写的 .Trashes：原生废纸篓会弹密码框且必然失败，
+        // 直接移入 Bento 回收站（应用数据目录，可找回）
+        if p.starts_with("/Volumes/") {
+            bento_trash_fallback(p, &app_dir)
+                .map_err(|fe| format!("移到废纸篓失败: {}", fe))?;
+            used_fallback.push(basename_of(p));
+            continue;
+        }
+        if let Err(e) = trash::delete(p) {
+            bento_trash_fallback(p, &app_dir)
+                .map_err(|fe| format!("移到废纸篓失败: {}；{}", e, fe))?;
+            used_fallback.push(basename_of(p));
+        }
+    }
+    if used_fallback.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Ok(used_fallback)
+    }
+}
+
+fn basename_of(p: &str) -> String {
+    Path::new(p)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string())
 }
 
 /// 新建文件夹，自动命名「未命名文件夹」「未命名文件夹 2」…，返回实际路径
@@ -591,6 +634,7 @@ async fn search(
     root: Option<String>,
     show_hidden: bool,
     limit: Option<usize>,
+    roots: Option<Vec<String>>,
 ) -> Result<Vec<SearchItem>, String> {
     let q = query.trim().to_string();
     if q.is_empty() {
@@ -598,16 +642,30 @@ async fn search(
     }
     let limit = limit.unwrap_or(300).min(1000);
     tauri::async_runtime::spawn_blocking(move || match scope.as_str() {
-        // 全局：优先 fsearch 引擎（模糊 + 拼写容错 + 实时 + glob/ext 语法），不可用/建索引中回退 Spotlight
-        // 并合并 Spotlight 对 /Volumes 的结果（fsearch 索引不含挂载卷子树）
+        // 全局：优先 fsearch 引擎（模糊 + 拼写容错 + 实时 + glob/ext 语法）
+        // 并合并**全盘** Spotlight 结果（-onlyin /Volumes 不会递归挂载点，必须全盘查）
+        // roots 非空时按前缀过滤（用户在设置里限定的搜索范围）
         "global" => {
             let mut out = match fsearch_global(&q, limit) {
                 Some(v) => v,
                 None => mdfind_search(&q, None, limit),
             };
-            for item in mdfind_search(&q, Some("/Volumes"), limit) {
+            for item in mdfind_search(&q, None, limit) {
                 if !out.iter().any(|e| e.path == item.path) {
                     out.push(item);
+                }
+            }
+            if let Some(roots) = roots {
+                if !roots.is_empty() {
+                    let trimmed: Vec<SearchItem> = out
+                        .into_iter()
+                        .filter(|item| {
+                            roots
+                                .iter()
+                                .any(|r| item.path.starts_with(r.as_str()))
+                        })
+                        .collect();
+                    out = trimmed;
                 }
             }
             Ok(out)
@@ -720,6 +778,7 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_drag::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // 自定义菜单：不带任何会与前端冲突的标准快捷键
             // （默认菜单的 ⌘W 关窗 / ⌘R 刷新 / ⌘C 拷贝 会抢先拦截按键事件）

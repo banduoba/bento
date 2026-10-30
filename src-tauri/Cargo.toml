@@ -23,6 +23,7 @@ tauri-plugin-clipboard-manager = "2"
 regex = "1"
 tauri-plugin-window-state = "2"
 tauri-plugin-drag = "2"
+tauri-plugin-dialog = "2"
 
 [profile.release]
 lto = true

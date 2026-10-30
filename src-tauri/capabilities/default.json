@@ -9,6 +9,7 @@
     "core:window:allow-toggle-maximize",
     "clipboard-manager:allow-read-text",
     "drag:default",
+    "dialog:default",
     "clipboard-manager:allow-write-text"
   ]
 }

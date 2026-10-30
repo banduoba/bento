@@ -10,8 +10,9 @@ import Pane from './components/Pane'
 import StatusBar from './components/StatusBar'
 import ContextMenu from './components/ContextMenu'
 import BatchRenameDialog from './components/BatchRenameDialog'
+import SettingsDialog from './components/SettingsDialog'
 import SearchOverlay from './components/SearchOverlay'
-import { IconEye, IconEyeOff, IconSearch, IconChevronDown } from './icons'
+import { IconEye, IconEyeOff, IconSearch, IconChevronDown, IconSettings } from './icons'
 
 const MIME = 'application/x-bento'
 
@@ -118,6 +119,7 @@ const defaultConfig = (home) => ({
   showSidebar: true,
   focusedIdx: 0,
   searchPrefs: { scope: 'global', sort: 'btime' },
+  searchPaths: [],
   favorites: ['Desktop', 'Documents', 'Downloads', 'Movies', 'Music', 'Pictures'].map((n) => ({
     name: n,
     path: `${home}/${n}`,
@@ -170,6 +172,9 @@ function sanitizeConfig(saved, home) {
       scope: ['pane', 'home', 'global'].includes(saved.searchPrefs?.scope) ? saved.searchPrefs.scope : 'global',
       sort: ['btime', 'mtime', 'size', 'name', 'score'].includes(saved.searchPrefs?.sort) ? saved.searchPrefs.sort : 'btime',
     },
+    searchPaths: Array.isArray(saved.searchPaths)
+      ? saved.searchPaths.filter((p) => typeof p === 'string' && p.startsWith('/'))
+      : [],
     favorites: Array.isArray(saved.favorites) ? saved.favorites : base.favorites,
     panes,
     workspaces,
@@ -220,6 +225,7 @@ export default function App() {
   const [pathEditTick, setPathEditTick] = useState(0) // ⌘⇧G 让聚焦窗格进入路径编辑
   const [flashPane, setFlashPane] = useState(-1)
   const [wsRenaming, setWsRenaming] = useState(null) // { id, value }
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const flashTimer = useRef(null)
 
   // 闪烁提示：让用户一眼看到导航发生在哪个窗格
@@ -977,6 +983,13 @@ export default function App() {
           >
             {cfg.showHidden ? <IconEye size={15} /> : <IconEyeOff size={15} />}
           </button>
+          <button
+            className="iconbtn"
+            title="设置"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <IconSettings size={15} />
+          </button>
         </div>
       </div>
 
@@ -1077,6 +1090,7 @@ export default function App() {
         showHidden={cfg.showHidden}
           scope={cfg.searchPrefs?.scope || 'global'}
           sortBy={cfg.searchPrefs?.sort || 'btime'}
+          searchPaths={cfg.searchPaths || []}
           onScopeChange={(v) => setCfg((c) => ({ ...c, searchPrefs: { ...c.searchPrefs, scope: v } }))}
           onSortChange={(v) => setCfg((c) => ({ ...c, searchPrefs: { ...c.searchPrefs, sort: v } }))}
           onClose={() => setSearchOpen(false)}
@@ -1088,6 +1102,12 @@ export default function App() {
           nav(t.id, dir)
         }}
         onReveal={(p) => api.reveal(p).catch(() => {})}
+      />
+      <SettingsDialog
+        open={settingsOpen}
+        searchPaths={cfg.searchPaths}
+        onChange={(paths) => setCfg((c) => ({ ...c, searchPaths: paths }))}
+        onClose={() => setSettingsOpen(false)}
       />
       {batchRename && (
         <BatchRenameDialog
