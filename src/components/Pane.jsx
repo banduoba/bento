@@ -3,7 +3,8 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
 import { api, fileSrc } from '../api'
 import { setWatch, clearWatch, onFsChange } from '../fsWatch'
-import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher, copyText } from '../format'
+import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher, copyText, kindOf, splitName } from '../format'
+import { COL_MIN, COL_MAX, DEFAULT_COLS, applyColVars, fitColumns, normalizeCols, normalizeVis } from '../columns'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
 
 const MIME = 'application/x-bento'
@@ -16,6 +17,7 @@ function sortEntries(list, key, dir) {
     if (key === 'size') c = a.size - b.size
     else if (key === 'mtime') c = a.mtime_ms - b.mtime_ms
     else if (key === 'btime') c = (a.btime_ms || 0) - (b.btime_ms || 0)
+    else if (key === 'kind') c = kindOf(a).localeCompare(kindOf(b), 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN', { numeric: true })
     else c = a.name.localeCompare(b.name, 'zh-CN', { numeric: true })
     return c * f
   })
@@ -64,6 +66,8 @@ export default function Pane({
   onDropTransfer,
   onFilter,
   onSort,
+  onColWidths,
+  onColMenu,
   onStats,
   onRowsCache,
   onRenameChange,
@@ -165,6 +169,59 @@ export default function Pane({
     })
     rowDragRef.current = { x: e.clientX, y: e.clientY, paths, preview, started: false }
   }
+
+  // ---------- 列：宽度可拖动、可勾选显示、窗格太窄自动隐藏次要列（均只作用于当前窗格） ----------
+  const colsInnerRef = useRef(null)
+  const paneElRef = useRef(null)
+  const [paneW, setPaneW] = useState(0)
+  useLayoutEffect(() => {
+    const el = paneElRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([e]) => setPaneW(Math.round(e.contentRect.width)))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+  const shownCols = fitColumns(normalizeVis(pane.colVisible), normalizeCols(pane.colWidths), paneW)
+  const shownKey = shownCols.join(',')
+  // 列模板写成该窗格根元素上的 CSS 变量；每个窗格各存各的（pane.colWidths / pane.colVisible）
+  useLayoutEffect(() => {
+    if (paneElRef.current) applyColVars(pane.colWidths, paneElRef.current, shownCols)
+  }, [pane.colWidths, shownKey])
+  const startColResize = (e, key) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const cur = normalizeCols(pane.colWidths)
+    const startW = cur[key] ?? e.currentTarget.parentElement.getBoundingClientRect().width // 名称列自适应时取当前实际宽度
+    const startX = e.clientX
+    const [lo, hi] = key === 'name' ? [120, 1600] : [COL_MIN, COL_MAX]
+    let next = cur
+    document.body.classList.add('col-resizing')
+    const onMove = (ev) => {
+      next = { ...cur, [key]: Math.max(lo, Math.min(hi, Math.round(startW + ev.clientX - startX))) }
+      applyColVars(next, paneElRef.current) // 拖动中只改本窗格的 CSS 变量，松手才写配置
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      document.body.classList.remove('col-resizing')
+      onColWidths?.(next)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+  const resetCol = (key) => {
+    const cur = normalizeCols(pane.colWidths)
+    onColWidths?.({ ...cur, [key]: key === 'name' ? null : DEFAULT_COLS[key] })
+  }
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const sync = () => {
+      if (colsInnerRef.current) colsInnerRef.current.style.transform = `translateX(${-el.scrollLeft}px)`
+    }
+    el.addEventListener('scroll', sync, { passive: true })
+    return () => el.removeEventListener('scroll', sync)
+  }, [])
 
   // ---------- 空白处拖拽框选（rubber band） ----------
   const rowsRef = useRef([])
@@ -587,6 +644,7 @@ export default function Pane({
 
   return (
     <section
+      ref={paneElRef}
       style={{ gridArea: area }}
       className={`pane${focused ? ' focused' : ''}${flash ? ' flash' : ''}${dropTarget === 'bg' ? ' drop-hover' : ''}`}
       onMouseDown={() => onFocus(index)}
@@ -758,30 +816,45 @@ export default function Pane({
         </div>
       </div>
 
-      <div className="cols">
-        <div
-          className="col-head"
-          onClick={() => onSort(tab.id, 'name', tab.sortKey === 'name' && tab.sortDir === 'asc' ? 'desc' : 'asc')}
-        >
-          名称{tab.sortKey === 'name' && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>}
-        </div>
-        <div
-          className="col-head right"
-          onClick={() => onSort(tab.id, 'size', tab.sortKey === 'size' && tab.sortDir === 'asc' ? 'desc' : 'asc')}
-        >
-          {tab.sortKey === 'size' && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>}大小
-        </div>
-        <div
-          className="col-head"
-          onClick={() => onSort(tab.id, 'mtime', tab.sortKey === 'mtime' && tab.sortDir === 'asc' ? 'desc' : 'asc')}
-        >
-          {tab.sortKey === 'mtime' && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>}修改日期
-        </div>
-        <div
-          className="col-head"
-          onClick={() => onSort(tab.id, 'btime', tab.sortKey === 'btime' && tab.sortDir === 'asc' ? 'desc' : 'asc')}
-        >
-          {tab.sortKey === 'btime' && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>}创建日期
+      <div className="cols" onContextMenu={(e) => {
+        // 右键表头：勾选要显示的列（不要冒泡成窗格空白菜单）
+        e.preventDefault()
+        e.stopPropagation()
+        onColMenu?.(e.clientX, e.clientY)
+      }}>
+        <div className="cols-inner" ref={colsInnerRef}>
+          {[
+            ['name', '名称', false],
+            ['size', '大小', true],
+            ['kind', '种类', false],
+            ['mtime', '修改日期', false],
+            ['btime', '创建日期', false],
+          ]
+            .filter(([key]) => key === 'name' || shownCols.includes(key))
+            .map(([key, label, right]) => {
+              const arrow = tab.sortKey === key && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>
+              return (
+                <div
+                  key={key}
+                  className={`col-head${right ? ' right' : ''}`}
+                  onClick={() => onSort(tab.id, key, tab.sortKey === key && tab.sortDir === 'asc' ? 'desc' : 'asc')}
+                >
+                  {right && arrow}
+                  <span className="col-label">{label}</span>
+                  {!right && arrow}
+                  <span
+                    className="col-resize"
+                    title="拖动调整列宽（双击恢复默认；右键选择显示的列）"
+                    onMouseDown={(e) => startColResize(e, key)}
+                    onClick={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation()
+                      resetCol(key)
+                    }}
+                  />
+                </div>
+              )
+            })}
         </div>
       </div>
 
@@ -885,7 +958,16 @@ export default function Pane({
                       />
                     ) : (
                       <>
-                        <span className="name">{entry.name}</span>
+                        {(() => {
+                          // 过长时只截断主干、始终露出扩展名（funn….pdf）
+                          const [stem, ext] = splitName(entry.name, entry.is_dir)
+                          return (
+                            <span className="name" title={entry.name}>
+                              <span className="name-stem">{stem}</span>
+                              {ext && <span className="name-ext">{ext}</span>}
+                            </span>
+                          )
+                        })()}
                         <button
                           className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
                           title="复制路径"
@@ -903,9 +985,10 @@ export default function Pane({
                       </>
                     )}
                   </div>
-                  <span className="row-size">{entry.is_dir ? '--' : fmtSize(entry.size)}</span>
-                  <span className="row-date">{fmtDate(entry.mtime_ms)}</span>
-                  <span className="row-date">{fmtDate(entry.btime_ms)}</span>
+                  {shownCols.includes('size') && <span className="row-size">{entry.is_dir ? '--' : fmtSize(entry.size)}</span>}
+                  {shownCols.includes('kind') && <span className="row-kind" title={kindOf(entry)}>{kindOf(entry)}</span>}
+                  {shownCols.includes('mtime') && <span className="row-date">{fmtDate(entry.mtime_ms)}</span>}
+                  {shownCols.includes('btime') && <span className="row-date">{fmtDate(entry.btime_ms)}</span>}
                 </div>
               )
             })}

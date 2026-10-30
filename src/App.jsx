@@ -7,6 +7,7 @@ import { api, hasTauri } from './api'
 import { IconCheck } from './icons'
 import { basename, parentPath, labelOf, copyText } from './format'
 import { dragState } from './nativeDrag'
+import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
 import Sidebar from './components/Sidebar'
 import Pane from './components/Pane'
 import StatusBar from './components/StatusBar'
@@ -110,11 +111,16 @@ function sanitizePanes(raw, home) {
         path,
         history,
         hi: Math.min(Math.max(t?.hi ?? history.length - 1, 0), history.length - 1),
-        sortKey: { date: 'mtime' }[t?.sortKey] || (['name', 'size', 'mtime', 'btime'].includes(t?.sortKey) ? t.sortKey : 'name'),
+        sortKey: { date: 'mtime' }[t?.sortKey] || (['name', 'size', 'kind', 'mtime', 'btime'].includes(t?.sortKey) ? t.sortKey : 'name'),
         sortDir: t?.sortDir === 'desc' ? 'desc' : 'asc',
       }
     })
-    return { tabs, active: Math.min(Math.max(p?.active ?? 0, 0), tabs.length - 1) }
+    return {
+      tabs,
+      active: Math.min(Math.max(p?.active ?? 0, 0), tabs.length - 1),
+      colWidths: normalizeCols(p?.colWidths), // 列宽/显示哪些列按窗格各自保存
+      colVisible: normalizeVis(p?.colVisible),
+    }
   })
 }
 
@@ -1021,6 +1027,29 @@ export default function App() {
     setMenu({ x, y, items })
   }
 
+  // 每个窗格各自的列设置（宽度 / 显示哪些列）
+  const patchPane = (i, patch) =>
+    setCfg((c) => ({ ...c, panes: c.panes.map((pp, j) => (j === i ? { ...pp, ...patch } : pp)) }))
+  const colMenu = (i, x, y) => {
+    const vis = normalizeVis(cfg.panes[i]?.colVisible)
+    setMenu({
+      x,
+      y,
+      items: [
+        ...COL_LABELS.map(([key, label]) => ({
+          label,
+          checked: !!vis[key],
+          action: () => patchPane(i, { colVisible: { ...vis, [key]: !vis[key] } }),
+        })),
+        { sep: true },
+        {
+          label: '恢复到默认',
+          action: () => patchPane(i, { colWidths: normalizeCols(null), colVisible: normalizeVis(null) }),
+        },
+      ],
+    })
+  }
+
   const blankMenu = (tabId, x, y) =>
     setMenu({
       x,
@@ -1384,6 +1413,8 @@ export default function App() {
               filter={filters[p.tabs[p.active]?.id] || ''}
               renaming={renaming}
               tick={tick}
+              onColWidths={(w) => patchPane(i, { colWidths: normalizeCols(w) })}
+              onColMenu={(x, y) => colMenu(i, x, y)}
               cutSet={cutSet}
               editPathSignal={i === focusIdx ? pathEditTick : 0}
               flash={i === flashPane}

@@ -34,6 +34,38 @@ export function extColor(ext) {
   return '#8e8e93'
 }
 
+// 「种类」列：扩展名 → 中文种类名（找不到时用「XXX 文件」）
+const KINDS = {
+  pdf: 'PDF 文档', txt: '文本', md: 'Markdown 文本', markdown: 'Markdown 文本', rtf: 'RTF 文档',
+  csv: '逗号分隔的值', tsv: '制表符分隔的值', json: 'JSON 文件', xml: 'XML 文档', yaml: 'YAML 文件', yml: 'YAML 文件',
+  toml: 'TOML 文件', ini: '配置文件', log: '日志', html: 'HTML 文档', htm: 'HTML 文档', css: 'CSS 样式表',
+  js: 'JavaScript 脚本', jsx: 'JSX 源码', ts: 'TypeScript 源码', tsx: 'TSX 源码', py: 'Python 脚本', r: 'R 脚本',
+  rmd: 'R Markdown', sh: 'Shell 脚本', rs: 'Rust 源码', go: 'Go 源码', c: 'C 源码', h: 'C 头文件', cpp: 'C++ 源码',
+  java: 'Java 源码', ipynb: 'Jupyter 笔记本', lock: '锁文件',
+  png: 'PNG 图像', jpg: 'JPEG 图像', jpeg: 'JPEG 图像', gif: 'GIF 图像', webp: 'WebP 图像', bmp: 'BMP 图像',
+  svg: 'SVG 图像', ico: '图标', tiff: 'TIFF 图像', heic: 'HEIC 图像', avif: 'AVIF 图像',
+  doc: 'Word 文档', docx: 'Word 文档', xls: 'Excel 工作簿', xlsx: 'Excel 工作簿', ppt: 'PowerPoint 演示文稿',
+  pptx: 'PowerPoint 演示文稿', pages: 'Pages 文稿', numbers: 'Numbers 表格', key: 'Keynote 演示文稿',
+  zip: 'ZIP 归档', gz: 'gzip 归档', tar: 'TAR 归档', bz2: 'bzip2 归档', xz: 'xz 归档', '7z': '7-Zip 归档', rar: 'RAR 归档',
+  dmg: '磁盘映像', pkg: '安装包', app: '应用程序', iso: '光盘映像',
+  mp3: 'MP3 音频', wav: 'WAV 音频', aac: 'AAC 音频', flac: 'FLAC 音频', m4a: 'M4A 音频',
+  mp4: 'MPEG-4 影片', mov: 'QuickTime 影片', avi: 'AVI 影片', mkv: 'Matroska 影片', webm: 'WebM 影片',
+  ttf: '字体', otf: '字体', epub: 'EPUB 图书',
+}
+export function kindOf(entry) {
+  if (entry.isPseudo) return ''
+  if (entry.is_dir) return entry.ext === 'app' ? '应用程序' : '文件夹'
+  return KINDS[entry.ext] || (entry.ext ? `${entry.ext.toUpperCase()} 文件` : '文件')
+}
+
+// 文件名拆成「主干 + 扩展名」，让过长时只截断主干、始终露出扩展名（funn….pdf）
+export function splitName(name, isDir) {
+  if (isDir) return [name, '']
+  const i = name.lastIndexOf('.')
+  if (i <= 0 || name.length - i > 10) return [name, '']
+  return [name.slice(0, i), name.slice(i)]
+}
+
 export const basename = (p) => p.split('/').filter(Boolean).pop() || p
 
 export function parentPath(p) {

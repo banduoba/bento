@@ -394,14 +394,47 @@ async fn zip_paths(sources: Vec<String>, dest_dir: String) -> Result<String, Str
             "归档.zip".to_string()
         };
         let dest = unique_path(&dir, &base);
-        let mut cmd = std::process::Command::new("ditto");
-        cmd.args(["-c", "-k", "--sequesterRsrc", "--keepParent"]);
-        for s in &sources {
-            cmd.arg(s);
+        let out = if sources.len() == 1 {
+            // 单个：ditto 保留资源分支与父文件夹名
+            std::process::Command::new("ditto")
+                .args(["-c", "-k", "--sequesterRsrc", "--keepParent", &sources[0]])
+                .arg(&dest)
+                .output()
+        } else {
+            // ditto 一次只能压缩一个源（报 "Can't archive multiple sources"）。多个源：
+            // 先在临时目录里按文件名建符号链接，再用 zip 在该目录下压缩（不加 -y，即跟随链接存真实内容）
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let stage = std::env::temp_dir().join(format!("bento-zip-{}-{}", std::process::id(), nanos));
+            fs::create_dir_all(&stage).map_err(|e| format!("压缩失败: {}", e))?;
+            let mut names: Vec<String> = Vec::new();
+            for s in &sources {
+                let sp = Path::new(s);
+                let fname = sp
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "item".into());
+                let link = unique_path(&stage, &fname);
+                if let Err(e) = std::os::unix::fs::symlink(sp, &link) {
+                    let _ = fs::remove_dir_all(&stage);
+                    return Err(format!("压缩失败: {}", e));
+                }
+                names.push(link.file_name().unwrap().to_string_lossy().into_owned());
+            }
+            let r = std::process::Command::new("zip")
+                .current_dir(&stage)
+                .args(["-r", "-q"])
+                .arg(&dest)
+                .args(&names)
+                .output();
+            let _ = fs::remove_dir_all(&stage);
+            r
         }
-        cmd.arg(&dest);
-        let out = cmd.output().map_err(|e| format!("压缩失败: {}", e))?;
+        .map_err(|e| format!("压缩失败: {}", e))?;
         if !out.status.success() {
+            let _ = fs::remove_file(&dest);
             return Err(format!("压缩失败: {}", String::from_utf8_lossy(&out.stderr)));
         }
         Ok(dest.to_string_lossy().into_owned())
@@ -1151,6 +1184,57 @@ mod preview_tests {
         let json = serde_json::to_value(TextPreview::empty("text")).unwrap();
         assert!(json.get("matchLines").is_some() && json.get("hiddenHits").is_some());
         assert!(json.get("match_lines").is_none());
+    }
+}
+
+#[cfg(test)]
+mod zip_tests {
+    use super::*;
+
+    fn unzip_list(zip: &str) -> String {
+        let out = std::process::Command::new("unzip").args(["-Z1", zip]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// 回归：多选压缩曾报 "ditto: Can't archive multiple sources"
+    #[test]
+    fn zips_multiple_sources_into_one_archive() {
+        let root = std::env::temp_dir().join(format!("bento-ziptest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/folder")).unwrap();
+        fs::write(root.join("src/a.txt"), "a").unwrap();
+        fs::write(root.join("src/folder/inner.txt"), "i").unwrap();
+        fs::write(root.join("src/b.txt"), "b").unwrap();
+        fs::create_dir_all(root.join("out")).unwrap();
+        let sources: Vec<String> = ["a.txt", "folder", "b.txt"]
+            .iter()
+            .map(|n| root.join("src").join(n).to_string_lossy().into_owned())
+            .collect();
+        let zip = tauri::async_runtime::block_on(zip_paths(sources, root.join("out").to_string_lossy().into_owned()))
+            .expect("zip");
+        let names = unzip_list(&zip);
+        let _ = fs::remove_dir_all(&root);
+        assert!(zip.ends_with("归档.zip"), "{zip}");
+        for want in ["a.txt", "b.txt", "folder/inner.txt"] {
+            assert!(names.lines().any(|l| l == want), "missing {want} in:\n{names}");
+        }
+    }
+
+    #[test]
+    fn single_source_keeps_parent_folder_name() {
+        let root = std::env::temp_dir().join(format!("bento-ziptest1-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("proj")).unwrap();
+        fs::write(root.join("proj/x.txt"), "x").unwrap();
+        fs::create_dir_all(root.join("out")).unwrap();
+        let zip = tauri::async_runtime::block_on(zip_paths(
+            vec![root.join("proj").to_string_lossy().into_owned()],
+            root.join("out").to_string_lossy().into_owned(),
+        ))
+        .expect("zip");
+        let names = unzip_list(&zip);
+        let _ = fs::remove_dir_all(&root);
+        assert!(names.lines().any(|l| l == "proj/x.txt"), "{names}");
     }
 }
 
