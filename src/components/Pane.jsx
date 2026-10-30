@@ -73,6 +73,9 @@ export default function Pane({
   const [collapsedCount, setCollapsedCount] = useState(0) // 面包屑溢出时折叠的前置层级数
   const [copiedPath, setCopiedPath] = useState(null) // 行内复制路径反馈
   const [copyToast, setCopyToast] = useState(null) // { path, x, y, placeLeft } 锚定按钮的提示条
+  const [expandedDirs, setExpandedDirs] = useState(() => new Set()) // 树形展开的文件夹
+  const [kidsVersion, setKidsVersion] = useState(0)
+  const kidsRef = useRef({}) // dirPath -> 子条目数组（null=载入中）
   const copyTimer = useRef(null)
   const toastTimer = useRef(null)
   const showCopyToast = (path, btnRect) => {
@@ -195,9 +198,24 @@ export default function Pane({
   const rows = useMemo(() => {
     const base = entries || []
     const match = makeMatcher(filter)
-    const filtered = match ? base.filter((e) => match(e.name)) : base
-    return sortEntries(filtered, tab.sortKey, tab.sortDir)
-  }, [entries, filter, tab.sortKey, tab.sortDir])
+    // 筛选时使用平铺列表
+    if (match) return sortEntries(base.filter((e) => match(e.name)), tab.sortKey, tab.sortDir)
+    // 树形展开：已展开文件夹的子条目就地插入
+    const build = (list, depth) => {
+      const out = []
+      for (const e of sortEntries(list, tab.sortKey, tab.sortDir)) {
+        out.push({ ...e, depth })
+        if (e.is_dir && expandedDirs.has(e.path)) {
+          const kids = kidsRef.current[e.path]
+          if (kids === null) out.push({ path: e.path + '/:loading', name: '载入中…', isPseudo: true, depth: depth + 1 })
+          else if (kids.length === 0) out.push({ path: e.path + '/:empty', name: '（空文件夹）', isPseudo: true, depth: depth + 1 })
+          else out.push(...build(kids, depth + 1))
+        }
+      }
+      return out
+    }
+    return build(base, 0)
+  }, [entries, filter, tab.sortKey, tab.sortDir, expandedDirs, kidsVersion])
   rowsRef.current = rows
 
   const entryMap = useMemo(() => {
@@ -208,7 +226,7 @@ export default function Pane({
 
   // 注册当前行数据到 App（供 ⌘A 全选 / ⌘O 打开 / 回车重命名）
   useEffect(() => {
-    onRowsCache(tab.id, rows)
+    onRowsCache(tab.id, rows.filter((r) => !r.isPseudo))
   }, [rows, tab.id])
 
   // 向上汇报统计
@@ -226,6 +244,54 @@ export default function Pane({
   }, [entryMap, selection, entries])
 
 
+
+  // 切换标签页时重置展开状态与缓存
+  useEffect(() => {
+    setExpandedDirs(new Set())
+    kidsRef.current = {}
+  }, [tab.id])
+
+  // 手动刷新（tick）时重新拉取已展开目录的内容
+  useEffect(() => {
+    const paths = Object.keys(kidsRef.current)
+    if (!paths.length) return
+    let changed = false
+    for (const p of paths) {
+      api
+        .listDir(p, cfg.showHidden)
+        .then((r) => {
+          kidsRef.current[p] = r.entries
+          changed = true
+        })
+        .catch(() => {})
+    }
+    if (changed) setKidsVersion((v) => v + 1)
+  }, [tick])
+
+  // 展开/折叠文件夹
+  const toggleExpand = (e, entry) => {
+    e.stopPropagation()
+    const p = entry.path
+    setExpandedDirs((prev) => {
+      const next = new Set(prev)
+      if (next.has(p)) next.delete(p)
+      else next.add(p)
+      return next
+    })
+    if (kidsRef.current[p] === undefined) {
+      kidsRef.current[p] = null // 载入中
+      api
+        .listDir(p, cfg.showHidden)
+        .then((r) => {
+          kidsRef.current[p] = r.entries
+          setKidsVersion((v) => v + 1)
+        })
+        .catch(() => {
+          kidsRef.current[p] = []
+          setKidsVersion((v) => v + 1)
+        })
+    }
+  }
 
   // 地址栏进入编辑模式（点击路径空白/末尾区、铅笔、⌘L 或 ⌘⇧G 信号）
   const beginPathEdit = () => setEditingPath(tab.path)
@@ -281,6 +347,7 @@ export default function Pane({
   })
 
   const rowClick = (e, entry, idx) => {
+    if (entry.isPseudo) return
     if (suppressClickRef.current) {
       suppressClickRef.current = false
       return
@@ -580,15 +647,16 @@ export default function Pane({
                   }`}
                   style={{ transform: `translateY(${vi.start}px)` }}
                   onClick={(e) => rowClick(e, entry, vi.index)}
-                  onDoubleClick={() => onOpen(tab.id, entry)}
+                  onDoubleClick={() => !entry.isPseudo && onOpen(tab.id, entry)}
                   onContextMenu={(e) => {
                     e.preventDefault()
                     e.stopPropagation()
+                    if (entry.isPseudo) return
                     onFocus(index)
                     if (!selection?.has(entry.path)) onSelect(tab.id, new Set([entry.path]))
                     onMenu(tab.id, entry, e.clientX, e.clientY)
                   }}
-                  draggable={!isRenaming}
+                  draggable={!isRenaming && !entry.isPseudo}
                   onDragStart={(e) => {
                     e.dataTransfer.setData(MIME, dragData(entry))
                     e.dataTransfer.effectAllowed = 'copyMove'
@@ -604,9 +672,26 @@ export default function Pane({
                   onDragLeave={() => setDropTarget((t) => (t === entry.path ? null : t))}
                   onDrop={(e) => entry.is_dir && handleDrop(e, entry.path)}
                 >
-                  <div className="row-name">
+                  <div
+                    className="row-name"
+                    style={entry.depth ? { paddingLeft: entry.depth * 18 } : undefined}
+                  >
+                    {entry.is_dir ? (
+                      <button
+                        className={`disclosure${expandedDirs.has(entry.path) ? ' open' : ''}`}
+                        title={expandedDirs.has(entry.path) ? '折叠' : '展开'}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        draggable={false}
+                        onClick={(e) => toggleExpand(e, entry)}
+                      >
+                        <IconChevronRight size={12} />
+                      </button>
+                    ) : (
+                      <span className="disclosure-spacer" />
+                    )}
                     <span className="fileicon">
-                      <FileIcon entry={entry} />
+                      {entry.isPseudo ? null : <FileIcon entry={entry} />}
                     </span>
                     {isRenaming ? (
                       <input

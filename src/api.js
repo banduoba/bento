@@ -116,7 +116,7 @@ function mockApi() {
           .map((e) => ({ ...e, dir: e.path.slice(0, e.path.length - e.name.length - 1), btime_ms: e.mtime_ms }))
           .slice(0, 100)
       ),
-    fsearchStatus: () => Promise.resolve({ ready: true, entries: 0 }),
+    fsearchStatus: () => Promise.resolve({ ready: true, entries: 0, full_disk_access: true }),
     diskSpace: () => Promise.resolve(500e9),
     homeDir: () => Promise.resolve('/Users/demo'),
     // 浏览器测试视图也用 localStorage 记住工作区/布局，行为与真实 app 一致

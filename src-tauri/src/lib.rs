@@ -599,7 +599,19 @@ async fn search(
     let limit = limit.unwrap_or(300).min(1000);
     tauri::async_runtime::spawn_blocking(move || match scope.as_str() {
         // 全局：优先 fsearch 引擎（模糊 + 拼写容错 + 实时 + glob/ext 语法），不可用/建索引中回退 Spotlight
-        "global" => Ok(fsearch_global(&q, limit).unwrap_or_else(|| mdfind_search(&q, None, limit))),
+        // 并合并 Spotlight 对 /Volumes 的结果（fsearch 索引不含挂载卷子树）
+        "global" => {
+            let mut out = match fsearch_global(&q, limit) {
+                Some(v) => v,
+                None => mdfind_search(&q, None, limit),
+            };
+            for item in mdfind_search(&q, Some("/Volumes"), limit) {
+                if !out.iter().any(|e| e.path == item.path) {
+                    out.push(item);
+                }
+            }
+            Ok(out)
+        }
         "home" => {
             let h = std::env::var("HOME").unwrap_or_default();
             walk_search(Path::new(&h), &q, show_hidden, limit)
@@ -662,6 +674,7 @@ async fn save_window_state(app: AppHandle) -> Result<(), String> {
 struct FsearchStatus {
     ready: bool,
     entries: usize,
+    full_disk_access: bool,
 }
 
 /// fsearch 引擎状态（全局索引是否建好）
@@ -673,6 +686,7 @@ async fn fsearch_status() -> Result<FsearchStatus, String> {
             Ok(FsearchStatus {
                 ready: st.ready,
                 entries: st.entries,
+                full_disk_access: st.full_disk_access,
             })
         }
         None => Err("fsearch 不可用".into()),
