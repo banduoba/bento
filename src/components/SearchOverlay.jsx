@@ -115,6 +115,9 @@ export default function SearchOverlay({
   const [results, setResults] = useState([])
   const [format, setFormat] = useState('all')
   const [elapsed, setElapsed] = useState(null)
+  const [preview, setPreview] = useState(null)
+  const previewRef = useRef(null)
+  const firstHitRef = useRef(null) // 选中结果的内容预览 {loading, kind, text, matchLines, truncated, path}
   const [busy, setBusy] = useState(false)
   const [selIdx, setSelIdx] = useState(0)
   const [idxStatus, setIdxStatus] = useState(null) // fsearch 引擎状态
@@ -210,6 +213,33 @@ export default function SearchOverlay({
       ++tokenRef.current
     }
   }, [open, query, scope, root, showHidden, searchPaths, mode])
+
+  // 内容模式：选中结果变化 → 读取文件内容预览
+  useEffect(() => {
+    if (mode !== 'content' || !open) return
+    const item = sorted[selIdx]
+    if (!item) {
+      setPreview(null)
+      return
+    }
+    let live = true
+    firstHitRef.current = null
+    setPreview({ loading: true, path: item.path, name: item.name })
+    api
+      .readTextPreview(item.path, query)
+      .then((d) => live && setPreview({ ...d, path: item.path, name: item.name }))
+      .catch(() => live && setPreview({ kind: 'error', text: '', matchLines: [], path: item.path, name: item.name }))
+    return () => {
+      live = false
+    }
+  }, [selIdx, results, mode, open, query])
+
+  // 预览加载完成后滚动到第一处命中
+  useEffect(() => {
+    if (preview && !preview.loading && preview.kind === 'text' && preview.matchLines.length) {
+      requestAnimationFrame(() => firstHitRef.current?.scrollIntoView({ block: 'center' }))
+    }
+  }, [preview])
 
   // 全局范围时轮询 fsearch 索引状态（未建好时结果来自系统索引，需要提示）
   useEffect(() => {
@@ -434,6 +464,7 @@ export default function SearchOverlay({
             </button>
           ))}
         </div>
+        <div className={`search-body${mode === 'content' ? ' two-col' : ''}`}>
         <div className="search-results">
           {!query.trim() ? (
             history.length ? history.map((term, i) => (
@@ -498,33 +529,58 @@ export default function SearchOverlay({
                     </span>
                   </span>
                 </span>
-                {mode === 'content' ? (
-                  <span className="search-content">
-                    <span className="search-content-header">
-                      {resultActions(item)}
-                      {item.matches != null && <span className="search-matches">{item.matches} 处匹配</span>}
-                    </span>
-                    {item.lines?.length ? (
-                      item.lines.map((l) => (
-                        <span className="search-content-line" key={l.no}>
-                          <span className="line-no">{l.no}</span>
-                          <span className="line-text" title={l.text}>
-                            <Highlight text={l.text} query={query} literal />
-                          </span>
-                        </span>
-                      ))
-                    ) : (
-                      <span className="search-preview">二进制文件，无文本预览</span>
-                    )}
-                  </span>
-                ) : <>
-                  <span className="search-date">{fmtDate(item.btime_ms)}</span>
-                  <span className="search-size">{item.is_dir ? '--' : fmtSize(item.size)}</span>
-                  {resultActions(item)}
-                </>}
+                <span className="search-date">{fmtDate(item.btime_ms)}</span>
+                <span className="search-size">{item.is_dir ? '--' : fmtSize(item.size)}</span>
+                {resultActions(item)}
               </div>
             ))
           )}
+        </div>
+        {mode === 'content' && (
+          <div className="search-preview-pane" ref={previewRef}>
+            {!preview || !preview.loading ? null : <div className="sp-loading">读取内容中…</div>}
+            {preview?.loading === false && preview.kind === 'image' && (
+              <div className="sp-image">
+                <img src={`${fileSrc(preview.path)}`} alt="" draggable={false} />
+              </div>
+            )}
+            {preview?.loading === false && preview.kind === 'binary' && (
+              <div className="sp-message">二进制文件，无法预览文本内容</div>
+            )}
+            {preview?.loading === false && preview.kind === 'error' && (
+              <div className="sp-message">无法读取该文件内容</div>
+            )}
+            {preview && preview.kind === 'text' && preview.text && (
+              <>
+                <div className="sp-head" title={preview.path}>
+                  <span className="sp-matches">{preview.matchLines.length} 行命中</span>
+                  <span className="sp-name">{preview.name}</span>
+                  {preview.truncated && <span className="sp-truncated">（内容过大，仅显示前 256 KB）</span>}
+                </div>
+                <div className="sp-lines">
+                  {preview.text.split('\n').map((text, i) => {
+                    const no = i + 1
+                    const isMatch = preview.matchLines.includes(no)
+                    return (
+                      <div
+                        key={no}
+                        className={`pl-line${isMatch ? ' hit' : ''}`}
+                        data-line={no}
+                        ref={isMatch && !firstHitRef.current ? firstHitRef : undefined}
+                      >
+                        <span className="pl-no">{no}</span>
+                        <span className="pl-text">
+                          <Highlight text={text} query={query} literal />
+                        </span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            )}
+            {preview && preview.loading && <div className="sp-lines" />}
+          </div>
+        )}
         </div>
         <div className="search-hint">
           ↑↓ 选择 · ↩ {query.trim() ? '打开' : '搜索'} · {query.trim() && '右键 更多操作 · '}Esc 关闭 · 范围：{SCOPES.find((s) => s.id === scope)?.label}
