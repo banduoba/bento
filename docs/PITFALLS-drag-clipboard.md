@@ -97,3 +97,10 @@
 - 文件名中间省略：拆成「前段 + 末段」两个 span，前段 `overflow:hidden; text-overflow:ellipsis`、末段 `flex:none`，纯 CSS 就能得到 `前面…后面.ext`；末段 = 扩展名+5 字符，至少 8 字符、至少 30% 名长；用 `Array.from` 按字符切避免劈开 emoji。容器要 `overflow:hidden`，否则窄列时末段会溢出盖住下一列。
 - 日期与 QSpace 一致：今天/昨天只显示 `今天 10:16`，其余 `2026/9/25 00:07`（月日不补零）。
 - 拷贝/移动重名命名（Rust `copy_name_path`）：`name 副本.ext` → `name 副本1.ext` → `name 副本2.ext`…；对已带「副本[N]」的名字先去掉后缀再编号，不叠加「副本 副本」。只用于拷贝/移动（`transfer`）；压缩包、新建文件夹、废纸篓仍用 `unique_path`（`name 2`）。有单测 `copy_name_tests`。
+
+## 16. 「创建归档」对话框（复刻 QSpace）
+- 入口：右键「压缩…」→ `ZipDialog`（位置 / 文件名 / 速度快·体积小·自定义(1-9 级) / 添加密码+保持 / 开启一键压缩 / 单独压缩）。默认文件名：单个项目=`项目名.zip`，多个项目=`当前文件夹名.zip`。
+- 「开启一键压缩」：开启后右键直接出「压缩「x」」按上次设置压缩，同时多一个「压缩选项…」再打开对话框。设置存在 `cfg.zipPrefs`。
+- 后端 `zip_paths(sources, destDir, options{name,level,password,separate}) -> Vec<String>`：统一用系统 `zip`（单个源也不再用 ditto，因为要支持级别/密码）；源同目录时 cwd=父目录+`-y`，分散时临时符号链接暂存；排除 `.DS_Store`；`单独压缩`每个源一个 zip；重名自动 `name 2.zip`。有单测 `zip_tests`（多源/单源/自定义名/单独/密码/跨目录）。
+- 密码：`zip -P`（传统 ZipCrypto，macOS 归档实用工具和 `unzip` 都能解；强度弱）。命令行参数在压缩期间对同机其他进程可见。「保持」会把密码**明文**写进 `config.json`，所以只有勾了「保持」才存。
+- 压缩结果通过 `showRowToast` 贴在新 zip 旁提示，并登记 ⌘Z（把生成的 zip 丢进废纸篓）。

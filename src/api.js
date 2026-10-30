@@ -12,7 +12,7 @@ export const api = hasTauri
       openPath: (path) => invoke('open_path', { path }),
       reveal: (path) => invoke('reveal_in_finder', { path }),
       openTerminal: (path) => invoke('open_terminal', { path }),
-      zipPaths: (sources, destDir) => invoke('zip_paths', { sources, destDir }),
+      zipPaths: (sources, destDir, options) => invoke('zip_paths', { sources, destDir, options: options || null }),
       quickLook: (path) => invoke('quick_look', { path }),
       makeFile: (path) => invoke('make_file', { path }),
       search: (query, scope, root, showHidden, roots, mode) =>
@@ -142,7 +142,7 @@ function mockApi() {
     openPath: () => Promise.resolve(),
     reveal: () => Promise.resolve(),
     openTerminal: () => Promise.resolve(),
-    zipPaths: () => Promise.resolve(''),
+    zipPaths: () => Promise.resolve([]),
     quickLook: () => Promise.resolve(),
     search: (q, scope, root, showHidden, roots, mode) => {
       if (mode === 'content') {

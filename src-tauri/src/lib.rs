@@ -402,70 +402,112 @@ async fn reveal_in_finder(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// 用 ditto 压缩为 zip（保留父文件夹名），返回 zip 路径
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ZipOptions {
+    /// 压缩包文件名（不含路径；缺省：单个源=源名.zip，多个源=归档.zip）
+    name: Option<String>,
+    /// 压缩级别 0-9（速度快=1，体积小=9，自定义=1..9），缺省 1
+    level: Option<u8>,
+    password: Option<String>,
+    /// 多个源时各自压成独立的 zip
+    separate: Option<bool>,
+}
+
+/// 调系统 zip 创建一个归档。源在同一父目录时在该目录下压缩（保留符号链接 -y）；
+/// 源分散在不同目录时，先在临时目录里建符号链接再压缩（不加 -y，跟随链接存真实内容）。
+/// 注意：密码通过 `-P` 传入（传统 ZipCrypto，macOS 归档实用工具可直接解压；进程列表短暂可见）。
+fn run_zip(sources: &[String], dest: &Path, level: u8, password: Option<&str>) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("zip");
+    cmd.args(["-r", "-q"]).arg(format!("-{}", level.min(9)));
+    if let Some(pw) = password.filter(|p| !p.is_empty()) {
+        cmd.arg("-P").arg(pw);
+    }
+    let first_parent = Path::new(&sources[0]).parent().map(|p| p.to_path_buf());
+    let same_parent = first_parent.is_some()
+        && sources.iter().all(|s| Path::new(s).parent().map(|p| p.to_path_buf()) == first_parent);
+    let base_name = |s: &str| {
+        Path::new(s)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "item".into())
+    };
+    let mut stage: Option<PathBuf> = None;
+    let mut names: Vec<String> = Vec::new();
+    if same_parent {
+        cmd.arg("-y").current_dir(first_parent.unwrap());
+        names.extend(sources.iter().map(|s| base_name(s)));
+    } else {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let st = std::env::temp_dir().join(format!("bento-zip-{}-{}", std::process::id(), nanos));
+        fs::create_dir_all(&st).map_err(|e| format!("压缩失败: {}", e))?;
+        for s in sources {
+            let link = unique_path(&st, &base_name(s));
+            if let Err(e) = std::os::unix::fs::symlink(s, &link) {
+                let _ = fs::remove_dir_all(&st);
+                return Err(format!("压缩失败: {}", e));
+            }
+            names.push(link.file_name().unwrap().to_string_lossy().into_owned());
+        }
+        cmd.current_dir(&st);
+        stage = Some(st);
+    }
+    cmd.arg(dest).args(&names).args(["-x", "*.DS_Store"]);
+    let out = cmd.output();
+    if let Some(st) = stage {
+        let _ = fs::remove_dir_all(st);
+    }
+    let out = out.map_err(|e| format!("压缩失败: {}", e))?;
+    if !out.status.success() {
+        let msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(format!("压缩失败: {}", if msg.is_empty() { String::from_utf8_lossy(&out.stdout).trim().to_string() } else { msg }));
+    }
+    Ok(())
+}
+
+/// 压缩为 zip，返回创建的 zip 路径列表（「单独压缩」时每个源一个）
 #[tauri::command]
-async fn zip_paths(sources: Vec<String>, dest_dir: String) -> Result<String, String> {
+async fn zip_paths(sources: Vec<String>, dest_dir: String, options: Option<ZipOptions>) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let opts = options.unwrap_or_default();
         let dir = PathBuf::from(&dest_dir);
         if !dir.is_dir() {
             return Err(format!("目标不是文件夹: {}", dest_dir));
         }
-        let base = if sources.len() == 1 {
-            let p = Path::new(&sources[0]);
-            format!(
-                "{}.zip",
-                p.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "归档".into())
-            )
-        } else {
-            "归档.zip".to_string()
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        let level = opts.level.unwrap_or(1).min(9);
+        let base_of = |s: &str| {
+            Path::new(s)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "归档".into())
         };
-        let dest = unique_path(&dir, &base);
-        let out = if sources.len() == 1 {
-            // 单个：ditto 保留资源分支与父文件夹名
-            std::process::Command::new("ditto")
-                .args(["-c", "-k", "--sequesterRsrc", "--keepParent", &sources[0]])
-                .arg(&dest)
-                .output()
+        let groups: Vec<(Vec<String>, String)> = if opts.separate.unwrap_or(false) && sources.len() > 1 {
+            sources.iter().map(|s| (vec![s.clone()], format!("{}.zip", base_of(s)))).collect()
         } else {
-            // ditto 一次只能压缩一个源（报 "Can't archive multiple sources"）。多个源：
-            // 先在临时目录里按文件名建符号链接，再用 zip 在该目录下压缩（不加 -y，即跟随链接存真实内容）
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let stage = std::env::temp_dir().join(format!("bento-zip-{}-{}", std::process::id(), nanos));
-            fs::create_dir_all(&stage).map_err(|e| format!("压缩失败: {}", e))?;
-            let mut names: Vec<String> = Vec::new();
-            for s in &sources {
-                let sp = Path::new(s);
-                let fname = sp
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "item".into());
-                let link = unique_path(&stage, &fname);
-                if let Err(e) = std::os::unix::fs::symlink(sp, &link) {
-                    let _ = fs::remove_dir_all(&stage);
-                    return Err(format!("压缩失败: {}", e));
-                }
-                names.push(link.file_name().unwrap().to_string_lossy().into_owned());
+            let name = match opts.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                Some(n) if n.to_lowercase().ends_with(".zip") => n.to_string(),
+                Some(n) => format!("{}.zip", n),
+                None if sources.len() == 1 => format!("{}.zip", base_of(&sources[0])),
+                None => "归档.zip".to_string(),
+            };
+            vec![(sources.clone(), name)]
+        };
+        let mut created: Vec<String> = Vec::new();
+        for (srcs, name) in groups {
+            let dest = unique_path(&dir, &name.replace('/', "_"));
+            if let Err(e) = run_zip(&srcs, &dest, level, opts.password.as_deref()) {
+                let _ = fs::remove_file(&dest);
+                return Err(e);
             }
-            let r = std::process::Command::new("zip")
-                .current_dir(&stage)
-                .args(["-r", "-q"])
-                .arg(&dest)
-                .args(&names)
-                .output();
-            let _ = fs::remove_dir_all(&stage);
-            r
+            created.push(dest.to_string_lossy().into_owned());
         }
-        .map_err(|e| format!("压缩失败: {}", e))?;
-        if !out.status.success() {
-            let _ = fs::remove_file(&dest);
-            return Err(format!("压缩失败: {}", String::from_utf8_lossy(&out.stderr)));
-        }
-        Ok(dest.to_string_lossy().into_owned())
+        Ok(created)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1251,25 +1293,34 @@ mod zip_tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
-    /// 回归：多选压缩曾报 "ditto: Can't archive multiple sources"
-    #[test]
-    fn zips_multiple_sources_into_one_archive() {
-        let root = std::env::temp_dir().join(format!("bento-ziptest-{}", std::process::id()));
+    fn fixture(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("bento-ziptest-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("src/folder")).unwrap();
         fs::write(root.join("src/a.txt"), "a").unwrap();
         fs::write(root.join("src/folder/inner.txt"), "i").unwrap();
         fs::write(root.join("src/b.txt"), "b").unwrap();
         fs::create_dir_all(root.join("out")).unwrap();
-        let sources: Vec<String> = ["a.txt", "folder", "b.txt"]
+        root
+    }
+
+    fn run(root: &Path, names: &[&str], opts: Option<ZipOptions>) -> Result<Vec<String>, String> {
+        let sources: Vec<String> = names
             .iter()
             .map(|n| root.join("src").join(n).to_string_lossy().into_owned())
             .collect();
-        let zip = tauri::async_runtime::block_on(zip_paths(sources, root.join("out").to_string_lossy().into_owned()))
-            .expect("zip");
-        let names = unzip_list(&zip);
+        tauri::async_runtime::block_on(zip_paths(sources, root.join("out").to_string_lossy().into_owned(), opts))
+    }
+
+    /// 回归：多选压缩曾报 "ditto: Can't archive multiple sources"
+    #[test]
+    fn zips_multiple_sources_into_one_archive() {
+        let root = fixture("multi");
+        let zips = run(&root, &["a.txt", "folder", "b.txt"], None).expect("zip");
+        let names = unzip_list(&zips[0]);
         let _ = fs::remove_dir_all(&root);
-        assert!(zip.ends_with("归档.zip"), "{zip}");
+        assert_eq!(zips.len(), 1);
+        assert!(zips[0].ends_with("归档.zip"), "{}", zips[0]);
         for want in ["a.txt", "b.txt", "folder/inner.txt"] {
             assert!(names.lines().any(|l| l == want), "missing {want} in:\n{names}");
         }
@@ -1277,19 +1328,59 @@ mod zip_tests {
 
     #[test]
     fn single_source_keeps_parent_folder_name() {
-        let root = std::env::temp_dir().join(format!("bento-ziptest1-{}", std::process::id()));
+        let root = fixture("single");
+        let zips = run(&root, &["folder"], None).expect("zip");
+        let names = unzip_list(&zips[0]);
         let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("proj")).unwrap();
-        fs::write(root.join("proj/x.txt"), "x").unwrap();
-        fs::create_dir_all(root.join("out")).unwrap();
-        let zip = tauri::async_runtime::block_on(zip_paths(
-            vec![root.join("proj").to_string_lossy().into_owned()],
-            root.join("out").to_string_lossy().into_owned(),
-        ))
-        .expect("zip");
-        let names = unzip_list(&zip);
+        assert!(zips[0].ends_with("folder.zip"));
+        assert!(names.lines().any(|l| l == "folder/inner.txt"), "{names}");
+    }
+
+    #[test]
+    fn custom_name_is_used_and_zip_suffix_added() {
+        let root = fixture("name");
+        let opts = ZipOptions { name: Some("我的归档".into()), ..Default::default() };
+        let zips = run(&root, &["a.txt", "b.txt"], Some(opts)).expect("zip");
         let _ = fs::remove_dir_all(&root);
-        assert!(names.lines().any(|l| l == "proj/x.txt"), "{names}");
+        assert!(zips[0].ends_with("/我的归档.zip"), "{}", zips[0]);
+    }
+
+    #[test]
+    fn separate_makes_one_zip_per_source() {
+        let root = fixture("sep");
+        let opts = ZipOptions { separate: Some(true), ..Default::default() };
+        let zips = run(&root, &["a.txt", "folder"], Some(opts)).expect("zip");
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(zips.len(), 2);
+        assert!(zips[0].ends_with("a.txt.zip") && zips[1].ends_with("folder.zip"), "{zips:?}");
+    }
+
+    #[test]
+    fn password_protects_the_archive() {
+        let root = fixture("pw");
+        let opts = ZipOptions { password: Some("s3cret".into()), level: Some(9), ..Default::default() };
+        let zips = run(&root, &["a.txt"], Some(opts)).expect("zip");
+        let z = &zips[0];
+        let bad = std::process::Command::new("unzip").args(["-t", "-P", "wrong", z]).output().unwrap();
+        let good = std::process::Command::new("unzip").args(["-t", "-P", "s3cret", z]).output().unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert!(!bad.status.success(), "wrong password must fail");
+        assert!(good.status.success(), "right password must pass");
+    }
+
+    #[test]
+    fn sources_in_different_folders_are_zipped_together() {
+        let root = fixture("mix");
+        fs::write(root.join("out/other.txt"), "o").unwrap();
+        let sources = vec![
+            root.join("src/a.txt").to_string_lossy().into_owned(),
+            root.join("out/other.txt").to_string_lossy().into_owned(),
+        ];
+        let zips = tauri::async_runtime::block_on(zip_paths(sources, root.join("out").to_string_lossy().into_owned(), None))
+            .expect("zip");
+        let names = unzip_list(&zips[0]);
+        let _ = fs::remove_dir_all(&root);
+        assert!(names.lines().any(|l| l == "a.txt") && names.lines().any(|l| l == "other.txt"), "{names}");
     }
 }
 
