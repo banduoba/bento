@@ -58,7 +58,7 @@ fn fsearch_global(query: &str, limit: usize) -> Option<Vec<SearchItem>> {
                     size: if f.size > 0 { f.size } else { md.as_ref().map(|m| if m.is_dir() { 0 } else { m.len() }).unwrap_or(0) },
                     mtime_ms: md.as_ref().map(mtime_of).unwrap_or((f.mtime as i64) as f64 * 1000.0),
                     btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
-                    preview: None,
+                    lines: None,
                     matches: None,
                 }
             })
@@ -466,9 +466,15 @@ struct SearchItem {
     mtime_ms: f64,
     btime_ms: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    preview: Option<String>,
+    lines: Option<Vec<ContentLine>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     matches: Option<usize>,
+}
+
+#[derive(Serialize, Clone)]
+struct ContentLine {
+    no: f64,
+    text: String,
 }
 
 fn mtime_of(md: &std::fs::Metadata) -> f64 {
@@ -587,7 +593,7 @@ fn walk_search(root: &Path, query: &str, show_hidden: bool, limit: usize) -> Res
                     size,
                     mtime_ms: md.as_ref().map(mtime_of).unwrap_or(0.0),
                     btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
-                    preview: None,
+                    lines: None,
                     matches: None,
                 });
             }
@@ -633,7 +639,7 @@ fn mdfind_search(query: &str, onlyin: Option<&str>, limit: usize) -> Vec<SearchI
                 size,
                 mtime_ms: md.as_ref().map(mtime_of).unwrap_or(0.0),
                 btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
-                preview: None,
+                lines: None,
                 matches: None,
             })
         })
@@ -778,10 +784,15 @@ async fn search_content(
             .iter()
             .map(|f| {
                 let pb = PathBuf::from(String::from_utf8_lossy(&f.path).into_owned());
-                let preview = f
+                let lines: Vec<ContentLine> = f
                     .lines
-                    .first()
-                    .map(|(_, t)| t.chars().take(160).collect::<String>());
+                    .iter()
+                    .take(3)
+                    .map(|(no, t)| ContentLine {
+                        no: *no as f64,
+                        text: t.chars().take(200).collect::<String>(),
+                    })
+                    .collect();
                 SearchItem {
                     dir: pb
                         .parent()
@@ -796,7 +807,7 @@ async fn search_content(
                     size: 0,
                     mtime_ms: 0.0,
                     btime_ms: 0.0,
-                    preview,
+                    lines: Some(lines),
                     matches: Some(f.lines.len()),
                 }
             })
