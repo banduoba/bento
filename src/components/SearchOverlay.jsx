@@ -71,18 +71,32 @@ function SearchGuide({ noResults = false }) {
 }
 
 // 文件名拆掉通配符与筛选语法；内容预览按原样关键词高亮。
+function queryTerms(q) {
+  // 与 Rust readTextPreview 一致：按非字母数字分段，library(forest → library + forest
+  return [
+    ...new Set(
+      (q || '')
+        .split(/[^A-Za-z0-9_\u4e00-\u9fa5]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 2 || /\d/.test(t))
+    ),
+  ]
+}
+
 function Highlight({ text, query, literal = false }) {
   const parts = useMemo(() => {
-    const frags = [
-      ...new Set(
-        (query || '')
-          .trim()
-          .split(/\s+/)
-          .flatMap((t) => literal ? [t] : t.includes(':') ? [] : t.split(/[*?]+/))
-          .map((s) => s.trim())
-          .filter((s) => s.length >= 1)
-      ),
-    ]
+    const frags = literal
+      ? queryTerms(query)
+      : [
+          ...new Set(
+            (query || '')
+              .trim()
+              .split(/\s+/)
+              .flatMap((t) => (t.includes(':') ? [] : t.split(/[*?]+/)))
+              .map((s) => s.trim())
+              .filter((s) => s.length >= 1)
+          ),
+        ]
     if (!frags.length) return null
     const re = new RegExp(`(${frags.map(escapeRe).join('|')})`, 'gi')
     return text.split(re)
@@ -547,6 +561,7 @@ export default function SearchOverlay({
         </div>
         {mode === 'content' && (
           <div className="search-preview-pane" ref={previewRef}>
+            {!preview && <div className="sp-message">搜索后在此预览文件内容</div>}
             {!preview || !preview.loading ? null : <div className="sp-loading">读取内容中…</div>}
             {preview?.loading === false && preview.kind === 'image' && (
               <div className="sp-image">
@@ -564,6 +579,15 @@ export default function SearchOverlay({
                 <div className="sp-head" title={preview.path}>
                   <span className="sp-matches">{preview.matchLines?.length ?? 0} 行命中</span>
                   <span className="sp-name">{preview.name}</span>
+                  <button
+                    className="search-reveal sp-copy"
+                    title="复制路径"
+                    aria-label={`复制路径：${preview.path}`}
+                    onKeyDown={(e) => e.stopPropagation()}
+                    onClick={() => copyText(preview.path)}
+                  >
+                    复制路径
+                  </button>
                   {preview.truncated && <span className="sp-truncated">（内容过大，仅显示前 256 KB）</span>}
                 </div>
                 <div className="sp-lines">
