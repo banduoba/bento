@@ -853,13 +853,15 @@ async fn search_content(
                 words.push(w);
             }
         }
-        let pattern: String = words.join(" ").replace('"', "");
+        let pattern: String = content_pattern(&q);
         if pattern.is_empty() {
             return Ok(Vec::new());
         }
         let query = fsearch::Query::parse(&format!("{}grep:{}", filters, pattern), &home)?;
         let t0 = std::time::Instant::now();
-        let g = fsearch::Grep::new(&pattern, fsearch::GrepMode::Literal)?;
+        let mut g = fsearch::Grep::new(&pattern, fsearch::GrepMode::Literal)?;
+        // 左列表徽标 = 命中行数；放宽 fsearch 默认的每文件 5 行上限，与右栏预览同口径
+        g.max_per_file = 20;
         let (res, _) = eng.grep(&query, &g)?;
         eprintln!(
             "[search] content \"{}\": {} files, {} ms",
@@ -915,12 +917,63 @@ if let Some(r) = root {
     .map_err(|e| e.to_string())?
 }
 
+/// 内容搜索的字面模式：与 search_content 传给 fsearch 的 pattern 完全一致
+/// （含 ':' 的词是过滤器，其余词用空格连接，去掉双引号）
+fn content_pattern(q: &str) -> String {
+    q.split_whitespace()
+        .filter(|w| !w.contains(':'))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('"', "")
+}
+
+/// 与 fsearch Grep 一致的逐行匹配：整串字面量；pattern 不含大写字母时忽略大小写（smart case）
+struct LineMatcher {
+    needle: String,
+    fold: bool,
+}
+
+impl LineMatcher {
+    fn new(q: &str) -> Option<Self> {
+        let pat = content_pattern(q);
+        if pat.is_empty() {
+            return None;
+        }
+        let fold = !pat.chars().any(|c| c.is_uppercase());
+        let needle = if fold { pat.to_lowercase() } else { pat };
+        Some(Self { needle, fold })
+    }
+    fn is_match(&self, line: &str) -> bool {
+        if self.fold {
+            line.to_lowercase().contains(&self.needle)
+        } else {
+            line.contains(&self.needle)
+        }
+    }
+}
+
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TextPreview {
     kind: String, // "text" | "binary" | "image" | "too-large"
     text: String,
     truncated: bool,
+    /// 预览区内（前 3000 行）的命中行号
     match_lines: Vec<f64>,
+    /// 命中位于预览区之外（被截断/超过 3000 行的部分）的行数
+    hidden_hits: usize,
+}
+
+impl TextPreview {
+    fn empty(kind: &str) -> Self {
+        Self {
+            kind: kind.into(),
+            text: String::new(),
+            truncated: false,
+            match_lines: Vec::new(),
+            hidden_hits: 0,
+        }
+    }
 }
 
 fn is_image_path(p: &Path) -> bool {
@@ -930,145 +983,218 @@ fn is_image_path(p: &Path) -> bool {
     )
 }
 
-/// 读取文本文件内容供搜索预览：全量（截断至 max_bytes）+ 命中行号
+const PREVIEW_MAX_LINES: usize = 3000;
+const PREVIEW_MATCH_CAP: usize = 200;
+/// 统计「预览区之外命中数」时最多继续扫描的字节数
+const PREVIEW_TAIL_SCAN: u64 = 16 << 20;
+
+/// 读取文本文件内容供搜索预览：前 256KB / 3000 行 + 命中行号；
+/// 预览区之外的命中只计数（hidden_hits），供前端提示。
 #[tauri::command]
 async fn read_text_preview(
     path: String,
     query: String,
     max_bytes: Option<usize>,
 ) -> Result<TextPreview, String> {
-    let _ = max_bytes; // 预览统一 256KB 上限，参数保留兼容前端
-    tauri::async_runtime::spawn_blocking(move || {
+    tauri::async_runtime::spawn_blocking(move || preview_file(&path, &query, max_bytes))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn preview_file(path: &str, query: &str, max_bytes: Option<usize>) -> Result<TextPreview, String> {
+    {
+        use std::io::{BufRead, Read};
         let p = Path::new(&path);
         if is_image_path(p) {
-            return Ok(TextPreview {
-                kind: "image".into(),
-                text: String::new(),
-                truncated: false,
-                match_lines: Vec::new(),
-            });
+            return Ok(TextPreview::empty("image"));
         }
         let cap = max_bytes.unwrap_or(262_144);
         let md = fs::metadata(p).map_err(|e| format!("无法读取: {}", e))?;
         let truncated = md.len() > cap as u64;
-        let take = if truncated {
-            // 截断到行边界附近，避免切出半行
-            let mut end = cap;
-            let f = fs::File::open(p).map_err(|e| e.to_string())?;
-            use std::io::Read;
-            let mut buf = vec![0u8; cap];
-            f.take(cap as u64).read_exact(&mut buf).ok();
-            if let Some(pos) = buf.iter().rposition(|&b| b == b'\n') {
-                end = pos;
-            }
-            let s = String::from_utf8_lossy(&buf[..end]).into_owned();
-            return Ok(TextPreview {
-                kind: "text".into(),
-                text: s,
-                truncated,
-                match_lines: Vec::new(),
-            });
-        } else {
-            md.len() as usize
-        };
-        let bytes = fs::read(p).map_err(|e| e.to_string())?;
+        let mut file = fs::File::open(p).map_err(|e| e.to_string())?;
+        let mut buf = Vec::with_capacity(md.len().min(cap as u64) as usize);
+        (&mut file).take(cap as u64).read_to_end(&mut buf).map_err(|e| e.to_string())?;
         // 二进制检测：前 8KB 含 NUL
-        let probe = &bytes[..bytes.len().min(8192)];
-        if probe.contains(&0u8) {
-            return Ok(TextPreview {
-                kind: "binary".into(),
-                text: String::new(),
-                truncated: false,
-                match_lines: Vec::new(),
-            });
+        if buf[..buf.len().min(8192)].contains(&0u8) {
+            return Ok(TextPreview::empty("binary"));
         }
-        let full = String::from_utf8_lossy(&bytes[..take.min(bytes.len())]).into_owned();
-        // 逐行截断（单行超长——如压缩 JS——会拖垮前端渲染）并限制总行数
-        let text: String = full
-            .lines()
-            .take(3000)
-            .map(|l| {
-                if l.chars().count() > 300 {
-                    let t: String = l.chars().take(300).collect();
-                    format!("{} …", t)
-                } else {
-                    l.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        // 匹配规则：空格分隔 = AND；每个词含非字母数字字符时（如 library(forest）
-        // 拆为子片段，行须包含全部子片段；纯字母数字词整词匹配
-        let terms: Vec<Vec<String>> = query
-            .split_whitespace()
-            .filter(|w| !w.contains(':'))
-            .map(|w| {
-                let lw = w.to_lowercase();
-                if lw.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                    vec![lw]
-                } else {
-                    lw.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                        .filter(|f| !f.is_empty())
-                        .map(|f| f.to_string())
-                        .collect()
-                }
-            })
-            .collect();
+        // 截断到行边界，避免切出半行；tail 从该边界继续扫描
+        let end = if truncated {
+            buf.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(buf.len())
+        } else {
+            buf.len()
+        };
+        let full = String::from_utf8_lossy(&buf[..end]);
+        let matcher = LineMatcher::new(&query);
         let mut match_lines = Vec::new();
-        if !terms.is_empty() {
-            for (i, line) in text.lines().enumerate() {
-                let lc = line.to_lowercase();
-                if terms
-                    .iter()
-                    .all(|frags| frags.iter().any(|f| lc.contains(f.as_str())))
-                {
+        let mut hidden_hits = 0usize;
+        let mut shown: Vec<String> = Vec::new();
+        for (i, line) in full.lines().enumerate() {
+            let hit = matcher.as_ref().is_some_and(|m| m.is_match(line));
+            if i < PREVIEW_MAX_LINES {
+                if hit && match_lines.len() < PREVIEW_MATCH_CAP {
                     match_lines.push((i + 1) as f64);
-                    if match_lines.len() >= 20 {
-                        break;
+                }
+                // 单行超长（压缩 JS 等）会拖垮前端渲染，逐行截断
+                if line.chars().count() > 300 {
+                    let t: String = line.chars().take(300).collect();
+                    shown.push(format!("{} …", t));
+                } else {
+                    shown.push(line.to_string());
+                }
+            } else if hit {
+                hidden_hits += 1;
+            }
+        }
+        // 截断掉的文件尾部：只数命中，不进预览
+        if truncated {
+            if let Some(m) = &matcher {
+                let mut rest = Vec::new();
+                let tail_start = end as u64;
+                let mut f = fs::File::open(p).map_err(|e| e.to_string())?;
+                use std::io::Seek;
+                f.seek(std::io::SeekFrom::Start(tail_start)).map_err(|e| e.to_string())?;
+                let mut rd = std::io::BufReader::new(f.take(PREVIEW_TAIL_SCAN));
+                loop {
+                    rest.clear();
+                    match rd.read_until(b'\n', &mut rest) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if m.is_match(&String::from_utf8_lossy(&rest)) {
+                                hidden_hits += 1;
+                            }
+                        }
                     }
                 }
             }
         }
+        eprintln!(
+            "[preview] {} size={} truncated={} shown_hits={} hidden_hits={}",
+            path,
+            md.len(),
+            truncated,
+            match_lines.len(),
+            hidden_hits
+        );
         Ok(TextPreview {
             kind: "text".into(),
-            text,
+            text: shown.join("\n"),
             truncated,
             match_lines,
+            hidden_hits,
         })
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    }
 }
 
-/// 把文件引用写进系统剪贴板（AppleScript alias 列表格式 = NSFilenamesPboardType，
-/// Finder/微信/邮件均可直接粘贴文件本体）
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    fn write_tmp(name: &str, lines: &[String]) -> String {
+        let p = std::env::temp_dir().join(format!("bento-preview-{}-{}", std::process::id(), name));
+        fs::write(&p, lines.join("\n")).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    fn filler(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("filler line {i} lorem ipsum dolor sit amet consectetur")).collect()
+    }
+
+    #[test]
+    fn hits_before_and_after_truncation_are_split() {
+        let mut l = filler(9000); // ≈ 500KB > 256KB
+        l[4] = "early NEEDLE hit".into();
+        l[8800] = "late needle hit".into();
+        let p = write_tmp("both", &l);
+        let r = preview_file(&p, "needle", None).unwrap();
+        let _ = fs::remove_file(&p);
+        assert!(r.truncated);
+        assert_eq!(r.match_lines, vec![5.0]);
+        assert_eq!(r.hidden_hits, 1);
+    }
+
+    #[test]
+    fn hits_only_beyond_truncation_are_counted_not_lost() {
+        let mut l = filler(9000);
+        l[8700] = "late needle one".into();
+        l[8750] = "late needle two".into();
+        let p = write_tmp("late", &l);
+        let r = preview_file(&p, "needle", None).unwrap();
+        let _ = fs::remove_file(&p);
+        assert!(r.truncated);
+        assert!(r.match_lines.is_empty());
+        assert_eq!(r.hidden_hits, 2);
+    }
+
+    #[test]
+    fn multiword_query_is_whole_literal_like_the_engine() {
+        let l = vec!["alpha beta".to_string(), "beta alpha".to_string(), "alpha only".to_string()];
+        let p = write_tmp("multi", &l);
+        let r = preview_file(&p, "alpha beta ext:txt", None).unwrap();
+        let _ = fs::remove_file(&p);
+        assert_eq!(r.match_lines, vec![1.0]);
+    }
+
+    #[test]
+    fn smart_case_matches_fsearch() {
+        let l = vec!["Foo".to_string(), "foo".to_string()];
+        let p = write_tmp("case", &l);
+        let lower = preview_file(&p, "foo", None).unwrap();
+        let upper = preview_file(&p, "Foo", None).unwrap();
+        let _ = fs::remove_file(&p);
+        assert_eq!(lower.match_lines, vec![1.0, 2.0]);
+        assert_eq!(upper.match_lines, vec![1.0]);
+    }
+
+    #[test]
+    fn serializes_camel_case_for_the_frontend() {
+        let json = serde_json::to_value(TextPreview::empty("text")).unwrap();
+        assert!(json.get("matchLines").is_some() && json.get("hiddenHits").is_some());
+        assert!(json.get("match_lines").is_none());
+    }
+}
+
+/// 在主线程把文件 URL 写进系统剪贴板（NSURL → NSPasteboard.writeObjects，
+/// 与 Finder ⌘C 同构：每个文件一个 pasteboard item，含 public.file-url 及系统自动补的兼容类型）
+#[cfg(target_os = "macos")]
+fn write_file_urls_to_pasteboard(paths: &[String]) -> Result<usize, String> {
+    use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSString, NSURL};
+    let urls: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = paths
+        .iter()
+        .map(|p| ProtocolObject::from_retained(NSURL::fileURLWithPath(&NSString::from_str(p))))
+        .collect();
+    let arr = NSArray::from_retained_slice(&urls);
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    if !pb.writeObjects(&arr) {
+        return Err("NSPasteboard.writeObjects 返回 false".into());
+    }
+    Ok(urls.len())
+}
+
+/// 把文件引用写进系统剪贴板（public.file-url，Finder/微信/邮件粘贴文件本体）
 #[tauri::command]
-async fn copy_files_to_clipboard(paths: Vec<String>) -> Result<(), String> {
+async fn copy_files_to_clipboard(paths: Vec<String>, app: AppHandle) -> Result<(), String> {
     if paths.is_empty() {
         return Ok(());
     }
-    if paths.iter().any(|p| p.contains('"')) {
-        return Err("路径包含引号，无法写入剪贴板".into());
-    }
-    eprintln!("[clipboard] writing {} paths", paths.len());
-    let list: Vec<String> = paths
-        .iter()
-        .map(|p| format!("POSIX file \"{}\"", p))
-        .collect();
-    let script = format!("set the clipboard to {{{}}}", list.join(", "));
-    let out = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .output()
+    eprintln!("[clipboard] writing {} paths: {:?}", paths.len(), paths);
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(write_file_urls_to_pasteboard(&paths));
+    })
+    .map_err(|e| e.to_string())?;
+    let r = tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(|e| e.to_string())?)
+        .await
         .map_err(|e| e.to_string())?;
-    eprintln!(
-        "[clipboard] osascript status={} stderr={}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    if !out.status.success() {
-        return Err(String::from_utf8_lossy(&out.stderr).into_owned());
+    match &r {
+        Ok(n) => eprintln!("[clipboard] NSPasteboard wrote {} file urls", n),
+        Err(e) => eprintln!("[clipboard] failed: {}", e),
     }
-    Ok(())
+    r.map(|_| ())
 }
 
 /// 打开系统的「完全磁盘访问权限」设置页
@@ -1133,6 +1259,47 @@ async fn save_config(app: AppHandle, config: serde_json::Value) -> Result<(), St
     .map_err(|e| e.to_string())
 }
 
+/// 后台窗口也能直接拖出文件：Bento 被其他软件遮住时，点按/拖动 Bento 的可见部分不应把整个窗口
+/// 抬到最前（否则会盖住拖拽目标）。AppKit 约定：NSView 的 shouldDelayWindowOrderingForEvent:
+/// 返回 YES → mouseDown 时延迟窗口排序，拖拽会话期间窗口保持原层级，仅单击（mouseUp）才激活。
+/// wry 没有暴露这个钩子，所以在其 WKWebView 子类上补一个方法（配合 acceptFirstMouse）。
+#[cfg(target_os = "macos")]
+fn enable_background_drag(app: &tauri::App) {
+    use objc2::runtime::{AnyObject, Bool, Sel};
+    use objc2::sel;
+    unsafe extern "C" fn delay_ordering(_this: *mut AnyObject, _cmd: Sel, _event: *mut AnyObject) -> Bool {
+        Bool::YES
+    }
+    let Some(w) = app.get_webview_window("main") else {
+        eprintln!("[bg-drag] main webview window not found");
+        return;
+    };
+    let r = w.with_webview(|wv| unsafe {
+        let obj = &*(wv.inner() as *const AnyObject);
+        let mut cls = obj.class();
+        // 实例可能已被 KVO 换成 NSKVONotifying_* 子类；方法要加在真正的 WryWebView 上才持久
+        if cls.name().to_bytes().starts_with(b"NSKVONotifying_") {
+            if let Some(sup) = cls.superclass() {
+                cls = sup;
+            }
+        }
+        let imp = std::mem::transmute::<
+            unsafe extern "C" fn(*mut AnyObject, Sel, *mut AnyObject) -> Bool,
+            objc2::runtime::Imp,
+        >(delay_ordering);
+        let ok = objc2::ffi::class_addMethod(
+            cls as *const _ as *mut _,
+            sel!(shouldDelayWindowOrderingForEvent:),
+            imp,
+            c"B@:@".as_ptr(),
+        );
+        eprintln!("[bg-drag] class={} addMethod ok={}", cls.name().to_string_lossy(), ok.as_bool());
+    });
+    if let Err(e) = r {
+        eprintln!("[bg-drag] with_webview failed: {e}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1141,6 +1308,8 @@ pub fn run() {
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            enable_background_drag(app);
             // 自定义菜单：不带任何会与前端冲突的标准快捷键
             // （默认菜单的 ⌘W 关窗 / ⌘R 刷新 / ⌘C 拷贝 会抢先拦截按键事件）
             let about = PredefinedMenuItem::about(app, None, None)?;

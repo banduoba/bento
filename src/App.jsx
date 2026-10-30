@@ -4,7 +4,9 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { api, hasTauri } from './api'
+import { IconCheck } from './icons'
 import { basename, parentPath, labelOf, copyText } from './format'
+import { dragState } from './nativeDrag'
 import Sidebar from './components/Sidebar'
 import Pane from './components/Pane'
 import StatusBar from './components/StatusBar'
@@ -233,6 +235,8 @@ export default function App() {
   const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
   const [hoverTip, setHoverTip] = useState(null) // { x, y, text } 原生拖拽目标提示
   const [undoToast, setUndoToast] = useState(null) // { label, fn } 可撤销操作提示
+  const [rowToast, setRowToast] = useState(null) // { x, y, text, placeLeft } 贴在文件行旁边的提示
+  const rowToastTimer = useRef(null)
   const undoStackRef = useRef([]) // { label, undo: () => Promise }
   const flashTimer = useRef(null)
 
@@ -476,85 +480,107 @@ export default function App() {
         doneTimers.delete(row)
       }, 300))
     }
-    const hitTest = (position, selector) => {
+    const dirOf = (p) => p.slice(0, p.lastIndexOf('/')) || '/'
+    const descOf = (el) => (el ? `${el.tagName}.${String(el.className).slice(0, 40)}` : 'null')
+    // 命中计划：侧边栏书签 / 文件夹行 / 窗格空白（= 当前目录）。
+    // 坐标：macOS 上 wry 的 draggingLocation 是窗口内的逻辑点（= CSS px），Tauri 虽把它标成
+    // PhysicalPosition，但不会再乘缩放比（实测 ratio=2 时 drop 坐标与鼠标 CSS 位置 1:1，
+    // innerWidth=2056 内可达 2056）。所以直接 elementFromPoint，不要再乘/除 devicePixelRatio。
+    const planDrop = (position, paths) => {
       if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return null
-      // Tauri 给出物理像素；将 DOM 边界放到同一坐标系，每次事件重读跨屏缩放比。
-      const ratio = window.devicePixelRatio || 1
-      for (const el of document.querySelectorAll(selector)) {
-        const rect = el.getBoundingClientRect()
-        if (!rect.width || !rect.height || window.getComputedStyle(el).visibility !== 'visible') continue
-        // 虚拟列表会保留滚动区外的行，只命中实际可见的部分。
-        const clip = el.closest('.rows, .sidebar')?.getBoundingClientRect()
-        const left = Math.max(0, rect.left, clip?.left ?? 0)
-        const top = Math.max(0, rect.top, clip?.top ?? 0)
-        const right = Math.min(window.innerWidth, rect.right, clip?.right ?? window.innerWidth)
-        const bottom = Math.min(window.innerHeight, rect.bottom, clip?.bottom ?? window.innerHeight)
-        if (position.x >= left * ratio && position.x < right * ratio &&
-            position.y >= top * ratio && position.y < bottom * ratio) return el
+      const hit = document.elementFromPoint(position.x, position.y)
+      if (!hit) return null
+      const sb = hit.closest('.sb-item:not(.ws-item)')
+      if (sb) {
+        const name = sb.querySelector('span')?.textContent || sb.textContent
+        return { kind: 'bookmark', el: sb, text: `添加到「${name}」`, hit }
       }
-      return null
+      const paneEl = hit.closest('.panes > .pane')
+      if (!paneEl) return null
+      const base = paneDestination(paneEl)
+      if (!base) return null
+      const row = hit.closest('.row[data-dir]')
+      const dest = row ? row.dataset.path : base
+      const label = row ? row.querySelector('.name')?.textContent || basename(dest) : basename(base) || base
+      if (paths?.length) {
+        // 不能拖进自己/自己的子目录；全部本来就在目标目录里则无事可做
+        if (paths.some((p) => dest === p || dest.startsWith(p + '/'))) return null
+        if (paths.every((p) => dirOf(p) === dest)) return null
+      }
+      const mode = !paths?.length || !dragState.internal ? 'copy' : transferMode(dest, paths)
+      const verb = mode === 'move' ? '移动' : '复制'
+      return {
+        kind: row ? 'folder' : 'pane',
+        el: row || paneEl,
+        dest,
+        mode,
+        text: `${verb}到「${label}」`,
+        hit,
+      }
     }
-    const highlightRow = (row, text) => {
-      if (row === highlightedRow) return
+    const highlightRow = (el, text) => {
+      if (el === highlightedRow) return
       highlightedRow?.classList.remove('native-drop-target')
-      highlightedRow = row
+      highlightedRow = el
       highlightedRow?.classList.add('native-drop-target')
-      if (row) {
-        const rect = row.getBoundingClientRect()
+      if (el) {
+        const rect = el.getBoundingClientRect()
+        const isPane = el.classList.contains('pane')
         setHoverTip({
           x: rect.left + rect.width / 2,
-          y: rect.top - 8,
+          y: isPane ? rect.top + 40 : rect.top - 8,
           text,
         })
       } else {
         setHoverTip(null)
       }
     }
+    let dragPaths = []
+    let lastDrop = { sig: '', t: 0 }
     const un = getCurrentWindow().onDragDropEvent(async (ev) => {
       if (!live) return
-      const { type, position } = ev.payload
-      trace(`dde ${type} @${Math.round(position.x)}x${Math.round(position.y)} ratio=${window.devicePixelRatio}`)
-      if (type === 'cancelled' || type === 'leave') {
+      const { type, position, paths } = ev.payload
+      if (type !== 'over') {
+        const plan = position ? planDrop(position, paths?.length ? paths : dragPaths) : null
+        trace(
+          `dde ${type} pos=${position ? `${Math.round(position.x)}x${Math.round(position.y)}` : '-'} ratio=${window.devicePixelRatio} inner=${window.innerWidth}x${window.innerHeight} internal=${dragState.internal} paths=${paths?.length ?? '-'} first=${paths?.[0] ?? '-'} hit=${descOf(plan?.hit)} plan=${plan ? `${plan.kind}:${plan.mode || ''}:${plan.dest || plan.text}` : 'none'}`
+        )
+      }
+      if (type === 'leave' || type === 'cancelled') {
         highlightRow(null)
         return
       }
+      if (type === 'enter') dragPaths = paths || []
       if (type === 'enter' || type === 'over') {
-        const target = hitTest(position, '.row, .sb-item:not(.ws-item)')
-        const row = target?.closest('.row')
-        const bookmark = target?.closest('.sb-item:not(.ws-item)')
-        if (bookmark) {
-          highlightRow(bookmark, `添加到「${bookmark.querySelector('span')?.textContent || bookmark.textContent}」`)
-        } else if (row?.querySelector('.disclosure') && row.querySelector('.name')) {
-          highlightRow(row, `移动到「${row.querySelector('.name').textContent}」`)
-        } else {
-          highlightRow(null)
-        }
+        const plan = planDrop(position, dragPaths)
+        highlightRow(plan?.el || null, plan?.text)
         return
       }
       if (type !== 'drop') return
       highlightRow(null)
-      const { paths } = ev.payload
-      if (!paths?.length) return
-      const el = hitTest(position, '.row, .sb-item') || hitTest(position, '.panes > .pane')
-      if (!el) return
+      const dropped = paths?.length ? paths : dragPaths
+      dragPaths = []
+      if (!dropped.length) return
+      // wry 偶尔把同一事件投递两次，2 次 transfer 会产生重复副本
+      const sig = `${dropped.join('|')}@${Math.round(position.x)}x${Math.round(position.y)}`
+      const now = Date.now()
+      if (sig === lastDrop.sig && now - lastDrop.t < 800) return
+      lastDrop = { sig, t: now }
+      const plan = planDrop(position, dropped)
+      if (!plan) return
       // 命中侧边栏条目 → 添加书签
-      const sbItem = el.closest('.sb-item')
-      if (sbItem) {
+      if (plan.kind === 'bookmark') {
         setCfg((c) => {
-          if (c.favorites.some((f) => f.path === paths[0])) return c
-          return { ...c, favorites: [...c.favorites, { name: basename(paths[0]), path: paths[0] }] }
+          if (c.favorites.some((f) => f.path === dropped[0])) return c
+          return { ...c, favorites: [...c.favorites, { name: basename(dropped[0]), path: dropped[0] }] }
         })
+        flashDone(plan.el)
         return
       }
-      // 命中窗格 → 传入文件/移动
-      const dest = paneDestination(el)
-      if (!dest) return
-      // 同卷移动、跨卷复制（Finder 惯例）；来自 Finder 的外部文件默认复制
-      const mode = transferMode(dest, paths)
-      const row = el.closest('.row')
-      const target = row?.querySelector('.disclosure') ? row : null
-      transferInto(dest, paths, mode, () => {
-        if (target?.isConnected && paneDestination(target) === dest) flashDone(target)
+      // 命中窗格/文件夹行 → 传入。本应用内拖拽：同卷移动、跨卷复制；外部（Finder/微信）一律复制，不动对方的源文件
+      const target = plan.kind === 'folder' ? plan.el : null
+      transferInto(plan.dest, dropped, plan.mode, () => {
+        if (target?.isConnected) flashDone(target)
       })
     })
     return () => {
@@ -694,6 +720,33 @@ export default function App() {
     if (bad.length) alert(bad.map((b) => `${basename(b.source)}: ${b.error}`).join('\n'))
   }
 
+  // 贴在文件行旁边的提示（取代屏幕底部的提示条）：锚在文件名右侧，放不下就放左侧
+  const showRowToast = (paths, text, tries = 0) => {
+    const rows = [...document.querySelectorAll('.row[data-path]')]
+    const el = paths.map((p) => rows.find((r) => r.dataset.path === p)).find(Boolean)
+    if (!el) {
+      // 行还没渲染出来（刚拷贝/刷新中）：短暂重试；始终找不到就放在窗口顶部居中
+      if (tries < 10) {
+        setTimeout(() => showRowToast(paths, text, tries + 1), 100)
+        return
+      }
+      setRowToast({ x: window.innerWidth / 2, y: 90, text, placeLeft: false, center: true })
+    } else {
+      const anchor = el.querySelector('.name') || el
+      const rect = anchor.getBoundingClientRect()
+      const rowRect = el.getBoundingClientRect()
+      const placeLeft = rect.right + 300 > window.innerWidth
+      setRowToast({
+        x: placeLeft ? Math.max(rect.left - 10, 12) : rect.right + 10,
+        y: rowRect.top + rowRect.height / 2,
+        text,
+        placeLeft,
+      })
+    }
+    clearTimeout(rowToastTimer.current)
+    rowToastTimer.current = setTimeout(() => setRowToast(null), 2200)
+  }
+
   const transferInto = async (dest, paths, mode, onSuccess) => {
     if (!paths?.length) return
     modeRef.current = mode
@@ -720,8 +773,11 @@ export default function App() {
           copies.length === 1 ? `拷贝：${basename(copies[0])}` : `拷贝 ${copies.length} 个项目`,
           async () => {
             await api.trash(copies)
-          }
+          },
+          { silent: true }
         )
+        // 提示贴在刚拷贝出来的文件旁边（列表刷新后才出现该行，showRowToast 会等待）
+        showRowToast(copies, copies.length === 1 ? `已拷贝：${basename(copies[0])}` : `已拷贝 ${copies.length} 个项目`)
       }
     } catch (e) {
       alert(`操作失败: ${e}`)
@@ -731,9 +787,10 @@ export default function App() {
   }
 
   // 统一记录可撤销操作并提示（4 秒）
-  const pushUndo = (label, undo) => {
+  const pushUndo = (label, undo, opts = {}) => {
     undoStackRef.current.push({ label, undo })
     if (undoStackRef.current.length > 30) undoStackRef.current.shift()
+    if (opts.silent) return
     setUndoToast({ label })
     clearTimeout(toastTimer.current)
     toastTimer.current = setTimeout(() => setUndoToast(null), 4000)
@@ -780,12 +837,29 @@ export default function App() {
       })
   }
 
+  // 描述一组条目：单个 →「文件「a.txt」/文件夹「b」」，多个 →「N 个项目（x 个文件、y 个文件夹）」
+  const describeItems = (tabId, paths) => {
+    const byPath = new Map((rowsCache.current[tabId] || []).map((r) => [r.path, r]))
+    const dirs = paths.filter((p) => byPath.get(p)?.is_dir).length
+    const files = paths.length - dirs
+    if (paths.length === 1) return `${dirs ? '文件夹' : '文件'}「${basename(paths[0])}」`
+    const parts = [files && `${files} 个文件`, dirs && `${dirs} 个文件夹`].filter(Boolean)
+    return `${paths.length} 个项目（${parts.join('、')}）`
+  }
+
   const doCopyCut = (tabId, mode) => {
     const paths = selArr(tabId)
     if (paths.length) {
       setClip({ mode, paths })
+      // 提示贴在被复制的文件旁边，而不是屏幕底部
+      showRowToast(paths, `${mode === 'copy' ? '已复制' : '已剪切'}${describeItems(tabId, paths)}`)
       // 文件引用写进系统剪贴板：其他软件 ⌘V 可直接粘贴文件本体
-      if (mode === 'copy') api.copyFilesToClipboard(paths).catch(() => {})
+      if (mode === 'copy') {
+        api
+          .copyFilesToClipboard(paths)
+          .then(() => trace(`clipboard ok ${paths.length} paths`))
+          .catch((e) => trace(`clipboard FAILED ${e}`))
+      }
     }
   }
 
@@ -1363,10 +1437,19 @@ export default function App() {
           {hoverTip.text}
         </div>
       )}
+      {rowToast && (
+        <div
+          className={`copy-toast row-toast${rowToast.placeLeft ? ' place-left' : ''}${rowToast.center ? ' center' : ''}`}
+          style={{ left: rowToast.x, top: rowToast.y }}
+        >
+          <IconCheck size={13} />
+          <span className="copy-toast-text">{rowToast.text}</span>
+        </div>
+      )}
       {undoToast && (
         <div className="undo-toast">
           <span>
-            {undoToast.undone ? '已撤销：' : '已移动：'}
+            {undoToast.undone && '已撤销：'}
             <b>{undoToast.label}</b>
           </span>
           {!undoToast.undone && (

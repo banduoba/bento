@@ -1,41 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import { startDrag } from '@crabnebula/tauri-plugin-drag'
-const trace = (m) => window.__TAURI_INTERNALS__
-  ? window.__TAURI_INTERNALS__.invoke('append_trace_log', { msg: m }).catch(() => {})
-  : Promise.resolve()
-import singleDragPreview from '../assets/drag/1.png?inline'
-import singleFileDragPreview from '../assets/drag/1-file.png?inline'
-import multipleDragPreview from '../assets/drag/n.png?inline'
+import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
 import { api, fileSrc } from '../api'
 import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher, copyText } from '../format'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
 
 const MIME = 'application/x-bento'
-
-// 插件直接接收 PNG data URL；无需 asset protocol 或临时文件权限。
-const multipleDragImage = new Image()
-multipleDragImage.src = multipleDragPreview
-
-async function makeDragPreview(count, isDir) {
-  if (count === 1) return isDir ? singleDragPreview : singleFileDragPreview
-  await multipleDragImage.decode()
-  const canvas = document.createElement('canvas')
-  // Canvas PNG 不保留模板的 144 dpi 元数据，按逻辑尺寸输出以免原生预览变大。
-  canvas.width = multipleDragImage.naturalWidth / 2
-  canvas.height = multipleDragImage.naturalHeight / 2
-  const ctx = canvas.getContext('2d')
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-  // 与 Swift 模板的标签区域保持一致，替换 N 为实际数量。
-  ctx.clearRect(52, 12, canvas.width - 68, 24)
-  ctx.fillStyle = 'rgba(28, 28, 32, 0.94)'
-  ctx.fillRect(52, 12, canvas.width - 68, 24)
-  ctx.font = '500 13px -apple-system, BlinkMacSystemFont, sans-serif'
-  ctx.fillStyle = '#f2f2f6'
-  ctx.textBaseline = 'middle'
-  ctx.fillText(`${count} 个项目`, 52, 24, canvas.width - 70)
-  return canvas.toDataURL('image/png')
-}
 
 function sortEntries(list, key, dir) {
   const f = dir === 'asc' ? 1 : -1
@@ -166,10 +136,7 @@ export default function Pane({
           if (!live || rowDragRef.current !== d) return
           d.nativeStarted = true
           // Promise 仅表示会话启动；结束/取消由原生回调通知。
-          return startDrag({ item: d.paths, icon }, () => finishDrag(d))
-        }).catch((error) => {
-          console.warn('无法启动文件拖拽', error)
-          finishDrag(d)
+          return runNativeDrag(d.paths, icon, () => finishDrag(d))
         })
       }
     }
@@ -191,7 +158,10 @@ export default function Pane({
   const beginRowDrag = (e, entry) => {
     if (rowDragRef.current?.started) return
     const paths = selection?.has(entry.path) && selection.size > 1 ? [...selection] : [entry.path]
-    const preview = makeDragPreview(paths.length, entry.is_dir).catch(() => multipleDragPreview)
+    const preview = makeDragPreview(paths.length, entry.is_dir).catch((err) => {
+      trace(`makeDragPreview failed: ${err?.message || err}`)
+      return fallbackPreview(entry.is_dir)
+    })
     rowDragRef.current = { x: e.clientX, y: e.clientY, paths, preview, started: false }
   }
 
@@ -789,6 +759,8 @@ export default function Pane({
               return (
                 <div
                   key={entry.path}
+                  data-path={entry.isPseudo ? undefined : entry.path}
+                  data-dir={entry.is_dir && !entry.isPseudo ? '1' : undefined}
                   className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${
                     dropTarget === entry.path ? ' drop-target' : ''
                   }`}
