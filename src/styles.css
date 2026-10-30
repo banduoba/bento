@@ -642,6 +642,26 @@ input, textarea {
   to { opacity: 1; }
 }
 
+/* 文件夹展开/折叠箭头 */
+.disclosure {
+  border: none;
+  background: none;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2);
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 0;
+}
+.disclosure:hover { background: rgba(0, 0, 0, 0.09); color: var(--text); }
+.disclosure svg { transition: transform 120ms ease; }
+.disclosure.open svg { transform: rotate(90deg); }
+.disclosure-spacer { width: 16px; flex: none; display: inline-block; }
+
 /* 行内复制路径按钮：悬停行时出现在名字后 */
 .row-copy {
   border: none;

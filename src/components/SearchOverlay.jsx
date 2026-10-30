@@ -257,6 +257,11 @@ export default function SearchOverlay({
                 {' '}· 全局索引建立中（已收录 {idxStatus.entries.toLocaleString()} 条），当前结果来自系统索引
               </span>
             )}
+            {scope === 'global' && idxStatus && idxStatus.ready && idxStatus.full_disk_access === false && (
+              <span className="search-idx-hint">
+                {' '}· 未授予「完全磁盘访问权限」，其他用户/资源库目录不在索引内（系统设置 → 隐私与安全性）
+              </span>
+            )}
           </span>
           <span className="search-syntax">* ? 通配 · ext:后缀 · re:正则 · 空格 = 且</span>
         </div>
