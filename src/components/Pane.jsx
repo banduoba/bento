@@ -1,0 +1,651 @@
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { api, fileSrc } from '../api'
+import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher } from '../format'
+import { IconArrowUp, IconChevronLeft, IconChevronRight, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
+
+const MIME = 'application/x-fspace'
+
+function sortEntries(list, key, dir) {
+  const f = dir === 'asc' ? 1 : -1
+  return [...list].sort((a, b) => {
+    if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1
+    let c = 0
+    if (key === 'size') c = a.size - b.size
+    else if (key === 'mtime') c = a.mtime_ms - b.mtime_ms
+    else if (key === 'btime') c = (a.btime_ms || 0) - (b.btime_ms || 0)
+    else c = a.name.localeCompare(b.name, 'zh-CN', { numeric: true })
+    return c * f
+  })
+}
+
+function FileIcon({ entry }) {
+  if (entry.is_dir) return <IconFolder size={24} />
+  if (isImage(entry.ext)) {
+    return <img className="thumb" src={fileSrc(entry.path)} loading="lazy" alt="" draggable={false} />
+  }
+  return (
+    <span className="exttile" style={{ background: extColor(entry.ext) }}>
+      {(entry.ext || 'file').slice(0, 4)}
+    </span>
+  )
+}
+
+export default function Pane({
+  index,
+  area,
+  pane,
+  home,
+  cfg,
+  focused,
+  selection,
+  filter,
+  renaming,
+  tick,
+  cutSet,
+  editPathSignal,
+  flash,
+  onFocus,
+  onNav,
+  onBack,
+  onForward,
+  onOpen,
+  onSelect,
+  onMenu,
+  onBlankMenu,
+  onTabMenu,
+  onNewTab,
+  onCloseTab,
+  onSwitchTab,
+  onDropTransfer,
+  onFilter,
+  onSort,
+  onStats,
+  onRowsCache,
+  onRenameChange,
+  onRenameCommit,
+  onRenameCancel,
+}) {
+  const [entries, setEntries] = useState(null)
+  const [error, setError] = useState(null)
+  const [dropTarget, setDropTarget] = useState(null) // 'bg' | 文件夹路径
+  const [editingPath, setEditingPath] = useState(null) // 非空 = 地址栏编辑中
+  const [collapsedCount, setCollapsedCount] = useState(0) // 面包屑溢出时折叠的前置层级数
+  const [moreMenu, setMoreMenu] = useState(null) // { x, y, segs } 折叠层级的悬停列表
+  const moreTimer = useRef(null)
+  const anchorRef = useRef(null)
+  const scrollRef = useRef(null)
+  const crumbsRef = useRef(null)
+  const renameRef = useRef(null)
+  const pathInputRef = useRef(null)
+  const innerRef = useRef(null)
+
+
+  // ---------- 空白处拖拽框选（rubber band） ----------
+  const rowsRef = useRef([])
+  const marqueeRef = useRef(null)
+  const [marqueeRect, setMarqueeRect] = useState(null)
+  const suppressClickRef = useRef(false)
+
+  const onMarqueeMove = (e) => {
+    const m = marqueeRef.current
+    const el = scrollRef.current
+    if (!m || !el) return
+    const rect = el.getBoundingClientRect()
+    m.cx1 = e.clientX
+    m.cy1 = e.clientY
+    m.y1 = e.clientY - rect.top + el.scrollTop
+    if (Math.abs(m.cx1 - m.cx0) > 3 || Math.abs(m.cy1 - m.cy0) > 3) m.moved = true
+    setMarqueeRect({
+      x: Math.min(m.cx0, m.cx1),
+      y: Math.min(m.cy0, m.cy1),
+      w: Math.abs(m.cx1 - m.cx0),
+      h: Math.abs(m.cy1 - m.cy0),
+    })
+    const list = rowsRef.current
+    if (!list.length) return
+    const yA = Math.min(m.y0, m.y1)
+    const yB = Math.max(m.y0, m.y1)
+    const i0 = Math.max(0, Math.floor(yA / 28))
+    const i1 = Math.min(list.length - 1, Math.floor((yB - 0.01) / 28))
+    const next = new Set()
+    for (let k = i0; k <= i1; k++) next.add(list[k].path)
+    anchorRef.current = i1
+    onSelect(tab.id, next)
+  }
+
+  const onMarqueeUp = () => {
+    window.removeEventListener('mousemove', onMarqueeMove)
+    window.removeEventListener('mouseup', onMarqueeUp)
+    const m = marqueeRef.current
+    if (m && !m.moved) {
+      onSelect(tab.id, new Set()) // 空白处单击 = 取消选择
+    }
+    if (m && m.moved) {
+      suppressClickRef.current = true
+      setTimeout(() => {
+        suppressClickRef.current = false
+      }, 0)
+    }
+    marqueeRef.current = null
+    setMarqueeRect(null)
+  }
+
+  const startMarquee = (e) => {
+    if (e.button !== 0) return
+    const el = scrollRef.current
+    if (!el) return
+    onFocus(index)
+    const rect = el.getBoundingClientRect()
+    marqueeRef.current = {
+      cx0: e.clientX,
+      cy0: e.clientY,
+      y0: e.clientY - rect.top + el.scrollTop,
+      cx1: e.clientX,
+      cy1: e.clientY,
+      y1: e.clientY - rect.top + el.scrollTop,
+      moved: false,
+    }
+    window.addEventListener('mousemove', onMarqueeMove)
+    window.addEventListener('mouseup', onMarqueeUp)
+  }
+
+  const tab = pane.tabs[pane.active] || pane.tabs[0]
+
+  useEffect(() => {
+    let live = true
+    setError(null)
+    anchorRef.current = null
+    api
+      .listDir(tab.path, cfg.showHidden)
+      .then((r) => {
+        if (!live) return
+        setEntries(r.entries)
+      })
+      .catch((e) => {
+        if (!live) return
+        setError(String(e))
+        setEntries([])
+      })
+    return () => {
+      live = false
+    }
+  }, [tab.id, tab.path, cfg.showHidden, tick])
+
+  const rows = useMemo(() => {
+    const base = entries || []
+    const match = makeMatcher(filter)
+    const filtered = match ? base.filter((e) => match(e.name)) : base
+    return sortEntries(filtered, tab.sortKey, tab.sortDir)
+  }, [entries, filter, tab.sortKey, tab.sortDir])
+  rowsRef.current = rows
+
+  const entryMap = useMemo(() => {
+    const m = {}
+    for (const r of rows) m[r.path] = r
+    return m
+  }, [rows])
+
+  // 注册当前行数据到 App（供 ⌘A 全选 / ⌘O 打开 / 回车重命名）
+  useEffect(() => {
+    onRowsCache(tab.id, rows)
+  }, [rows, tab.id])
+
+  // 向上汇报统计
+  useEffect(() => {
+    let selSize = 0
+    for (const p of selection || []) {
+      const e = entryMap[p]
+      if (e && !e.is_dir) selSize += e.size
+    }
+    onStats(tab.id, {
+      count: entries?.length ?? 0,
+      selCount: selection?.size || 0,
+      selSize,
+    })
+  }, [entryMap, selection, entries])
+
+
+
+  // 地址栏进入编辑模式（点击路径空白/末尾区、铅笔、⌘L 或 ⌘⇧G 信号）
+  const beginPathEdit = () => setEditingPath(tab.path)
+
+  // 输入框提交后聚焦并全选（rAF 会与 React 提交赛跑，导致第一次 ⌘L 不生效）
+  useEffect(() => {
+    if (editingPath != null) {
+      const el = pathInputRef.current
+      if (el) {
+        el.focus()
+        el.select()
+      }
+    }
+  }, [editingPath])
+
+  useEffect(() => {
+    if (editPathSignal) beginPathEdit()
+  }, [editPathSignal])
+
+  // 导航后退出编辑模式
+  useEffect(() => {
+    setEditingPath(null)
+  }, [tab.id, tab.path])
+
+  const commitPathEdit = () => {
+    const v = (editingPath || '').trim()
+    setEditingPath(null)
+    if (v && v !== tab.path && v.startsWith('/')) onNav(tab.id, v)
+  }
+
+  // 重命名输入框聚焦并选中主名（不含扩展名）
+  useEffect(() => {
+    if (renaming && renaming.path && renaming.tabId === tab.id) {
+      const input = renameRef.current
+      if (input) {
+        input.focus()
+        if (renaming.selectAll) {
+          input.setSelectionRange(0, input.value.length)
+        } else {
+          const dot = input.value.lastIndexOf('.')
+          input.setSelectionRange(0, dot > 0 ? dot : input.value.length)
+        }
+      }
+    }
+    // 依赖 entries：新建后列表异步刷新，行渲染出来时才存在输入框
+  }, [renaming?.path, entries])
+
+  const virt = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 28,
+    overscan: 14,
+  })
+
+  const rowClick = (e, entry, idx) => {
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false
+      return
+    }
+    onFocus(index)
+    let next
+    if (e.metaKey || e.ctrlKey) {
+      next = new Set(selection || [])
+      if (next.has(entry.path)) next.delete(entry.path)
+      else next.add(entry.path)
+      anchorRef.current = idx
+    } else if (e.shiftKey && anchorRef.current != null) {
+      next = new Set(selection || [])
+      const [a, b] = [Math.min(anchorRef.current, idx), Math.max(anchorRef.current, idx)]
+      for (let k = a; k <= b; k++) next.add(rows[k].path)
+    } else {
+      next = new Set([entry.path])
+      anchorRef.current = idx
+    }
+    onSelect(tab.id, next)
+  }
+
+  const dragData = (entry) => {
+    const cur = selection || new Set()
+    const paths = cur.has(entry.path) ? Array.from(cur) : [entry.path]
+    return JSON.stringify({ paths })
+  }
+
+  const internalDrag = (e) => [...(e.dataTransfer?.types || [])].includes(MIME)
+
+  const handleDrop = (e, destPath) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDropTarget(null)
+    try {
+      const { paths } = JSON.parse(e.dataTransfer.getData(MIME))
+      if (paths?.length) onDropTransfer(destPath, paths, e.altKey ? 'copy' : 'move')
+    } catch {}
+  }
+
+  const crumbs = useMemo(() => {
+    const parts = tab.path.split('/').filter(Boolean)
+    const segs = [{ label: 'Macintosh HD', path: '/' }]
+    let acc = ''
+    for (const p of parts) {
+      acc += '/' + p
+      segs.push({ label: basename('/' + p), path: acc })
+    }
+    return segs
+  }, [tab.path])
+
+  // 面包屑滚动到最右（未折叠时）
+  useEffect(() => {
+    const el = crumbsRef.current
+    if (el && collapsedCount === 0) el.scrollLeft = el.scrollWidth
+  }, [tab.path, collapsedCount])
+
+  // 溢出自适应：路径变化先归零重测；塞不下就折叠前置层级，有富余则展开（留 8% 余量防振荡）
+  const lastPathRef = useRef(tab.path)
+  useLayoutEffect(() => {
+    const el = crumbsRef.current
+    if (!el || editingPath != null || crumbs.length <= 1) return
+    if (lastPathRef.current !== tab.path) {
+      lastPathRef.current = tab.path
+      if (collapsedCount !== 0) {
+        setCollapsedCount(0)
+        return
+      }
+    }
+    if (el.scrollWidth > el.clientWidth + 1 && collapsedCount < crumbs.length - 1) {
+      setCollapsedCount((c) => Math.min(c + 1, crumbs.length - 1))
+    } else if (
+      collapsedCount > 0 &&
+      el.scrollWidth < el.clientWidth * 0.92
+    ) {
+      setCollapsedCount((c) => c - 1)
+    }
+  }, [crumbs, collapsedCount, editingPath, tab.path])
+
+  const renamingHere = renaming && renaming.tabId === tab.id ? renaming : null
+
+  return (
+    <section
+      style={{ gridArea: area }}
+      className={`pane${focused ? ' focused' : ''}${flash ? ' flash' : ''}${dropTarget === 'bg' ? ' drop-hover' : ''}`}
+      onMouseDown={() => onFocus(index)}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        onBlankMenu(tab.id, e.clientX, e.clientY)
+      }}
+      onDragOver={(e) => {
+        if (internalDrag(e)) {
+          e.preventDefault()
+          e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move'
+        }
+      }}
+      onDrop={(e) => handleDrop(e, tab.path)}
+    >
+      <div className="tabbar">
+        {pane.tabs.map((t, k) => (
+          <div
+            key={t.id}
+            className={`tab${k === pane.active ? ' on' : ''}`}
+            title={t.path}
+            onMouseDown={(e) => {
+              if (e.button === 1) {
+                e.preventDefault()
+                e.stopPropagation()
+                onCloseTab(t.id)
+              } else if (e.button === 0) {
+                onSwitchTab(index, k)
+              }
+            }}
+            onDoubleClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              onTabMenu(t.id, e.clientX, e.clientY)
+            }}
+          >
+            <IconFolder size={13} />
+            <span className="tab-label">{labelOf(t.path, home)}</span>
+            <button
+              className="tab-close"
+              title="关闭标签 (⌘W)"
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                onCloseTab(t.id)
+              }}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <button className="tab-new" title="新建标签 (⌘T)" onClick={() => onNewTab(index)}>
+          +
+        </button>
+        <div className="tab-rest" onDoubleClick={() => onNewTab(index)} />
+      </div>
+
+      <div className="pane-head">
+        <div className="navbtns">
+          <button title="后退 (⌘[)" disabled={tab.hi <= 0} onClick={() => onBack(tab.id)}>
+            <IconChevronLeft size={15} />
+          </button>
+          <button title="前进 (⌘])" disabled={tab.hi >= tab.history.length - 1} onClick={() => onForward(tab.id)}>
+            <IconChevronRight size={15} />
+          </button>
+          <button title="上级目录 (⌘↑)" disabled={!parentPath(tab.path)} onClick={() => onNav(tab.id, parentPath(tab.path))}>
+            <IconArrowUp size={15} />
+          </button>
+          <button title="刷新 (⌘R)" onClick={() => onNav(tab.id, tab.path, true)}>
+            <IconRefresh size={14} />
+          </button>
+          <button title="编辑路径 (⌘L)" onClick={beginPathEdit}>
+            <IconPencil size={14} />
+          </button>
+        </div>
+        {editingPath != null ? (
+          <input
+            ref={pathInputRef}
+            className="path-input"
+            value={editingPath}
+            title="输入路径后回车跳转，Esc 取消"
+            onChange={(e) => setEditingPath(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              if (e.key === 'Enter') commitPathEdit()
+              if (e.key === 'Escape') setEditingPath(null)
+            }}
+            onFocus={(e) => e.currentTarget.select()}
+            onBlur={commitPathEdit}
+            spellCheck={false}
+          />
+        ) : (
+          <div
+            className="crumbs"
+            ref={crumbsRef}
+            title="点击空白处编辑路径 (⌘L)"
+            onMouseDown={(e) => {
+              if (e.target === crumbsRef.current) {
+                e.preventDefault()
+                beginPathEdit()
+              }
+            }}
+          >
+            {collapsedCount > 0 && (
+              <span
+                className="crumb-more-wrap"
+                onMouseEnter={(e) => {
+                  clearTimeout(moreTimer.current)
+                  const r = e.currentTarget.getBoundingClientRect()
+                  setMoreMenu({ x: r.left, y: r.bottom + 6, segs: crumbs.slice(0, collapsedCount) })
+                }}
+                onMouseLeave={() => {
+                  clearTimeout(moreTimer.current)
+                  moreTimer.current = setTimeout(() => setMoreMenu(null), 250)
+                }}
+              >
+                <button className="crumb-more" title="显示被折叠的上层目录">»</button>
+              </span>
+            )}
+            {crumbs.slice(collapsedCount).map((c, i) => (
+              <span key={c.path} style={{ display: 'flex', alignItems: 'center', flex: 'none' }}>
+                {i + collapsedCount > 0 && <span className="crumb-sep">›</span>}
+                <button
+                  className={`crumb${i + collapsedCount === crumbs.length - 1 ? ' current' : ''}`}
+                  onClick={() => onNav(tab.id, c.path)}
+                >
+                  {c.label}
+                </button>
+              </span>
+            ))}
+            {/* 常驻编辑入口：路径溢出铺满时也能点进来 */}
+            <span
+              className="crumbs-tail"
+              title="点击编辑路径 (⌘L)"
+              onMouseDown={(e) => {
+                e.preventDefault()
+                beginPathEdit()
+              }}
+            />
+          </div>
+        )}
+        <div className="filterbox">
+          <IconSearch size={13} />
+          <input
+            placeholder="筛选"
+            value={filter}
+            onChange={(e) => onFilter(tab.id, e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                onFilter(tab.id, '')
+                e.target.blur()
+              }
+              e.stopPropagation()
+            }}
+          />
+        </div>
+      </div>
+
+      <div className="cols">
+        <div
+          className="col-head"
+          onClick={() => onSort(tab.id, 'name', tab.sortKey === 'name' && tab.sortDir === 'asc' ? 'desc' : 'asc')}
+        >
+          名称{tab.sortKey === 'name' && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>}
+        </div>
+        <div
+          className="col-head right"
+          onClick={() => onSort(tab.id, 'size', tab.sortKey === 'size' && tab.sortDir === 'asc' ? 'desc' : 'asc')}
+        >
+          {tab.sortKey === 'size' && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>}大小
+        </div>
+        <div
+          className="col-head"
+          onClick={() => onSort(tab.id, 'mtime', tab.sortKey === 'mtime' && tab.sortDir === 'asc' ? 'desc' : 'asc')}
+        >
+          {tab.sortKey === 'mtime' && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>}修改日期
+        </div>
+        <div
+          className="col-head"
+          onClick={() => onSort(tab.id, 'btime', tab.sortKey === 'btime' && tab.sortDir === 'asc' ? 'desc' : 'asc')}
+        >
+          {tab.sortKey === 'btime' && <span className="arrow">{tab.sortDir === 'asc' ? '▲' : '▼'}</span>}创建日期
+        </div>
+      </div>
+
+      <div
+        className="rows"
+        ref={scrollRef}
+        onMouseDown={(e) => {
+          if (e.target === scrollRef.current || e.target === innerRef.current) startMarquee(e)
+        }}
+      >
+        {error ? (
+          <div className="error">
+            {error}
+            <br />
+            <button onClick={() => onNav(tab.id, tab.path, true)}>重试</button>
+          </div>
+        ) : entries === null ? (
+          <div className="loading">载入中…</div>
+        ) : rows.length === 0 ? (
+          <div className="empty">{filter ? '没有匹配的项目' : '文件夹为空'}</div>
+        ) : (
+          <div className="rows-inner" ref={innerRef} style={{ height: virt.getTotalSize() }}>
+            {virt.getVirtualItems().map((vi) => {
+              const entry = rows[vi.index]
+              const isRenaming = renamingHere?.path === entry.path
+              return (
+                <div
+                  key={entry.path}
+                  className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${
+                    dropTarget === entry.path ? ' drop-target' : ''
+                  }`}
+                  style={{ transform: `translateY(${vi.start}px)` }}
+                  onClick={(e) => rowClick(e, entry, vi.index)}
+                  onDoubleClick={() => onOpen(tab.id, entry)}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    onFocus(index)
+                    if (!selection?.has(entry.path)) onSelect(tab.id, new Set([entry.path]))
+                    onMenu(tab.id, entry, e.clientX, e.clientY)
+                  }}
+                  draggable={!isRenaming}
+                  onDragStart={(e) => {
+                    e.dataTransfer.setData(MIME, dragData(entry))
+                    e.dataTransfer.effectAllowed = 'copyMove'
+                  }}
+                  onDragOver={(e) => {
+                    if (entry.is_dir && internalDrag(e)) {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move'
+                      setDropTarget(entry.path)
+                    }
+                  }}
+                  onDragLeave={() => setDropTarget((t) => (t === entry.path ? null : t))}
+                  onDrop={(e) => entry.is_dir && handleDrop(e, entry.path)}
+                >
+                  <div className="row-name">
+                    <span className="fileicon">
+                      <FileIcon entry={entry} />
+                    </span>
+                    {isRenaming ? (
+                      <input
+                        ref={renameRef}
+                        className="rename-input"
+                        value={renamingHere.value}
+                        onChange={(e) => onRenameChange(e.target.value)}
+                        onKeyDown={(e) => {
+                          e.stopPropagation()
+                          if (e.key === 'Enter') onRenameCommit()
+                          if (e.key === 'Escape') onRenameCancel()
+                        }}
+                        onBlur={onRenameCommit}
+                        onClick={(e) => e.stopPropagation()}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        draggable={false}
+                      />
+                    ) : (
+                      <span className="name">{entry.name}</span>
+                    )}
+                  </div>
+                  <span className="row-size">{entry.is_dir ? '--' : fmtSize(entry.size)}</span>
+                  <span className="row-date">{fmtDate(entry.mtime_ms)}</span>
+                  <span className="row-date">{fmtDate(entry.btime_ms)}</span>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+      {moreMenu && (
+        <div
+          className="crumb-more-menu"
+          style={{ left: moreMenu.x, top: moreMenu.y }}
+          onMouseEnter={() => clearTimeout(moreTimer.current)}
+          onMouseLeave={() => {
+            clearTimeout(moreTimer.current)
+            moreTimer.current = setTimeout(() => setMoreMenu(null), 200)
+          }}
+        >
+          {moreMenu.segs.map((c) => (
+            <button
+              key={c.path}
+              onClick={() => {
+                setMoreMenu(null)
+                onNav(tab.id, c.path)
+              }}
+            >
+              {c.label}
+            </button>
+          ))}
+        </div>
+      )}
+      {marqueeRect && (
+        <div
+          className="marquee"
+          style={{ left: marqueeRect.x, top: marqueeRect.y, width: marqueeRect.w, height: marqueeRect.h }}
+        />
+      )}
+    </section>
+  )
+}

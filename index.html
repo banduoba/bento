@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fspace</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // 错误黑匣子：任何 JS 错误/未处理 Promise 拒绝都发到 Rust 日志
+      ;(function () {
+        var send = function (msg) {
+          try {
+            var prev = localStorage.getItem('fspace-last-error') || ''
+            var next = (prev ? prev + '\n' : '') + msg
+            localStorage.setItem('fspace-last-error', next.slice(-4000))
+          } catch (err2) {}
+          try {
+            window.__TAURI_INTERNALS__.invoke('log_debug', { msg: msg })
+          } catch (err) {
+            console.error('[no-tauri]', msg)
+          }
+        }
+        send('hook installed, href=' + location.href)
+        window.addEventListener('error', function (e) {
+          send('ERR: ' + (e.message || e.type) + ' @ ' + (e.filename || '?') + ':' + (e.lineno || 0) + ':' + (e.colno || 0))
+        })
+        window.addEventListener('unhandledrejection', function (e) {
+          send('REJ: ' + String((e.reason && (e.reason.stack || e.reason.message)) || e.reason))
+        })
+        document.addEventListener('DOMContentLoaded', function () {
+          send('dom ready')
+        })
+      })()
+    </script>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
