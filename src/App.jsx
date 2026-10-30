@@ -445,8 +445,30 @@ export default function App() {
   // 原生拖拽：接收来自其他软件/本应用（搜索结果、文件行）的拖放
   useEffect(() => {
     if (!hasTauri) return
+    let highlightedRow = null
+    let live = true
+    const highlightRow = (row) => {
+      if (row === highlightedRow) return
+      highlightedRow?.classList.remove('native-drop-target')
+      highlightedRow = row
+      highlightedRow?.classList.add('native-drop-target')
+    }
     const un = getCurrentWindow().onDragDropEvent(async (ev) => {
-      if (ev.payload.type !== 'drop') return
+      if (!live) return
+      const { type, position } = ev.payload
+      if (type === 'cancelled' || type === 'leave') {
+        highlightRow(null)
+        return
+      }
+      if (type === 'enter' || type === 'over') {
+        const ratio = window.devicePixelRatio || 1
+        const row = document.elementFromPoint(position.x / ratio, position.y / ratio)?.closest('.row')
+        // 文件夹行带有展开按钮；普通文件与窗格空白不作为高亮目标。
+        highlightRow(row?.querySelector('.disclosure') ? row : null)
+        return
+      }
+      if (type !== 'drop') return
+      highlightRow(null)
       const { paths } = ev.payload
       if (!paths?.length) return
       const ratio = window.devicePixelRatio || 1
@@ -475,6 +497,8 @@ export default function App() {
       transferInto(dest, paths, mode)
     })
     return () => {
+      live = false
+      highlightRow(null)
       un.then((f) => f()).catch(() => {})
     }
   }, [])

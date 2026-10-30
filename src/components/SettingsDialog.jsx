@@ -11,6 +11,7 @@ export default function SettingsDialog({
 }) {
   const [busy, setBusy] = useState(false)
   const [fda, setFda] = useState(null) // null=查询中
+  const [section, setSection] = useState('search')
 
   useEffect(() => {
     if (!visible) return
@@ -50,98 +51,111 @@ export default function SettingsDialog({
       <div className="modal settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"
         onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         <div className="modal-title" id="settings-title">设置</div>
-        <div className="modal-body settings-body">
-          <section className="settings-group" aria-labelledby="settings-search-title">
-            <h2 id="settings-search-title">搜索</h2>
-            <div className="settings-card">
-              <div className="settings-option">
-                <div className="settings-label">
-                  <div className="settings-option-title">搜索范围</div>
-                  <p>未添加目录时，搜索全部已索引位置。</p>
-                </div>
-                <button className="btn small" onClick={pick} disabled={busy}>
-                  {busy ? '选择中…' : '添加目录…'}
-                </button>
-              </div>
-              <div className="settings-list">
-                {searchPaths.length === 0 && <div className="settings-empty">全部位置</div>}
-                {searchPaths.map((p) => (
-                  <div key={p} className="settings-row">
-                    <span className="settings-path" title={p}>{p}</span>
-                    <button className="btn small" aria-label={`移除目录 ${p}`}
-                      onClick={() => onChange(searchPaths.filter((x) => x !== p))}>
-                      移除
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <p className="settings-hint">
-              全局搜索默认覆盖 Spotlight 已索引的全部位置（含挂载卷与其他用户目录，需授予
-              「完全磁盘访问权限」）。添加目录后，全局搜索结果将只保留这些目录内的内容。
-            </p>
-          </section>
-          <section className="settings-group" aria-labelledby="settings-general-title">
-            <h2 id="settings-general-title">通用</h2>
-            <div className="settings-card">
-              <div className="settings-option">
-                <div className="settings-label">
-                  <div className="settings-option-title" id="settings-hidden-title">显示隐藏文件</div>
-                  <p id="settings-hidden-description">在文件窗格与搜索结果中显示隐藏项目。</p>
-                </div>
-                <button className="settings-toggle" role="switch" aria-checked={showHidden}
-                  aria-labelledby="settings-hidden-title" aria-describedby="settings-hidden-description"
-                  onClick={() => onShowHiddenChange(!showHidden)}>
-                  <span />
-                </button>
-              </div>
-              <div className="settings-option">
-                <div className="settings-label">
-                  <div className="settings-option-title" id="settings-layout-title">默认布局</div>
-                  <p>立即应用，自动保存当前工作区布局。</p>
-                </div>
-                <div className="settings-segments" role="group" aria-labelledby="settings-layout-title">
-                  {[['1', '1', '单窗格'], ['2c', '2×1', '左右双窗格'], ['4', '2×2', '四窗格']].map(([id, label, title]) => (
-                    <button key={id} className="seg-btn" aria-pressed={layout === id} title={title}
-                      aria-label={`${label}，${title}`} onClick={() => onLayoutChange(id)}>
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </section>
-          {hasTauri && (
-            <section className="settings-group" aria-labelledby="settings-permission-title">
-              <h2 id="settings-permission-title">权限</h2>
+        <div className="settings-body">
+          <nav className="settings-nav" aria-label="设置分组">
+            {[['search', '搜索'], ['general', '通用'], ['permission', '权限']].map(([id, label]) => (
+              <button key={id} className={`settings-nav-item${section === id ? ' on' : ''}`}
+                aria-current={section === id ? 'page' : undefined} aria-controls={`settings-${id}`}
+                onClick={() => setSection(id)}>
+                {label}
+              </button>
+            ))}
+          </nav>
+          <div className="settings-content">
+            {section === 'search' && <section id="settings-search" className="settings-group" aria-labelledby="settings-search-title">
+              <h2 id="settings-search-title">搜索</h2>
               <div className="settings-card">
                 <div className="settings-option">
                   <div className="settings-label">
-                    <div className="settings-option-title">
-                      完全磁盘访问权限
-                      <span
-                        className={`fda-badge ${fda ? 'ok' : fda === false ? 'off' : 'unknown'}`}
-                      >
-                        {fda ? '已授予' : fda === false ? '未授予' : '检查中'}
-                      </span>
-                    </div>
-                    <p>
-                      授予后：全局搜索覆盖资源库与其他用户目录；挂载卷上的文件可直接移入系统废纸篓（与
-                      Finder 一致）。未授予时，这些文件会移入 Bento 回收站（应用数据目录，可找回）。
-                    </p>
+                    <div className="settings-option-title">搜索范围</div>
+                    <p>未添加目录时，搜索全部已索引位置。</p>
                   </div>
-                  <button className="btn small" onClick={() => api.openPrivacySettings().catch((e) => alert(String(e)))}>
-                    打开系统设置
+                  <button className="btn small" onClick={pick} disabled={busy}>
+                    {busy ? '选择中…' : '添加目录…'}
                   </button>
                 </div>
+                <div className="settings-list">
+                  {searchPaths.length === 0 && <div className="settings-empty">全部位置</div>}
+                  {searchPaths.map((p) => (
+                    <div key={p} className="settings-row">
+                      <span className="settings-path" title={p}>{p}</span>
+                      <button className="btn small" aria-label={`移除目录 ${p}`}
+                        onClick={() => onChange(searchPaths.filter((x) => x !== p))}>
+                        移除
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
-            </section>
-          )}
-          <div className="modal-footer">
-            <button className="btn primary" onClick={onClose} autoFocus>
-              完成
-            </button>
+              <p className="settings-hint">
+                全局搜索默认覆盖 Spotlight 已索引的全部位置（含挂载卷与其他用户目录，需授予
+                「完全磁盘访问权限」）。添加目录后，全局搜索结果将只保留这些目录内的内容。
+              </p>
+            </section>}
+            {section === 'general' && <section id="settings-general" className="settings-group" aria-labelledby="settings-general-title">
+              <h2 id="settings-general-title">通用</h2>
+              <div className="settings-card">
+                <div className="settings-option">
+                  <div className="settings-label">
+                    <div className="settings-option-title" id="settings-hidden-title">显示隐藏文件</div>
+                    <p id="settings-hidden-description">在文件窗格与搜索结果中显示隐藏项目。</p>
+                  </div>
+                  <button className="settings-toggle" role="switch" aria-checked={showHidden}
+                    aria-labelledby="settings-hidden-title" aria-describedby="settings-hidden-description"
+                    onClick={() => onShowHiddenChange(!showHidden)}>
+                    <span />
+                  </button>
+                </div>
+                <div className="settings-option">
+                  <div className="settings-label">
+                    <div className="settings-option-title" id="settings-layout-title">默认布局</div>
+                    <p>立即应用，自动保存当前工作区布局。</p>
+                  </div>
+                  <div className="settings-segments" role="group" aria-labelledby="settings-layout-title">
+                    {[['1', '1', '单窗格'], ['2c', '2×1', '左右双窗格'], ['4', '2×2', '四窗格']].map(([id, label, title]) => (
+                      <button key={id} className="seg-btn" aria-pressed={layout === id} title={title}
+                        aria-label={`${label}，${title}`} onClick={() => onLayoutChange(id)}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </section>}
+            {section === 'permission' && (
+              <section id="settings-permission" className="settings-group" aria-labelledby="settings-permission-title">
+                <h2 id="settings-permission-title">权限</h2>
+                {hasTauri ? (
+                  <div className="settings-card">
+                    <div className="settings-option">
+                      <div className="settings-label">
+                        <div className="settings-option-title">
+                          完全磁盘访问权限
+                          <span
+                            className={`fda-badge ${fda ? 'ok' : fda === false ? 'off' : 'unknown'}`}
+                          >
+                            {fda ? '已授予' : fda === false ? '未授予' : '检查中'}
+                          </span>
+                        </div>
+                        <p>
+                          授予后：全局搜索覆盖资源库与其他用户目录；挂载卷上的文件可直接移入系统废纸篓（与
+                          Finder 一致）。未授予时，这些文件会移入 Bento 回收站（应用数据目录，可找回）。
+                        </p>
+                      </div>
+                      <button className="btn small" onClick={() => api.openPrivacySettings().catch((e) => alert(String(e)))}>
+                        打开系统设置
+                      </button>
+                    </div>
+                  </div>
+                ) : <p className="settings-hint">请在 Bento 桌面应用中查看并管理完全磁盘访问权限。</p>}
+              </section>
+            )}
           </div>
+        </div>
+        <div className="modal-footer settings-footer">
+          <button className="btn primary" onClick={onClose} autoFocus>
+            完成
+          </button>
         </div>
       </div>
     </div>
