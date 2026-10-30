@@ -67,7 +67,19 @@
 
 ## 安装
 
-目前尚未发布预编译安装包，需要从源码构建；首次构建需要几分钟。
+### 下载
+
+到 **[Releases 页面](https://github.com/banduoba/bento/releases/latest)** 下载最新的 `.dmg`，打开后把 **Bento** 拖进 `/Applications` 即可（Apple Silicon，macOS）。
+
+该构建未经 Apple 公证，首次启动可能被 macOS 拦截：可以 *右键 → 打开*，或者执行一次下面的命令清除下载隔离标记：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Bento.app
+```
+
+### 从源码构建
+
+想自己构建？首次构建需要几分钟。
 
 **环境要求**
 
