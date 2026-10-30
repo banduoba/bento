@@ -46,6 +46,7 @@ export default function ContextMenu({ menu, onClose }) {
               it.action?.()
             }}
           >
+            {it.checked !== undefined && <span className="menu-check">{it.checked ? '✓' : ''}</span>}
             <span>{it.label}</span>
             {it.shortcut && <span className="sc">{it.shortcut}</span>}
           </button>

@@ -81,3 +81,12 @@
 - 修法：命令改成同步 `fn`（Tauri 同步命令在主线程执行），持锁者就不会再等主线程。
 - 经验：凡是会「持锁 + 同步调用窗口 getter/`run_on_main_thread` 后阻塞等待」的逻辑，不要放在 async 命令（tokio 线程）里；macOS 卡死报告在 `/Library/Logs/DiagnosticReports/*.hang`，看主线程被哪个 turnstile 的哪个线程阻塞，再看该线程栈。
 - Rust 的 `std` mpsc/park 在 macOS 上底层是 dispatch semaphore，所以栈里的 `_dispatch_semaphore_wait_slow` 不一定是 GCD，可能就是普通的阻塞等待。
+
+## 14. 文件列表列（宽度 / 显示 / 种类）与压缩
+- 列设置**按窗格各自保存**（`pane.colWidths` / `pane.colVisible`），不是全局：宽度写成窗格根元素上的 CSS 变量 `--c-template`、`--list-min`（`src/columns.js`），拖动中只改本窗格变量，松手才 `setCfg` 写盘（配置每次变化都会立即落盘，别在 mousemove 里写）。
+- 名称列默认自适应(`minmax(200px,1fr)`)；拖名称列分隔线 = 固定宽度，双击恢复。右键表头勾选显示哪些列（修改日期/创建日期/大小/种类），「恢复到默认」。
+- 窗格太窄放不下时，**自动按优先级隐藏次要列**（创建日期 → 种类 → 大小 → 修改日期），而不是横向滚动藏起来：最初用横向滚动，用户看到「日期列不见了」以为是丢了。名称列手动固定宽度时才允许横向滚动。
+- 文件名过长只截断主干、保留扩展名（`funn….pdf`）：`.name-stem`(ellipsis) + `.name-ext`(flex:none)。
+- 「种类」由前端扩展名表映射（`format.js::kindOf`），查不到显示「XXX 文件」。
+- 压缩：`ditto` 一次只能压缩一个源（报 `Can't archive multiple sources`）。多选改为：临时目录里建符号链接 → `zip -r`（不加 `-y`，跟随链接存真实内容）；单个源仍用 `ditto --keepParent`。有回归测试 `zip_tests`。
+- 调试 UI 的快办法：`npx vite --port N` 后用 headless Chrome 打开（api.js 有 mock 数据），`emulate({viewport})` 调宽度，`page.mouse` 右键/拖拽；比 macOS 辅助功能自动化稳定（系统权限还可能丢）。
