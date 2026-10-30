@@ -44,21 +44,18 @@ function mockApi() {
       E('README.md', false, 2048), E('notes.txt', false, 512),
     ],
     '/Users/demo/Desktop': [E('截图1.png', false, 1024e3), E('截图2.png', false, 2048e3), E('报告.pdf', false, 300e3)],
-    '/Users/demo/Documents': [E('论文.docx', false, 120e3), E('数据.xlsx', false, 88e3), E('代码', true)],
-    '/Users/demo/Documents/代码': [E('main.rs', false, 4e3), E('lib.rs', false, 9e3)],
-    '/Users/demo/Downloads': [E('installer.dmg', false, 500e6), E('dataset.csv', false, 20e3)],
-    '/Users/demo/Pictures': [E('IMG_001.jpg', false, 3e6)],
+    '/Users/demo/Documents': [E('示例文档.docx', false, 120e3), E('示例表格.xlsx', false, 88e3), E('示例文件夹', true)],
+    '/Users/demo/Documents/示例文件夹': [E('示例脚本.rs', false, 4e3), E('示例库.rs', false, 9e3)],
+    '/Users/demo/Downloads': [E('示例安装包.dmg', false, 500e6), E('示例数据.csv', false, 20e3)],
+    '/Users/demo/Pictures': [E('示例图片.jpg', false, 3e6)],
     '/Users/demo/Movies': [], '/Users/demo/Music': [],
     '/Users/demo/项目A_测试': [
-      E('测试文件.txt', false, 100), E('plan.md', false, 800),
-      E('2026-10-29_临时_核磁_质谱_方梦园_2026-10-28_delete_计算_l13346669399', true),
-      E('2026-10-28_delete_网络热图_1477806233秀_2026-10-09_delete_应答面_响应面_ l13346669399_overlay_backup', true),
+      E('测试文件.txt', false, 100), E('说明.md', false, 800),
+      E('示例子文件夹一', true),
+      E('示例子文件夹二', true),
     ],
-    '/Users/demo/项目B': [E('app.py', false, 2e3)],
-    '/Users/meng/.omp/agent/sessions': [
-      E('-Documents-RAnalysisProjects-临时-2026-10-28_delete_计算_l13346669399_overlay', true),
-      E('-Users-meng-Documents-RAnalysisProjects-----2026-10-28-delete-----l13346669399_session', true),
-    ],
+    '/Users/demo/项目B': [E('示例脚本.py', false, 2e3)],
+    '/Users/demo/项目A_测试/示例子文件夹一': [E('示例文件.txt', false, 100)],
   }
   const fillPath = (dir, entries) => entries.map((e) => ({ ...e, path: `${dir}/${e.name}` }))
   return {
