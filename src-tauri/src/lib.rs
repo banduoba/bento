@@ -731,6 +731,22 @@ async fn log_debug(msg: String) {
     eprintln!("[webview] {msg}");
 }
 
+/// 前端错误持久化：写入应用数据目录 error.log（安装版无 stderr 也能诊断）
+#[tauri::command]
+async fn append_error_log(msg: String, app: AppHandle) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("error.log")) {
+        let _ = writeln!(f, "[{}] {}", ts, msg);
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Clone)]
 struct DirActivity {
     path: String,
@@ -1152,6 +1168,7 @@ pub fn run() {
             disk_space,
             home_dir,
             log_debug,
+            append_error_log,
             save_window_state,
             fsearch_status,
             load_config,
