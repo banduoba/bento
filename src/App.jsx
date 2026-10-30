@@ -122,6 +122,7 @@ const defaultConfig = (home) => ({
   layout: 2,
   showHidden: false,
   showSidebar: true,
+  autoRefresh: true,
   focusedIdx: 0,
   searchPrefs: { scope: 'global', sort: 'btime' },
   searchPaths: [],
@@ -172,6 +173,7 @@ function sanitizeConfig(saved, home) {
     layout,
     showHidden: !!saved.showHidden,
     showSidebar: saved.showSidebar !== false,
+    autoRefresh: saved.autoRefresh !== false,
     focusedIdx,
     searchPrefs: {
       scope: ['pane', 'home', 'global'].includes(saved.searchPrefs?.scope) ? saved.searchPrefs.scope : 'global',
@@ -1497,6 +1499,11 @@ export default function App() {
         onChange={(paths) => setCfg((c) => ({ ...c, searchPaths: paths }))}
         showHidden={cfg.showHidden}
         onShowHiddenChange={(showHidden) => setCfg((c) => ({ ...c, showHidden }))}
+        autoRefresh={cfg.autoRefresh !== false}
+        onAutoRefreshChange={(autoRefresh) => {
+          setCfg((c) => ({ ...c, autoRefresh }))
+          if (autoRefresh) refresh() // 重新打开时立刻同步一次关闭期间错过的变化
+        }}
         layout={normalizeLayout(cfg.layout)}
         onLayoutChange={setLayout}
         onClose={() => setSettingsOpen(false)}
