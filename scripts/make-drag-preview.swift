@@ -115,3 +115,4 @@ func makePreview(name: String, width: Int, label: String, stacked: Bool, documen
 try makePreview(name: "1", width: 264, label: "1 个项目", stacked: false)
 try makePreview(name: "1-file", width: 264, label: "1 个项目", stacked: false, document: true)
 try makePreview(name: "n", width: 296, label: "N 个项目", stacked: true)
+try makePreview(name: "n-file", width: 296, label: "N 个项目", stacked: true, document: true)
