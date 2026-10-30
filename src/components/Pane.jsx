@@ -72,12 +72,20 @@ export default function Pane({
   const [editingPath, setEditingPath] = useState(null) // 非空 = 地址栏编辑中
   const [collapsedCount, setCollapsedCount] = useState(0) // 面包屑溢出时折叠的前置层级数
   const [copiedPath, setCopiedPath] = useState(null) // 行内复制路径反馈
-  const [copyToast, setCopyToast] = useState(null) // 复制成功提示条（含内容）
+  const [copyToast, setCopyToast] = useState(null) // { path, x, y, placeLeft } 锚定按钮的提示条
   const copyTimer = useRef(null)
   const toastTimer = useRef(null)
-  const showCopyToast = (path) => {
+  const showCopyToast = (path, btnRect) => {
     setCopiedPath(path)
-    setCopyToast(path)
+    // 提示条出现在按钮旁边：默认右侧垂直居中，右侧空间不足则翻到左侧
+    const spaceRight = window.innerWidth - btnRect.right - 12
+    const placeLeft = spaceRight < 300
+    setCopyToast({
+      path,
+      x: placeLeft ? btnRect.left - 8 : btnRect.right + 8,
+      y: btnRect.top + btnRect.height / 2,
+      placeLeft,
+    })
     clearTimeout(copyTimer.current)
     copyTimer.current = setTimeout(() => setCopiedPath(null), 1200)
     clearTimeout(toastTimer.current)
@@ -628,7 +636,7 @@ export default function Pane({
                           onClick={(e) => {
                             e.stopPropagation()
                             copyText(entry.path)
-                            showCopyToast(entry.path)
+                            showCopyToast(entry.path, e.currentTarget.getBoundingClientRect())
                           }}
                         >
                           {copiedPath === entry.path ? <IconCheck size={13} /> : <IconCopy size={13} />}
@@ -669,9 +677,13 @@ export default function Pane({
         </div>
       )}
       {copyToast && (
-        <div className="copy-toast" title={copyToast}>
+        <div
+          className={`copy-toast${copyToast.placeLeft ? ' place-left' : ''}`}
+          style={{ left: copyToast.x, top: copyToast.y }}
+          title={copyToast.path}
+        >
           <IconCheck size={13} />
-          <span className="copy-toast-text">已复制：{copyToast}</span>
+          <span className="copy-toast-text">已复制：{copyToast.path}</span>
         </div>
       )}
       {marqueeRect && (
