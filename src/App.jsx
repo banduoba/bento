@@ -235,14 +235,16 @@ export default function App() {
     ownerPath: id => operationDeps.current.ownerPath(id),
     feedback: (...args) => operationDeps.current.feedback(...args),
     beginRename: (...args) => operationDeps.current.beginRename(...args),
+    onError: error => setOperationNotice(String(error)),
   })
   const operations = useRef(null)
   if (!operations.current) operations.current = createOperationClient({
     api, listen: hasTauri ? listen : async () => () => {},
     onAdmissionRejected: ({ requestId }) => completionCallbacks.current.delete(requestId),
     onOutcomes: (job, rows) => operationEffects.current.outcomes(job, rows),
-    onSettled: (job, summary) => {
-      operationEffects.current.settled(job, summary)
+    onSettled: async (job, summary) => {
+      await operationEffects.current.settled(job, summary)
+      if (!operationDeps.current) return
       const callback = completionCallbacks.current.get(job.requestId)
       completionCallbacks.current.delete(job.requestId)
       if (job.state === 'completed' && (summary.counts.succeeded || 0) + (summary.counts.noop || 0) === job.progress.itemsTotal) callback?.()
@@ -253,7 +255,14 @@ export default function App() {
     const client = operations.current
     const unsubscribe = client.subscribe(setOperationState)
     client.start().catch(error => setOperationNotice(String(error)))
-    return () => { unsubscribe(); client.dispose(); clearTimeout(rowToastTimer.current); clearTimeout(flashTimer.current) }
+    return () => {
+      unsubscribe()
+      client.dispose()
+      operationEffects.current.dispose()
+      operationDeps.current = null
+      clearTimeout(rowToastTimer.current)
+      clearTimeout(flashTimer.current)
+    }
   }, [])
   useEffect(() => subscribeClip(setClipState), [])
   // 窗口置顶：配置变化（含启动恢复）时同步给原生窗口
@@ -492,7 +501,8 @@ export default function App() {
     if (!valid.length) return
     // Invalidate lexical and known alias keys immediately, then resolve unknown aliases without scanning.
     setDirectoryVersions(v => invalidateDirectories(v, valid.flatMap(path => [path, directoryKeyFor(path)])))
-    Promise.all(valid.map(path => api.resolvePath(path.endsWith('/') ? path : path + '/').catch(() => path))).then(resolved => {
+    return Promise.all(valid.map(path => api.resolvePath(path.endsWith('/') ? path : path + '/').catch(() => path))).then(resolved => {
+      if (!operationDeps.current) return
       const extra = resolved.filter((path, i) => directoryKey(path) !== directoryKeyFor(valid[i]))
       if (extra.length) setDirectoryVersions(v => invalidateDirectories(v, extra))
     })
@@ -962,7 +972,16 @@ export default function App() {
     },
     removeSelection: paths => {
       const gone = new Set(paths)
-      setSel(s => Object.fromEntries(Object.entries(s).map(([id, selected]) => [id, new Set([...selected].filter(path => !gone.has(path)))])))
+      setSel(s => {
+        let changed = false
+        const next = { ...s }
+        for (const [id, selected] of Object.entries(s)) {
+          if (![...selected].some(path => gone.has(path))) continue
+          next[id] = new Set([...selected].filter(path => !gone.has(path)))
+          changed = true
+        }
+        return changed ? next : s
+      })
       window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths } }))
     },
   }

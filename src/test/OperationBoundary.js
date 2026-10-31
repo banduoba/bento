@@ -18,12 +18,13 @@ export function operationBoundary() {
     undoOperation:async(undoId,requestId)=>{calls.push(['undo',undoId,requestId]);const j={...jobs.values().next().value,jobId:`undo${calls.length}`,revision:1,requestId,kind:'undo',state:'queued',phase:'undoing',outcomeCount:0,conflict:null,undoId:null};jobs.set(j.jobId,j);rev++;return j},
     prepareOperationExit:async flag=>{calls.push(['prepare',flag]);return snapshot()},
   }
-  return {api,calls,requests,jobs,setUndo(id){latestUndoId=id;rev++},async emit(h,id,patch,rows){
+  return {api,calls,requests,jobs,setUndo(id){latestUndoId=id;rev++},async emit(h,id,patch,rows,{withinAct=false}={}){
     const previous=jobs.get(id)
     if(rows)outcomes.set(id,rows)
     const j={...previous,...patch,revision:previous.revision+1,outcomeCount:outcomes.get(id)?.length||0}
     jobs.set(id,j);rev++
-    await h.run(async()=>{await h.events.get('operation-changed')?.({payload:j});await new Promise(r=>setImmediate(r))})
+    const publish=async()=>{await h.events.get('operation-changed')?.({payload:j});await new Promise(r=>setImmediate(r))}
+    if(withinAct)await publish();else await h.run(publish)
     return j
   }}
 }

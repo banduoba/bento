@@ -26,9 +26,13 @@ export function progressValue(progress) {
 
 function OperationJob({ job, client, onConflict, onRetry, run }) {
   const p = job.progress
-  const paths = job.sources?.length ? job.sources : job.details.map(outcome => outcome.source).filter(Boolean).slice(0, 3)
-  const destination = job.destination || job.details.find(outcome => outcome.actualDestination)?.actualDestination
+  const dedicated = job.kind === 'undo' || job.kind === 'recovery'
+  const paths = dedicated ? [] : job.sources?.length ? job.sources : job.details.map(outcome => outcome.source).filter(Boolean).slice(0, 3)
+  const destination = !dedicated && (job.destination || job.details.find(outcome => outcome.actualDestination)?.actualDestination)
   const finished = terminal(job.state)
+  const items = Number.isSafeInteger(p.itemsTotal) && p.itemsTotal > 0
+    ? `${p.itemsFinished}/${p.itemsTotal} 项`
+    : `${p.itemsFinished || 0} 项已处理（总数待确定）`
   return (
     <article className={`operation-job ${job.state}`} data-job-id={job.jobId}>
       <div className="operation-job-heading">
@@ -38,11 +42,11 @@ function OperationJob({ job, client, onConflict, onRetry, run }) {
       {[...new Set(paths)].map(path => <div className="operation-path" title={path} key={path}>源：{path}</div>)}
       {destination && <div className="operation-path" title={destination}>目标：{destination}</div>}
       {!finished && <>
-        <div className="operation-phase">{phases[job.phase]} · {p.itemsFinished}/{p.itemsTotal} 项</div>
+        <div className="operation-phase">{phases[job.phase]} · {items}</div>
         <progress max="1000" value={progressValue(p)} />
         <div className="operation-note">
           {byteLabel(p.bytesDone)} / {byteLabel(p.bytesTotal)}
-          {p.currentPath && <span className="operation-path" title={p.currentPath}>{p.currentPath}</span>}
+          {!dedicated && p.currentPath && <span className="operation-path" title={p.currentPath}>{p.currentPath}</span>}
         </div>
       </>}
       {finished && <div className="operation-note">
