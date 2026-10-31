@@ -29,14 +29,20 @@ function SystemIcon({ src, template }) {
   return <img className={`sb-system-icon ${kind}`} src={src} width={16} height={16} alt="" draggable={false} />
 }
 
+// Finder / QSpace 侧边栏用独立彩色字形。iconForFile 对 Desktop、Downloads 等
+// 返回的是蓝文件夹加角标，不能用于这些已知目录。自定义收藏才用系统图标。
+function bundledFavoriteSrc(favorite) {
+  if (favorite?.name && Object.hasOwn(favoriteIcons, favorite.name)) return favoriteIcons[favorite.name]
+  const tail = String(favorite?.path || '').split('/').filter(Boolean).pop()
+  if (tail && Object.hasOwn(favoriteIcons, tail)) return favoriteIcons[tail]
+  return null
+}
+
 function FavoriteIcon({ favorite, native }) {
+  const src = bundledFavoriteSrc(favorite)
+  if (src) return <SystemIcon src={src} template={false} />
   if (native?.icon) return <SystemIcon src={native.icon} template={!!native.template} />
-  const tail = favorite.path.split('/').filter(Boolean).pop()
-  const src = Object.hasOwn(favoriteIcons, favorite.name) ? favoriteIcons[favorite.name]
-    : Object.hasOwn(favoriteIcons, tail) ? favoriteIcons[tail] : null
-  return src
-    ? <SystemIcon src={src} template />
-    : <IconFolder size={15} />
+  return <IconFolder size={15} />
 }
 
 const trace = (m) => invoke('log_debug', { msg: m }).catch(() => {})
@@ -158,7 +164,8 @@ export default function Sidebar({
     }
   }, [tick])
 
-  // 主目录、收藏、卷都走 NSWorkspace。已取到的路径不再请求；失败则留给模板图 / IconDrive。
+  // 列表、自定义收藏和卷需要 iconForFile（特殊目录在列表里仍是文件夹角标）。
+  // 侧边栏展示时，已知特殊目录改用内置彩色字形，不读这份缓存。
   useEffect(() => {
     const paths = []
     if (home) paths.push(home)
@@ -189,11 +196,9 @@ export default function Sidebar({
     <div className="sidebar" ref={ref}>
       <div className="sb-title">个人收藏</div>
       <FavItem
-        icon={getCachedIcon(home)?.icon
-          ? <SystemIcon src={getCachedIcon(home).icon} template={!!getCachedIcon(home).template} />
-          : home
-            ? <SystemIcon src={homeIcon} template />
-            : <IconHouse size={15} />}
+        icon={home
+          ? <SystemIcon src={homeIcon} template={false} />
+          : <IconHouse size={15} />}
         label="主目录"
         path={home}
         removable={false}
