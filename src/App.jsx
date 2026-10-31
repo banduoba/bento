@@ -1309,8 +1309,16 @@ export default function App() {
     }
     if (e.key === ' ' && paths.length >= 1) {
       e.preventDefault()
+      // 按住空格会连发 keydown；只响应第一次，避免面板刚打开就被关掉
+      if (e.repeat) return
       const entry = firstEntry()
-      if (entry && !entry.is_dir) api.quickLook(entry.path).catch(() => {})
+      const selected = new Set(paths)
+      const files = paneRows
+        .filter((r) => selected.has(r.path) && !r.is_dir && !r.isPseudo)
+        .map((r) => r.path)
+      const primary = entry && !entry.is_dir ? entry.path : files[0] || paths[0]
+      // 只选了文件夹时 files 为空：面板关着则后端不打开，面板开着则空格仍能关掉
+      api.quickLook(primary, files).catch(() => {})
       return
     }
     if (meta && e.key === '[') { e.preventDefault(); navBack(tid); return }
