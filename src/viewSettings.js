@@ -10,6 +10,9 @@ const SORT_KEYS = ['name', 'size', 'kind', 'mtime', 'btime']
 const WIDTH_KEYS = ['name', 'size', 'kind', 'mtime', 'btime']
 const VIS_KEYS = ['mtime', 'btime', 'size', 'kind']
 
+// 全局默认：修改日期，新的在前。desc 表示时间戳从大到小；列头点击仍在 asc / desc 之间切换。
+export const DEFAULT_SORT = { key: 'mtime', dir: 'desc' }
+
 export function canonicalPathKey(path) {
   if (typeof path !== 'string') return null
   const trimmed = path.trim()
@@ -28,7 +31,7 @@ export function canonicalPathKey(path) {
 
 function builtinView() {
   return {
-    sort: { key: 'name', dir: 'asc' },
+    sort: { ...DEFAULT_SORT },
     columns: { widths: normalizeCols(null), visible: normalizeVis(null) },
     iconSize: null,
   }
@@ -42,13 +45,22 @@ export function normalizeIconSize(value) {
 }
 
 export function normalizeSort(raw, fallback) {
-  const base = fallback || { key: 'name', dir: 'asc' }
+  const base = fallback || { ...DEFAULT_SORT }
   if (!raw || typeof raw !== 'object') return { key: base.key, dir: base.dir }
   const key = raw.key === 'date' ? 'mtime' : raw.key
   return {
     key: SORT_KEYS.includes(key) ? key : base.key,
     dir: raw.dir === 'desc' ? 'desc' : raw.dir === 'asc' ? 'asc' : base.dir,
   }
+}
+
+// 恢复已保存的标签排序。没有合法字段时用全局默认。
+export function sortFromSavedTab(tab) {
+  const mapped = tab?.sortKey === 'date' ? 'mtime' : tab?.sortKey
+  if (SORT_KEYS.includes(mapped)) {
+    return { sortKey: mapped, sortDir: tab?.sortDir === 'desc' ? 'desc' : 'asc' }
+  }
+  return { sortKey: DEFAULT_SORT.key, sortDir: DEFAULT_SORT.dir }
 }
 
 export function normalizeView(raw, fallback) {

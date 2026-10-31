@@ -12,6 +12,7 @@ import {
   rekeyOverride,
   resolveViewKey,
   seedViewSettings,
+  sortFromSavedTab,
   syncPaneViews,
   viewForPath,
   withFolderPatch,
@@ -35,28 +36,44 @@ test('canonical path keys collapse dots, parent segments and trailing slashes', 
 test('fresh settings are versioned defaults with sort, columns and iconSize', () => {
   const store = emptyViewSettings()
   assert.equal(store.version, VIEW_SETTINGS_VERSION)
-  assert.equal(store.defaults.sort.key, 'name')
-  assert.equal(store.defaults.sort.dir, 'asc')
+  assert.equal(store.defaults.sort.key, 'mtime')
+  assert.equal(store.defaults.sort.dir, 'desc')
   assert.equal(store.defaults.iconSize, null)
   assert.equal(store.defaults.columns.visible.mtime, true)
   assert.equal(store.defaults.columns.visible.btime, false)
   assert.deepEqual(store.overrides, {})
   const again = normalizeViewSettings(JSON.parse(JSON.stringify(store)))
   assert.equal(again.version, 1)
-  assert.equal(again.defaults.sort.key, 'name')
+  assert.equal(again.defaults.sort.key, 'mtime')
+  assert.equal(again.defaults.sort.dir, 'desc')
   assert.equal(again.defaults.columns.widths.size, normalizeCols(null).size)
+})
+
+test('a saved default and a folder override both beat the builtin sort', () => {
+  const store = normalizeViewSettings({
+    version: 1,
+    defaults: { sort: { key: 'name', dir: 'asc' } },
+    overrides: { [downloads]: { sort: { key: 'size', dir: 'desc' } } },
+  })
+  assert.equal(viewForPath(store, documents).sort.key, 'name')
+  assert.equal(viewForPath(store, documents).sort.dir, 'asc')
+  assert.equal(viewForPath(store, downloads).sort.key, 'size')
+  assert.equal(viewForPath(store, downloads).sort.dir, 'desc')
+  const cleared = clearFolderOverride(store, downloads)
+  assert.equal(viewForPath(cleared, downloads).sort.key, 'name')
+  assert.equal(viewForPath(cleared, downloads).sort.dir, 'asc')
 })
 
 test('a folder override does not change other folders', () => {
   const store = withFolderPatch(emptyViewSettings(), `${downloads}/`, {
-    sort: { key: 'mtime', dir: 'desc' },
+    sort: { key: 'name', dir: 'asc' },
   })
   assert.equal(Object.keys(store.overrides).join(','), downloads)
-  assert.equal(viewForPath(store, downloads).sort.key, 'mtime')
-  assert.equal(viewForPath(store, downloads).sort.dir, 'desc')
-  assert.equal(viewForPath(store, documents).sort.key, 'name')
-  assert.equal(viewForPath(store, documents).sort.dir, 'asc')
-  assert.equal(viewForPath(store, `${downloads}/extra/..`).sort.key, 'mtime')
+  assert.equal(viewForPath(store, downloads).sort.key, 'name')
+  assert.equal(viewForPath(store, downloads).sort.dir, 'asc')
+  assert.equal(viewForPath(store, documents).sort.key, 'mtime')
+  assert.equal(viewForPath(store, documents).sort.dir, 'desc')
+  assert.equal(viewForPath(store, `${downloads}/extra/..`).sort.key, 'name')
   assert.equal(hasFolderOverride(store, documents), false)
   assert.equal(hasFolderOverride(store, downloads), true)
 })
@@ -80,9 +97,9 @@ test('column and iconSize overrides stay on that folder', () => {
 test('matching the defaults again drops the override', () => {
   let store = withFolderPatch(emptyViewSettings(), downloads, { sort: { key: 'size', dir: 'asc' } })
   assert.equal(hasFolderOverride(store, downloads), true)
-  store = withFolderPatch(store, downloads, { sort: { key: 'name', dir: 'asc' } })
+  store = withFolderPatch(store, downloads, { sort: { key: 'mtime', dir: 'desc' } })
   assert.deepEqual(store.overrides, {})
-  assert.equal(store, withFolderPatch(store, downloads, { sort: { key: 'name', dir: 'asc' } }))
+  assert.equal(store, withFolderPatch(store, downloads, { sort: { key: 'mtime', dir: 'desc' } }))
 })
 
 test('apply to all folders clears overrides and uses that view everywhere', () => {
@@ -103,18 +120,21 @@ test('a missing override key falls back to defaults without throwing', () => {
   const renamed = '/Users/me/OldDownloads'
   assert.equal(hasFolderOverride(store, renamed), false)
   assert.doesNotThrow(() => viewForPath(store, renamed))
-  assert.equal(viewForPath(store, renamed).sort.key, 'name')
-  assert.equal(viewForPath(store, null).sort.key, 'name')
+  assert.equal(viewForPath(store, renamed).sort.key, 'mtime')
+  assert.equal(viewForPath(store, renamed).sort.dir, 'desc')
+  assert.equal(viewForPath(store, null).sort.key, 'mtime')
   assert.equal(viewForPath(store, 'not/absolute').iconSize, null)
   assert.doesNotThrow(() => viewForPath(null, downloads))
-  assert.equal(viewForPath(null, downloads).sort.key, 'name')
+  assert.equal(viewForPath(null, downloads).sort.key, 'mtime')
+  assert.equal(viewForPath(null, downloads).sort.dir, 'desc')
 })
 
 test('corrupt documents and bad override entries normalize instead of throwing', () => {
   for (const raw of [null, undefined, 'nope', 3, [], { version: 'x' }]) {
     const store = normalizeViewSettings(raw)
     assert.equal(store.version, 1)
-    assert.equal(store.defaults.sort.key, 'name')
+    assert.equal(store.defaults.sort.key, 'mtime')
+    assert.equal(store.defaults.sort.dir, 'desc')
     assert.deepEqual(store.overrides, {})
   }
   const store = normalizeViewSettings({
@@ -127,7 +147,8 @@ test('corrupt documents and bad override entries normalize instead of throwing',
     },
   })
   assert.equal(store.version, 1)
-  assert.equal(store.defaults.sort.key, 'name')
+  assert.equal(store.defaults.sort.key, 'mtime')
+  assert.equal(store.defaults.sort.dir, 'desc')
   assert.equal(store.defaults.iconSize, 12)
   assert.equal(store.overrides.relative, undefined)
   assert.equal(store.overrides[downloads], undefined)
@@ -137,11 +158,12 @@ test('corrupt documents and bad override entries normalize instead of throwing',
 })
 
 test('clearing one folder leaves the others and the defaults', () => {
-  let store = withFolderPatch(emptyViewSettings(), downloads, { sort: { key: 'mtime', dir: 'desc' } })
+  let store = withFolderPatch(emptyViewSettings(), downloads, { sort: { key: 'name', dir: 'asc' } })
   store = withFolderPatch(store, documents, { sort: { key: 'size', dir: 'asc' } })
   const next = clearFolderOverride(store, `${downloads}/`)
   assert.equal(hasFolderOverride(next, downloads), false)
-  assert.equal(viewForPath(next, downloads).sort.key, 'name')
+  assert.equal(viewForPath(next, downloads).sort.key, 'mtime')
+  assert.equal(viewForPath(next, downloads).sort.dir, 'desc')
   assert.equal(viewForPath(next, documents).sort.key, 'size')
   assert.equal(clearFolderOverride(next, downloads), next)
 })
@@ -159,10 +181,11 @@ test('resolveViewKey uses the canonical path and falls back when resolve fails',
 })
 
 test('rekey moves an override when canonicalize disagrees with the lexical path', () => {
-  const store = withFolderPatch(emptyViewSettings(), '/tmp/project', { sort: { key: 'mtime', dir: 'desc' } })
+  const store = withFolderPatch(emptyViewSettings(), '/tmp/project', { sort: { key: 'size', dir: 'desc' } })
   const moved = rekeyOverride(store, '/tmp/project', '/private/tmp/project')
   assert.equal(hasFolderOverride(moved, '/tmp/project'), false)
-  assert.equal(viewForPath(moved, '/private/tmp/project').sort.key, 'mtime')
+  assert.equal(viewForPath(moved, '/private/tmp/project').sort.key, 'size')
+  assert.equal(viewForPath(moved, '/private/tmp/project').sort.dir, 'desc')
   assert.equal(rekeyOverride(moved, '/tmp/project', '/private/tmp/project'), moved)
 })
 
@@ -188,8 +211,8 @@ test('sync applies the folder view to matching tabs only', () => {
   const next = syncPaneViews(panes, store)
   assert.equal(next[0].tabs[0].sortKey, 'mtime')
   assert.equal(next[0].tabs[0].sortDir, 'desc')
-  assert.equal(next[0].tabs[1].sortKey, 'name')
-  assert.equal(next[0].tabs[1].sortDir, 'asc')
+  assert.equal(next[0].tabs[1].sortKey, 'mtime')
+  assert.equal(next[0].tabs[1].sortDir, 'desc')
   assert.equal(next[0].colWidths.size, 90)
   assert.equal(next[0].colVisible.btime, true)
   assert.equal(syncPaneViews(next, store), next)
@@ -201,7 +224,7 @@ test('sync applies the folder view to matching tabs only', () => {
 })
 
 test('a renamed folder with no key does not throw while syncing panes', () => {
-  const store = withFolderPatch(emptyViewSettings(), downloads, { sort: { key: 'mtime', dir: 'desc' } })
+  const store = withFolderPatch(emptyViewSettings(), downloads, { sort: { key: 'size', dir: 'desc' } })
   const panes = [
     {
       tabs: [{ id: 'a', path: '/Users/me/OldDownloads', sortKey: 'size', sortDir: 'desc' }],
@@ -215,14 +238,23 @@ test('a renamed folder with no key does not throw while syncing panes', () => {
   assert.doesNotThrow(() => {
     next = syncPaneViews(panes, store)
   })
-  assert.equal(next[0].tabs[0].sortKey, 'name')
-  assert.equal(next[0].tabs[0].sortDir, 'asc')
+  assert.equal(next[0].tabs[0].sortKey, 'mtime')
+  assert.equal(next[0].tabs[0].sortDir, 'desc')
+})
+
+test('a tab without a saved sort opens by modified date, newest first', () => {
+  assert.deepEqual(sortFromSavedTab(null), { sortKey: 'mtime', sortDir: 'desc' })
+  assert.deepEqual(sortFromSavedTab({}), { sortKey: 'mtime', sortDir: 'desc' })
+  assert.deepEqual(sortFromSavedTab({ sortKey: 'nope' }), { sortKey: 'mtime', sortDir: 'desc' })
+  assert.deepEqual(sortFromSavedTab({ sortKey: 'date', sortDir: 'desc' }), { sortKey: 'mtime', sortDir: 'desc' })
+  assert.deepEqual(sortFromSavedTab({ sortKey: 'name', sortDir: 'asc' }), { sortKey: 'name', sortDir: 'asc' })
+  assert.deepEqual(sortFromSavedTab({ sortKey: 'mtime', sortDir: 'asc' }), { sortKey: 'mtime', sortDir: 'asc' })
 })
 
 test('seed lifts the focused pane into global defaults', () => {
   const panes = [
     {
-      tabs: [{ path: downloads, sortKey: 'mtime', sortDir: 'desc' }],
+      tabs: [{ path: downloads, sortKey: 'name', sortDir: 'asc' }],
       active: 0,
       colWidths: { ...normalizeCols(null), kind: 140 },
       colVisible: { ...normalizeVis(null), kind: false },
@@ -231,8 +263,8 @@ test('seed lifts the focused pane into global defaults', () => {
   ]
   const seeded = seedViewSettings(panes, 0)
   assert.equal(seeded.version, 1)
-  assert.equal(seeded.defaults.sort.key, 'mtime')
-  assert.equal(seeded.defaults.sort.dir, 'desc')
+  assert.equal(seeded.defaults.sort.key, 'name')
+  assert.equal(seeded.defaults.sort.dir, 'asc')
   assert.equal(seeded.defaults.columns.widths.kind, 140)
   assert.equal(seeded.defaults.columns.visible.kind, false)
   assert.equal(seeded.defaults.iconSize, null)
