@@ -619,3 +619,66 @@ fn throttled_progress_still_advances_authoritative_snapshot_revision() {
     release.send(()).unwrap();
     q.wait_idle();
 }
+#[test]
+fn real_executor_fifo_and_latest_undo_preserve_disk_results() {
+    use std::fs;
+    let root = std::env::temp_dir().join(format!(
+        "bento-m6-queue-integration-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            crate::cleanup_staging(&self.0);
+        }
+    }
+    let _cleanup = Cleanup(root.clone());
+    fs::create_dir_all(root.join("destination")).unwrap();
+    fs::write(root.join("source"), b"verified contents").unwrap();
+    {
+        let executor = super::super::executor::FileExecutor::new(root.join("app")).unwrap();
+        let q = OperationManager::new(Arc::new(executor), Arc::new(|_| {}));
+        let mut copy = request("copy");
+        copy.items[0].source = Some(root.join("source").to_string_lossy().into());
+        copy.destination = Some(root.join("destination").to_string_lossy().into());
+        let copied = q.enqueue(copy.clone()).unwrap();
+        let mut rename = request("rename");
+        rename.kind = OperationKind::Rename;
+        rename.items[0].source = Some(root.join("destination/source").to_string_lossy().into());
+        rename.items[0].target_name = Some("renamed".into());
+        rename.destination = None;
+        let renamed = q.enqueue(rename).unwrap();
+        q.wait_idle();
+        assert_eq!(q.get(&copied.job_id).unwrap().state, JobState::Completed);
+        assert_eq!(q.get(&renamed.job_id).unwrap().state, JobState::Completed);
+        assert_eq!(
+            fs::read(root.join("destination/renamed")).unwrap(),
+            b"verified contents"
+        );
+        assert!(!root.join("destination/source").exists());
+        assert_eq!(q.enqueue(copy).unwrap().job_id, copied.job_id);
+        let undo = q.list().latest_undo_id.unwrap();
+        let inverse = q.undo(undo, "undo-rename".into()).unwrap();
+        q.wait_idle();
+        assert_eq!(q.get(&inverse.job_id).unwrap().state, JobState::Completed);
+        assert!(root.join("destination/source").exists());
+        assert!(!root.join("destination/renamed").exists());
+        let undo = q.list().latest_undo_id.unwrap();
+        let inverse_copy = q.undo(undo, "undo-copy".into()).unwrap();
+        q.wait_idle();
+        assert_eq!(
+            q.get(&inverse_copy.job_id).unwrap().state,
+            JobState::Completed,
+            "{:?}",
+            q.outcomes(&inverse_copy.job_id, 0, 200).unwrap().outcomes
+        );
+        assert!(!root.join("destination/source").exists());
+        assert_eq!(fs::read(root.join("source")).unwrap(), b"verified contents");
+        assert!(q.list().latest_undo_id.is_none());
+    }
+    crate::cleanup_staging(&root);
+}
