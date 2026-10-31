@@ -114,7 +114,8 @@
     --dialog-shadow: 0 4px 12px rgba(0, 0, 0, 0.3), 0 20px 56px rgba(0, 0, 0, 0.5);
   }
 
-  .sb-system-icon { filter: invert(0.88) hue-rotate(180deg); }
+  /* 只反色内置的单色模板图。NSWorkspace 彩色图标带 .sb-color-icon，保持原色。 */
+  .sb-system-icon.sb-template-icon { filter: invert(0.88) hue-rotate(180deg); }
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -342,6 +343,7 @@ input, textarea {
 .sb-item.active { background: rgba(10, 132, 255, 0.16); box-shadow: inset 0 0 0 1px rgba(10, 132, 255, 0.06); }
 .sb-item svg { flex: none; color: var(--accent); }
 .sb-system-icon { flex: none; border-radius: 3px; object-fit: contain; }
+.sb-system-icon.sb-color-icon { border-radius: 0; }
 .sb-item.drive svg { color: var(--muted-icon); }
 
 /* ---------- 窗格区 ---------- */
