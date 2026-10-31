@@ -79,6 +79,8 @@ pub(crate) struct Record {
     pub incoming: Option<PathBuf>,
     pub incoming_manifest: Option<Manifest>,
     pub cleanup_pending: bool,
+    #[serde(default)]
+    pub move_intent: bool,
 }
 impl Record {
     pub fn new(source: Option<PathBuf>, destination: PathBuf) -> Self {
@@ -94,6 +96,7 @@ impl Record {
             incoming: None,
             incoming_manifest: None,
             cleanup_pending: false,
+            move_intent: false,
         }
     }
     pub fn recovery(&self) -> RecoveryRecord {
@@ -170,7 +173,7 @@ impl Journal {
                 .read(true)
                 .custom_flags(libc::O_NOFOLLOW)
                 .open(entry.path())?;
-            let record: Record = serde_json::from_reader(file).map_err(|e| {
+            let mut record: Record = serde_json::from_reader(file).map_err(|e| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("恢复记录损坏，未修改任何文件: {e}"),
@@ -192,6 +195,34 @@ impl Journal {
                     bento_fswatch::register_internal(&root.path)?;
                 }
             }
+            // Reconcile a crash between an atomic rename and its journal update.
+            // This only observes identities; it never resumes or deletes a source.
+            if record.destination_manifest.is_none() {
+                let guard = record.incoming_manifest.as_ref().or_else(|| {
+                    if record.move_intent {
+                        record.source_manifest.as_ref()
+                    } else {
+                        None
+                    }
+                });
+                if guard.is_some_and(|g| g.matches_captured(&record.destination)) {
+                    record.destination_manifest =
+                        Manifest::capture(&record.destination, &|| Ok(())).ok();
+                    if record.move_intent
+                        && record.source.as_ref().is_some_and(|p| {
+                            fs::symlink_metadata(p).is_ok()
+                                || record.protected.iter().any(|held| {
+                                    held.original == *p && fs::symlink_metadata(&held.path).is_ok()
+                                })
+                        })
+                    {
+                        record.cleanup_pending = true;
+                    }
+                }
+            }
+            record.protected.retain(|p| {
+                fs::symlink_metadata(&p.path).is_ok() || !p.manifest.matches_captured(&p.original)
+            });
             records.insert(record.id.clone(), record);
         }
         Ok(Self {

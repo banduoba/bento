@@ -1,6 +1,6 @@
 //! Inverse effects are identity guarded, run in reverse order, and remember applied steps.
 use super::{
-    executor::{affected, basename, display, error, invalid, FileExecutor, Point},
+    executor::{affected, basename, display, error, invalid, rename_prepared, FileExecutor, Point},
     identity::{self, Manifest},
     journal::{self, OwnedRoot, Protected, Record},
     queue::OperationContext,
@@ -184,9 +184,9 @@ impl FileExecutor {
                 record.phase = "undoCapturing".into();
                 self.save(&record, c)?;
                 self.at(Point::UndoCapture, &e.destination, c)?;
-                crate::rename_no_replace(&e.destination, &held.path)?;
+                rename_prepared(&e.destination, &held.path)?;
                 if !e.manifest.matches_captured(&held.path) {
-                    let _ = crate::rename_no_replace(&held.path, &e.destination);
+                    let _ = rename_prepared(&held.path, &e.destination);
                     return Err(identity::changed());
                 }
                 e.held = Some(held.clone());
@@ -207,7 +207,7 @@ impl FileExecutor {
                         let _ = self.journal.save(&record);
                         return Err(err);
                     }
-                    if crate::rename_no_replace(&held.path, &e.destination).is_ok() {
+                    if rename_prepared(&held.path, &e.destination).is_ok() {
                         e.held = None;
                     }
                     return Err(err);

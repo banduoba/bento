@@ -364,3 +364,256 @@ fn authorized_rename_inverse_refreshes_prior_copy_guard_but_edits_still_block() 
     );
     assert!(!d.join("dest/source").exists());
 }
+
+#[test]
+fn publication_racer_after_backup_capture_is_preserved_and_reported_partial() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    fs::write(d.join("dest/source"), b"original").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let target = d.join("dest/source");
+    e.hook = Arc::new(move |p, _, _| {
+        if p == Point::AfterBackupCapture {
+            fs::write(&target, b"racer")?;
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached_with_decisions("replace", vec![ConflictDecision::Replace]);
+    let r = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Partial);
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"racer");
+    assert!(r.undo_id.is_some());
+    let record = e.journal.records().pop().unwrap();
+    assert_eq!(fs::read(&record.protected[0].path).unwrap(), b"original");
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: r.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo")
+        )
+        .undo_complete
+    );
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"racer");
+}
+#[test]
+fn metadata_failure_and_final_checkpoint_cancel_leave_source_and_no_published_target() {
+    for boundary in [Point::Metadata, Point::BeforePublish] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("dest")).unwrap();
+        fs::write(d.join("source"), b"content").unwrap();
+        let mut e = FileExecutor::new(d.join("app")).unwrap();
+        e.hook = Arc::new(move |p, _, c| {
+            if p == boundary {
+                if p == Point::Metadata {
+                    return Err(io::Error::other("metadata failed"));
+                }
+                c.request_cancel();
+            }
+            Ok(())
+        });
+        let c = OperationContext::detached("copy");
+        e.execute(
+            &Work::Operation(request(
+                OperationKind::Copy,
+                &d.join("source"),
+                &d.join("dest"),
+            )),
+            &c,
+        );
+        assert!(!d.join("dest/source").exists());
+        assert_eq!(fs::read(d.join("source")).unwrap(), b"content");
+        assert_eq!(fs::read_dir(d.join("dest")).unwrap().count(), 0);
+        assert!(e.recoveries().unwrap().is_empty());
+    }
+}
+#[test]
+fn non_exdev_rename_error_never_copies_and_exact_source_is_restored() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"content").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|p, _, _| {
+        assert_ne!(p, Point::Chunk);
+        if p == Point::RenameTarget {
+            return Err(io::Error::from_raw_os_error(libc::EACCES));
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("move");
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Move,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Failed);
+    assert_eq!(fs::read(d.join("source")).unwrap(), b"content");
+    assert!(!d.join("dest/source").exists());
+    assert!(e.recoveries().unwrap().is_empty());
+}
+#[test]
+fn dangling_link_conflicts_and_alias_subtree_are_never_overwritten() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"content").unwrap();
+    std::os::unix::fs::symlink("missing", d.join("dest/source")).unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let c = OperationContext::detached("copy");
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Skipped);
+    assert_eq!(
+        fs::read_link(d.join("dest/source")).unwrap(),
+        PathBuf::from("missing")
+    );
+    let c = OperationContext::detached_with_decisions("copy2", vec![ConflictDecision::KeepBoth]);
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(
+        fs::read(
+            c.recorded_outcomes()[0]
+                .actual_destination
+                .as_ref()
+                .unwrap()
+        )
+        .unwrap(),
+        b"content"
+    );
+    fs::create_dir(d.join("directory")).unwrap();
+    fs::create_dir(d.join("directory/child")).unwrap();
+    std::os::unix::fs::symlink(d.join("directory/child"), d.join("alias")).unwrap();
+    let c = OperationContext::detached("alias");
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("directory"),
+            &d.join("alias"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Failed);
+    assert_eq!(fs::read_dir(d.join("directory/child")).unwrap().count(), 0);
+}
+#[test]
+fn partial_undo_retries_only_failed_effect_and_preserves_missing_parent() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("src")).unwrap();
+    fs::write(d.join("src/a"), b"A").unwrap();
+    fs::write(d.join("src/b"), b"B").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let mut r = request(OperationKind::Move, &d.join("src/a"), &d.join("dest"));
+    r.items.push(OperationItem {
+        item_id: "b".into(),
+        source: Some(display(&d.join("src/b"))),
+        target_name: None,
+        create_kind: None,
+    });
+    let r = e.execute(&Work::Operation(r), &OperationContext::detached("move"));
+    fs::write(d.join("src/a"), b"occupant").unwrap();
+    let c = OperationContext::detached("undo");
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: r.undo_id.clone().unwrap()
+            },
+            &c
+        )
+        .undo_complete
+    );
+    assert_eq!(fs::read(d.join("src/b")).unwrap(), b"B");
+    assert!(d.join("dest/a").exists());
+    fs::remove_file(d.join("src/a")).unwrap();
+    fs::remove_file(d.join("src/b")).unwrap();
+    fs::remove_dir(d.join("src")).unwrap();
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: r.undo_id.clone().unwrap()
+            },
+            &OperationContext::detached("retry-missing")
+        )
+        .undo_complete
+    );
+    assert!(!d.join("src").exists());
+    fs::create_dir(d.join("src")).unwrap();
+    let c = OperationContext::detached("retry");
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: r.undo_id.unwrap()
+            },
+            &c
+        )
+        .undo_complete
+    );
+    assert_eq!(c.recorded_outcomes().len(), 1);
+    assert_eq!(fs::read(d.join("src/a")).unwrap(), b"A");
+    assert!(!d.join("src/b").exists());
+}
+#[test]
+fn copy_retains_readonly_directory_mode_and_dangling_symlink() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/a"), b"A").unwrap();
+    std::os::unix::fs::symlink("absent", d.join("source/link")).unwrap();
+    fs::set_permissions(d.join("source"), fs::Permissions::from_mode(0o500)).unwrap();
+    let source_time = fs::metadata(d.join("source")).unwrap().mtime_nsec();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let c = OperationContext::detached("copy");
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(
+        c.recorded_outcomes()[0].status,
+        OutcomeStatus::Succeeded,
+        "{:?}",
+        c.recorded_outcomes()
+    );
+    assert_eq!(
+        fs::metadata(d.join("dest/source"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o500
+    );
+    assert_eq!(
+        fs::metadata(d.join("dest/source")).unwrap().mtime_nsec(),
+        source_time
+    );
+    assert_eq!(
+        fs::read_link(d.join("dest/source/link")).unwrap(),
+        PathBuf::from("absent")
+    );
+}

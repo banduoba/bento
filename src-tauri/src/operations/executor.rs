@@ -29,6 +29,7 @@ pub(crate) enum Point {
     UndoMoved,
     RenameTarget,
     ArchiveSpawned,
+    CapturedSource,
 }
 type Hook = Arc<dyn Fn(Point, &Path, &OperationContext) -> io::Result<()> + Send + Sync>;
 pub struct FileExecutor {
@@ -220,6 +221,7 @@ impl FileExecutor {
         }
         let mut record = Record::new(source.map(Path::to_path_buf), destination.clone());
         record.source_manifest = source_manifest.clone();
+        record.move_intent = moving;
         let root = OwnedRoot::create(&parent)?;
         record.roots.push(root.clone());
         let incoming = root.path.join("incoming");
@@ -275,7 +277,7 @@ impl FileExecutor {
         }
         let mut published = false;
         for _ in 0..128 {
-            match crate::rename_no_replace(&incoming, &destination) {
+            match rename_prepared(&incoming, &destination) {
                 Ok(()) => {
                     published = true;
                     break;
@@ -303,14 +305,12 @@ impl FileExecutor {
                     }
                 }
                 Err(e) => {
-                    self.abandon(&record);
-                    return Err(e);
+                    return self.retained_failure(&record, item, out, e);
                 }
             }
         }
         if !published {
-            self.abandon(&record);
-            return Err(invalid("目标重名冲突过多"));
+            return self.retained_failure(&record, item, out, invalid("目标重名冲突过多"));
         }
         out.published = true;
         out.actual_destination = Some(display(&destination));
@@ -491,6 +491,7 @@ impl FileExecutor {
         let held = root.path.join("source");
         let mut r = Record::new(Some(source.to_path_buf()), dest.to_path_buf());
         r.source_manifest = Some(manifest.clone());
+        r.move_intent = true;
         r.roots.push(root.clone());
         r.protected.push(Protected {
             path: held.clone(),
@@ -506,14 +507,14 @@ impl FileExecutor {
         let attempt = (|| {
             self.at(Point::BeforePublish, dest, c)?;
             checkpoint(c)?;
-            crate::rename_no_replace(source, &held)?;
+            rename_prepared(source, &held)?;
             if !manifest.matches_captured(&held) {
                 return Err(identity::changed());
             }
             r.phase = "sourceHeld".into();
             self.save(&r, c)?;
             self.at(Point::RenameTarget, dest, c)?;
-            crate::rename_no_replace(&held, dest)
+            rename_prepared(&held, dest)
         })();
         match attempt {
             Ok(()) => {
@@ -549,7 +550,7 @@ impl FileExecutor {
             }
             Err(e) => {
                 if held.exists() || fs::symlink_metadata(&held).is_ok() {
-                    if crate::rename_no_replace(&held, source).is_err() {
+                    if rename_prepared(&held, source).is_err() {
                         let _ = self.journal.save(&r);
                         out.status = OutcomeStatus::Partial;
                         out.retry = RetryKind::ManualRecovery;
@@ -595,19 +596,20 @@ impl FileExecutor {
             r.protected.push(held.clone());
             r.phase = "capturingSource".into();
             self.save(r, c)?;
-            crate::rename_no_replace(&source, &held.path)?;
+            rename_prepared(&source, &held.path)?;
             if !original.matches_captured(&held.path) {
                 let _ = crate::rename_no_replace(&held.path, &source);
                 return Err(identity::changed());
             }
             held
         };
-        if !held.manifest.matches_captured(&held.path) {
+        if !held.manifest.matches_remaining(&held.path) {
             return Err(identity::changed());
         }
         r.phase = "removingSource".into();
         self.save(r, c)?;
-        crate::remove_path(&held.path)?;
+        self.at(Point::CapturedSource, &held.path, c)?;
+        remove_captured(&held.path)?;
         r.protected.retain(|p| p.path != held.path);
         r.cleanup_pending = false;
         r.phase = "sourceRemoved".into();
@@ -835,3 +837,69 @@ mod tests;
 
 #[path = "archive.rs"]
 mod archive;
+
+/// macOS needs owner write permission when changing a directory's parent, even if
+/// its parent is writable. Restore through the open descriptor before source cleanup.
+/// The surrounding finishing section owns the staged object and records any failure.
+pub(crate) fn rename_prepared(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::unix::{fs::MetadataExt, io::AsRawFd};
+    let md = fs::symlink_metadata(source)?;
+    if !md.is_dir() || md.mode() & 0o200 != 0 {
+        return crate::rename_no_replace(source, destination);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(source)?;
+    if file.metadata()?.ino() != md.ino() || file.metadata()?.dev() != md.dev() {
+        return Err(identity::changed());
+    }
+    if unsafe {
+        libc::fchmod(
+            file.as_raw_fd(),
+            ((md.mode() | 0o200) & 0o7777) as libc::mode_t,
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let renamed = crate::rename_no_replace(source, destination);
+    if unsafe { libc::fchmod(file.as_raw_fd(), (md.mode() & 0o7777) as libc::mode_t) } != 0 {
+        let error = io::Error::last_os_error();
+        return if renamed.is_ok() {
+            Err(io::Error::new(
+                error.kind(),
+                crate::PublishedDestination {
+                    dest: destination.to_path_buf(),
+                    error,
+                },
+            ))
+        } else {
+            Err(error)
+        };
+    }
+    renamed
+}
+
+// Destruction is limited to a verified tree captured beneath a private owned root.
+// Readonly modes are restored if removal cannot complete; no symlink is followed.
+fn remove_captured(path: &Path) -> io::Result<()> {
+    let md = fs::symlink_metadata(path)?;
+    if !md.is_dir() {
+        return fs::remove_file(path);
+    }
+    fs::set_permissions(
+        path,
+        fs::Permissions::from_mode(md.permissions().mode() | 0o700),
+    )?;
+    let result = (|| {
+        for e in fs::read_dir(path)? {
+            remove_captured(&e?.path())?;
+        }
+        fs::remove_dir(path)
+    })();
+    if result.is_err() {
+        let _ = fs::set_permissions(path, md.permissions());
+    }
+    result
+}
