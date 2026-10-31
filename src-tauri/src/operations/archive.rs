@@ -108,7 +108,7 @@ impl FileExecutor {
         valid_name(&name)?;
         let requested = parent.join(name);
         out.requested_destination = Some(display(&requested));
-        let (dest, replacement) = match self.choose_destination(
+        let (mut dest, replacement) = match self.choose_destination(
             None,
             &requested,
             items[0],
@@ -174,6 +174,8 @@ impl FileExecutor {
                 cmd.spawn()
                     .map_err(|_| io::Error::other("无法启动 zip 压缩进程"))?,
             );
+            #[cfg(test)]
+            self.child_ids.lock().unwrap().push(child.0.id());
             self.at(Point::ArchiveSpawned, &archive, c)?;
             loop {
                 if c.is_cancelled() {
@@ -210,23 +212,43 @@ impl FileExecutor {
             if let Some(old) = replacement {
                 self.capture_backup(&mut record, &old, c)?;
             }
-            crate::rename_no_replace(&archive, &dest)?;
-            Ok(())
+            let published = self.publish_incoming(
+                &mut record,
+                None,
+                &requested,
+                items[0],
+                c,
+                r.options.keep_both,
+                false,
+            )?;
+            dest = record.destination.clone();
+            Ok(published)
         })();
-        if let Err(e) = result {
-            return self.retained_failure(&record, items[0], out, e);
+        match result {
+            Err(e) => return self.retained_failure(&record, items[0], out, e),
+            Ok(false) => {
+                self.abandon(&record);
+                out.status = OutcomeStatus::Skipped;
+                return Ok(None);
+            }
+            Ok(true) => {}
         }
         out.published = true;
         out.actual_destination = Some(display(&dest));
         out.affected_directories = affected(None, &dest);
-        let original = record.incoming_manifest.as_ref().unwrap();
-        if !original.matches_captured(&dest) {
+        let manifest = Manifest::capture(&dest, &|| Ok(()))?;
+        if !record
+            .incoming_manifest
+            .as_ref()
+            .unwrap()
+            .same_captured_manifest(&manifest)
+        {
             out.status = OutcomeStatus::Partial;
+            out.effect_id = Some(record.id.clone());
             out.retry = RetryKind::ManualRecovery;
             let _ = self.journal.save(&record);
             return Err(identity::changed());
         }
-        let manifest = Manifest::capture(&dest, &|| Ok(()))?;
         record.destination_manifest = Some(manifest.clone());
         record.phase = "published".into();
         let mut effect = Effect::new(

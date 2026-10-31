@@ -30,6 +30,7 @@ pub(crate) enum Point {
     RenameTarget,
     ArchiveSpawned,
     CapturedSource,
+    Cloned,
 }
 type Hook = Arc<dyn Fn(Point, &Path, &OperationContext) -> io::Result<()> + Send + Sync>;
 pub struct FileExecutor {
@@ -37,6 +38,9 @@ pub struct FileExecutor {
     pub(crate) journal: Journal,
     pub(crate) undo: Mutex<HashMap<String, Vec<Effect>>>,
     hook: Hook,
+    clone_files: bool,
+    #[cfg(test)]
+    child_ids: Mutex<Vec<u32>>,
 }
 impl FileExecutor {
     pub fn new(app_data_dir: PathBuf) -> Result<Self, String> {
@@ -46,6 +50,9 @@ impl FileExecutor {
             journal,
             undo: Mutex::new(HashMap::new()),
             hook: Arc::new(|_, _, _| Ok(())),
+            clone_files: true,
+            #[cfg(test)]
+            child_ids: Mutex::new(vec![]),
         })
     }
     pub(crate) fn at(&self, p: Point, path: &Path, c: &OperationContext) -> io::Result<()> {
@@ -275,42 +282,14 @@ impl FileExecutor {
                 return self.retained_failure(&record, item, out, e);
             }
         }
-        let mut published = false;
-        for _ in 0..128 {
-            match rename_prepared(&incoming, &destination) {
-                Ok(()) => {
-                    published = true;
-                    break;
-                }
-                Err(e)
-                    if e.kind() == io::ErrorKind::AlreadyExists && record.protected.is_empty() =>
-                {
-                    // No mutation yet; a racer requires a fresh decision and identity.
-                    match self.choose_destination(source, &requested, item, c, auto, creating)? {
-                        Choice::Skip => {
-                            self.abandon(&record);
-                            out.status = OutcomeStatus::Skipped;
-                            return Ok(None);
-                        }
-                        Choice::Target(path, old) => {
-                            destination = path;
-                            record.destination = destination.clone();
-                            self.save(&record, c)?;
-                            checkpoint(c)?;
-                            c.set_phase(Phase::Publishing, Cancelability::Finishing);
-                            if let Some(old) = old {
-                                self.capture_backup(&mut record, &old, c)?;
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    return self.retained_failure(&record, item, out, e);
-                }
+        match self.publish_incoming(&mut record, source, &requested, item, c, auto, creating) {
+            Ok(true) => destination = record.destination.clone(),
+            Ok(false) => {
+                self.abandon(&record);
+                out.status = OutcomeStatus::Skipped;
+                return Ok(None);
             }
-        }
-        if !published {
-            return self.retained_failure(&record, item, out, invalid("目标重名冲突过多"));
+            Err(e) => return self.retained_failure(&record, item, out, e),
         }
         out.published = true;
         out.actual_destination = Some(display(&destination));
@@ -327,20 +306,28 @@ impl FileExecutor {
             record.incoming_manifest.clone().unwrap(),
             record.id.clone(),
         );
-        // Normalize only the rename-induced root ctime, never adopt changed user content.
-        if !record
-            .incoming_manifest
-            .as_ref()
-            .unwrap()
-            .matches_captured(&destination)
-        {
-            out.status = OutcomeStatus::Partial;
-            out.retry = RetryKind::ManualRecovery;
-            record.phase = "publishedUncertain".into();
-            let _ = self.journal.save(&record);
-            return Err(identity::changed());
-        }
-        record.destination_manifest = Some(Manifest::capture(&destination, &|| Ok(()))?);
+        // Capture once, then compare; never adopt an intervening user modification.
+        let published_manifest = Manifest::capture(&destination, &|| Ok(()));
+        let published_manifest = match published_manifest {
+            Ok(m)
+                if record
+                    .incoming_manifest
+                    .as_ref()
+                    .unwrap()
+                    .same_captured_manifest(&m) =>
+            {
+                m
+            }
+            _ => {
+                out.status = OutcomeStatus::Partial;
+                out.retry = RetryKind::ManualRecovery;
+                out.effect_id = Some(record.id.clone());
+                record.phase = "publishedUncertain".into();
+                let _ = self.journal.save(&record);
+                return Err(identity::changed());
+            }
+        };
+        record.destination_manifest = Some(published_manifest);
         effect.manifest = record.destination_manifest.clone().unwrap();
         record.phase = "published".into();
         record.cleanup_pending = moving;
@@ -383,6 +370,40 @@ impl FileExecutor {
             self.finish_record(&record);
         }
         Ok(Some(effect))
+    }
+    fn publish_incoming(
+        &self,
+        record: &mut Record,
+        source: Option<&Path>,
+        requested: &Path,
+        item: &OperationItem,
+        c: &OperationContext,
+        auto: bool,
+        creating: bool,
+    ) -> io::Result<bool> {
+        for _ in 0..128 {
+            match rename_prepared(record.incoming.as_ref().unwrap(), &record.destination) {
+                Ok(()) => return Ok(true),
+                Err(e)
+                    if e.kind() == io::ErrorKind::AlreadyExists && record.protected.is_empty() =>
+                {
+                    match self.choose_destination(source, requested, item, c, auto, creating)? {
+                        Choice::Skip => return Ok(false),
+                        Choice::Target(path, old) => {
+                            record.destination = path;
+                            self.save(record, c)?;
+                            checkpoint(c)?;
+                            c.set_phase(Phase::Publishing, Cancelability::Finishing);
+                            if let Some(old) = old {
+                                self.capture_backup(record, &old, c)?;
+                            }
+                        }
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(invalid("目标重名冲突过多"))
     }
     fn choose_destination(
         &self,
@@ -523,6 +544,14 @@ impl FileExecutor {
                 out.source_disposition = SourceDisposition::Removed;
                 out.affected_directories = affected(Some(source), dest);
                 let moved = Manifest::capture(dest, &|| Ok(()))?;
+                if !manifest.same_captured_manifest(&moved) {
+                    out.status = OutcomeStatus::Partial;
+                    out.retry = RetryKind::ManualRecovery;
+                    out.effect_id = Some(r.id.clone());
+                    r.phase = "publishedUncertain".into();
+                    let _ = self.journal.save(&r);
+                    return Err(identity::changed());
+                }
                 let mut effect = Effect::new(
                     out.item_id.clone(),
                     EffectKind::Move,
@@ -549,6 +578,19 @@ impl FileExecutor {
                 Ok(Some(effect))
             }
             Err(e) => {
+                if crate::published_destination(&e).is_some() {
+                    if manifest.identity().matches(dest) {
+                        r.protected[0].path = dest.to_path_buf();
+                    }
+                    r.phase = "moveMetadataUncertain".into();
+                    let _ = self.journal.save(&r);
+                    out.status = OutcomeStatus::Partial;
+                    out.effect_id = Some(r.id.clone());
+                    out.retry = RetryKind::ManualRecovery;
+                    out.source_disposition = SourceDisposition::Unknown;
+                    out.affected_directories = affected(Some(source), dest);
+                    return Err(e);
+                }
                 if held.exists() || fs::symlink_metadata(&held).is_ok() {
                     if rename_prepared(&held, source).is_err() {
                         let _ = self.journal.save(&r);
@@ -635,28 +677,48 @@ impl FileExecutor {
                 self.copy_tree(&e.path(), &dest.join(e.file_name()), c, item, bytes)?;
             }
         } else if md.is_file() {
-            let mut input = OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(source)?;
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(dest)?;
-            let mut buf = [0u8; 1024 * 256];
-            loop {
+            let mut cloned = false;
+            #[cfg(target_os = "macos")]
+            if self.clone_files {
+                use std::{ffi::CString, os::unix::ffi::OsStrExt};
+                c.set_phase(Phase::Copying, Cancelability::Finishing);
+                let src = CString::new(source.as_os_str().as_bytes())?;
+                let dst = CString::new(dest.as_os_str().as_bytes())?;
+                cloned = unsafe {
+                    libc::clonefile(src.as_ptr(), dst.as_ptr(), 1 /* CLONE_NOFOLLOW */)
+                } == 0;
                 checkpoint(c)?;
-                let n = input.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                output.write_all(&buf[..n])?;
-                *bytes = bytes.saturating_add(n as u64);
-                c.progress(*bytes, None, Some(item.into()), Some(display(source)));
-                self.at(Point::Chunk, source, c)?;
             }
-            output.sync_all()?;
+            if cloned {
+                *bytes = bytes.saturating_add(md.len());
+                c.progress(*bytes, None, Some(item.into()), Some(display(source)));
+                self.at(Point::Cloned, source, c)?;
+            } else {
+                c.set_phase(Phase::Copying, Cancelability::Checkpoint);
+
+                let mut input = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NOFOLLOW)
+                    .open(source)?;
+                let mut output = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(dest)?;
+                let mut buf = [0u8; 1024 * 256];
+                loop {
+                    checkpoint(c)?;
+                    let n = input.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    output.write_all(&buf[..n])?;
+                    *bytes = bytes.saturating_add(n as u64);
+                    c.progress(*bytes, None, Some(item.into()), Some(display(source)));
+                    self.at(Point::Chunk, source, c)?;
+                }
+                output.sync_all()?;
+            }
         } else {
             return Err(invalid("不支持此类文件"));
         }
@@ -711,6 +773,22 @@ impl FileExecutor {
         out: &mut ItemOutcome,
         err: io::Error,
     ) -> io::Result<Option<Effect>> {
+        if record
+            .incoming_manifest
+            .as_ref()
+            .is_some_and(|m| m.identity().matches(&record.destination))
+        {
+            let mut retained = record.clone();
+            retained.phase = "publishedMetadataUncertain".into();
+            let _ = self.journal.save(&retained);
+            out.status = OutcomeStatus::Partial;
+            out.published = true;
+            out.effect_id = Some(record.id.clone());
+            out.actual_destination = Some(display(&record.destination));
+            out.retry = RetryKind::ManualRecovery;
+            out.affected_directories = affected(record.source.as_deref(), &record.destination);
+            return Err(err);
+        }
         let protected = record
             .protected
             .iter()

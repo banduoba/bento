@@ -46,6 +46,7 @@ impl OwnedRoot {
         self.identity.matches(&self.path)
     }
     pub fn cleanup(&self) -> io::Result<()> {
+        if fs::symlink_metadata(&self.path).is_err_and(|e|e.kind()==io::ErrorKind::NotFound){return Ok(());}
         if !self.valid() {
             return Err(super::identity::changed());
         }

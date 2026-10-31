@@ -46,9 +46,13 @@ fn resolved(path: &Path) -> PathBuf {
 }
 pub fn is_internal(path: &Path) -> bool {
     let p = resolved(path);
+    let lexical = match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => resolved(parent).join(name),
+        _ => p.clone(),
+    };
     let owned = registry().lock().unwrap_or_else(|e| e.into_inner()).clone();
     owned.iter().any(|v| {
-        p.starts_with(&v.path)
+        (p.starts_with(&v.path) || lexical.starts_with(&v.path))
             && match fs::symlink_metadata(&v.path) {
                 Ok(m) => m.dev() == v.dev && m.ino() == v.ino,
                 Err(e) => e.kind() == std::io::ErrorKind::NotFound, // suppress delayed deletion events only

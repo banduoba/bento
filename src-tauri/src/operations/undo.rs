@@ -213,6 +213,9 @@ impl FileExecutor {
                     return Err(err);
                 }
             }
+            e.inverse_done = true;
+            e.held = None;
+            record.protected.retain(|p| p.path != held.path);
             if e.kind == EffectKind::Move {
                 if let Some(previous) = &e.source_manifest {
                     let restored = Manifest::capture(&target, &|| Ok(()))?;
@@ -239,6 +242,8 @@ impl FileExecutor {
             record.phase = "restoringBackup".into();
             self.save(&record, c)?;
             crate::rename_no_replace(&backup.path, &backup.original)?;
+            e.backup = None;
+            record.protected.retain(|p| p.path != backup.path);
             let restored = Manifest::capture(&backup.original, &|| Ok(()))?;
             self.refresh_previous_guards(&backup.original, &backup.manifest, &restored);
             record.protected.retain(|p| p.path != backup.path);
@@ -266,13 +271,21 @@ impl FileExecutor {
         out.requested_destination = Some(display(&record.destination));
         c.set_phase(Phase::Recovering, Cancelability::Finishing);
         let mut recovered_undo = None;
+        let mut mutated = false;
         let result = (|| {
             if !record.recovery().actions.contains(&action) {
                 return Err(invalid("此恢复操作不可用"));
             }
             match action {
                 RecoveryAction::FinishSourceCleanup => {
-                    self.finish_source(&mut record, c)?;
+                    let settled = self.finish_source(&mut record, c);
+                    mutated = settled.is_ok()
+                        || record.phase == "sourceRemoved"
+                        || record.protected.iter().any(|p| {
+                            record.source.as_ref() == Some(&p.original)
+                                && fs::symlink_metadata(&p.path).is_ok()
+                        });
+                    if record.cleanup_pending {return settled;}
                     // Convert the existing incomplete effect; never copy a second destination.
                     for (undo_id, effects) in self
                         .undo
@@ -289,8 +302,60 @@ impl FileExecutor {
                     }
                     out.actual_destination = Some(display(&record.destination));
                     out.source_disposition = SourceDisposition::Removed;
+                    settled?;
                 }
                 RecoveryAction::RestoreBackup => {
+                    // After a replacement, the old target may be restored over our own
+                    // still-verified incoming object by moving that object to Trash first.
+                    if let Some(backup) = record
+                        .protected
+                        .iter()
+                        .find(|p| p.original == record.destination)
+                        .cloned()
+                    {
+                        if fs::symlink_metadata(&record.destination).is_ok()
+                            && fs::symlink_metadata(&backup.path).is_ok()
+                        {
+                            let manifest = record
+                                .destination_manifest
+                                .clone()
+                                .ok_or_else(identity::changed)?;
+                            if !manifest.matches(&record.destination) {
+                                return Err(identity::changed());
+                            }
+                            let mut inverse = Effect::new(
+                                id.into(),
+                                EffectKind::Created,
+                                None,
+                                record.destination.clone(),
+                                manifest,
+                                record.id.clone(),
+                            );
+                            inverse.backup = Some(backup);
+                            let restored = self.undo_effect(&mut inverse, c);
+                            mutated = inverse.inverse_done || inverse.backup.is_none();
+                            out.actual_destination = if inverse.backup.is_none() {
+                                Some(display(&record.destination))
+                            } else {
+                                inverse.inverse_destination.as_deref().map(display)
+                            };
+                            if let Some(target) = &inverse.inverse_destination {
+                                out.affected_directories =
+                                    affected(Some(&record.destination), target);
+                            }
+                            record = self.journal.get(id).unwrap_or_else(|| {
+                                let mut done = record.clone();
+                                done.protected.clear();
+                                done
+                            });
+                            if inverse.backup.is_none() {
+                                record
+                                    .protected
+                                    .retain(|p| p.original != record.destination);
+                            }
+                            restored?;
+                        }
+                    }
                     let originals = record.protected.clone();
                     for protected in originals.iter().rev() {
                         if fs::symlink_metadata(&protected.path).is_err() {
@@ -309,7 +374,8 @@ impl FileExecutor {
                         }
                         // Restore is exact. An occupied target is left intact; undo can first move a verified published copy to Trash.
                         self.save(&record, c)?;
-                        crate::rename_no_replace(&protected.path, &protected.original)?;
+                        rename_prepared(&protected.path, &protected.original)?;
+                        mutated = true;
                         out.actual_destination = Some(display(&protected.original));
                         record.protected.retain(|p| p.path != protected.path);
                         self.save(&record, c)?;
@@ -331,13 +397,26 @@ impl FileExecutor {
         match result {
             Ok(()) => {
                 out.status = OutcomeStatus::Succeeded;
-                out.published = true;
-                out.effect_id = Some(journal::id("recovered"));
-                out.affected_directories = affected(record.source.as_deref(), &record.destination);
+                if action != RecoveryAction::DiscardStaging {
+                    mutated = true;
+                }
             }
             Err(e) => {
                 out.error = Some(error(&e, Phase::Recovering));
                 out.retry = RetryKind::ManualRecovery;
+                if mutated {
+                    out.status = OutcomeStatus::Partial;
+                    let _ = self.journal.save(&record);
+                }
+            }
+        }
+        if mutated {
+            out.published = true;
+            out.effect_id = Some(journal::id("recovered"));
+            for dir in affected(record.source.as_deref(), &record.destination) {
+                if !out.affected_directories.contains(&dir) {
+                    out.affected_directories.push(dir);
+                }
             }
         }
         c.record_outcome(out);

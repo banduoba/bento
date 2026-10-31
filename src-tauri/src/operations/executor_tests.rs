@@ -261,6 +261,7 @@ fn cancel_during_copy_removes_unpublished_owned_stage() {
     fs::create_dir(d.join("dest")).unwrap();
     fs::write(d.join("source"), vec![7u8; 1024 * 1024]).unwrap();
     let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.clone_files = false;
     e.hook = Arc::new(|point, _, c| {
         if point == Point::Chunk {
             c.request_cancel();
@@ -616,4 +617,275 @@ fn copy_retains_readonly_directory_mode_and_dangling_symlink() {
         fs::read_link(d.join("dest/source/link")).unwrap(),
         PathBuf::from("absent")
     );
+}
+
+#[test]
+fn archive_cancel_reaps_the_exact_child_and_leaves_no_archive() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), vec![8u8; 1024 * 1024 * 8]).unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|point, _, c| {
+        if point == Point::ArchiveSpawned {
+            c.request_cancel();
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("zip");
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Zip,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Cancelled);
+    assert_eq!(fs::read_dir(d.join("dest")).unwrap().count(), 0);
+    let ids = e.child_ids.lock().unwrap();
+    assert_eq!(ids.len(), 1);
+    let mut status = 0;
+    assert_eq!(
+        unsafe { libc::waitpid(ids[0] as i32, &mut status, libc::WNOHANG) },
+        -1
+    );
+    assert_eq!(
+        io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+}
+#[test]
+fn separate_archive_partial_and_password_never_enters_journal() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"data").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let mut r = request(OperationKind::Zip, &d.join("source"), &d.join("dest"));
+    r.options.separate = true;
+    r.options.password = Some("private-password-123".into());
+    r.items.push(OperationItem {
+        item_id: "missing".into(),
+        source: Some(display(&d.join("missing"))),
+        target_name: None,
+        create_kind: None,
+    });
+    let c = OperationContext::detached("zip");
+    let result = e.execute(&Work::Operation(r), &c);
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Succeeded);
+    assert_eq!(c.recorded_outcomes()[1].status, OutcomeStatus::Failed);
+    assert!(result.undo_id.is_some());
+    assert!(!serde_json::to_string(&c.recorded_outcomes())
+        .unwrap()
+        .contains("private-password-123"));
+    for file in fs::read_dir(d.join("app/operations-recovery")).unwrap() {
+        let file = file.unwrap();
+        if file.path().extension().is_some_and(|e| e == "json") {
+            assert!(!fs::read_to_string(file.path())
+                .unwrap()
+                .contains("private-password-123"));
+        }
+    }
+}
+#[test]
+fn source_change_after_publication_prevents_source_cleanup() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"original").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let source = d.join("source");
+    e.hook = Arc::new(move |p, _, _| {
+        if p == Point::RenameTarget {
+            return Err(io::Error::from_raw_os_error(libc::EXDEV));
+        }
+        if p == Point::BeforeSourceCleanup {
+            fs::write(&source, b"new data")?;
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("move");
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Move,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Partial);
+    assert_eq!(fs::read(d.join("source")).unwrap(), b"new data");
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"original");
+}
+#[test]
+fn source_cleanup_partial_tree_is_retryable_without_recopying_destination() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/a"), b"A").unwrap();
+    fs::write(d.join("source/b"), b"B").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|p, path, _| {
+        if p == Point::RenameTarget {
+            return Err(io::Error::from_raw_os_error(libc::EXDEV));
+        }
+        if p == Point::CapturedSource {
+            fs::remove_file(path.join("a"))?;
+            return Err(io::Error::other("partial deletion"));
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("move");
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Move,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Partial);
+    let target_id = identity::Identity::read(&d.join("dest/source")).unwrap();
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    let record = e
+        .recoveries()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.actions.contains(&RecoveryAction::FinishSourceCleanup))
+        .unwrap();
+    let c = OperationContext::detached("recover");
+    e.execute(
+        &Work::Recovery {
+            recovery_id: record.recovery_id,
+            action: RecoveryAction::FinishSourceCleanup,
+        },
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Succeeded);
+    assert!(target_id.matches(&d.join("dest/source")));
+    assert_eq!(fs::read(d.join("dest/source/a")).unwrap(), b"A");
+    assert_eq!(fs::read(d.join("dest/source/b")).unwrap(), b"B");
+    assert!(e.recoveries().unwrap().is_empty());
+}
+#[test]
+fn journal_failure_before_mutation_and_after_publication_are_truthful() {
+    for fail_call in [0, 2] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("dest")).unwrap();
+        fs::write(d.join("source"), b"data").unwrap();
+        let mut e = FileExecutor::new(d.join("app")).unwrap();
+        let calls = Arc::new(AtomicU64::new(0));
+        e.hook = Arc::new(move |p, _, _| {
+            if p == Point::Journal && calls.fetch_add(1, Ordering::Relaxed) == fail_call {
+                return Err(io::Error::other("journal failure"));
+            }
+            Ok(())
+        });
+        let c = OperationContext::detached("copy");
+        let r = e.execute(
+            &Work::Operation(request(
+                OperationKind::Copy,
+                &d.join("source"),
+                &d.join("dest"),
+            )),
+            &c,
+        );
+        if fail_call == 0 {
+            assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Failed);
+            assert!(!d.join("dest/source").exists());
+            assert!(r.undo_id.is_none());
+        } else {
+            assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Partial);
+            assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"data");
+            assert!(r.undo_id.is_some());
+        }
+        assert_eq!(fs::read(d.join("source")).unwrap(), b"data");
+    }
+}
+#[test]
+fn restart_restore_backup_trashes_only_verified_incoming_and_protects_racer() {
+    for racer in [false, true] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("dest")).unwrap();
+        fs::write(d.join("source"), b"incoming").unwrap();
+        fs::write(d.join("dest/source"), b"original").unwrap();
+        let e = FileExecutor::new(d.join("app")).unwrap();
+        let c =
+            OperationContext::detached_with_decisions("replace", vec![ConflictDecision::Replace]);
+        e.execute(
+            &Work::Operation(request(
+                OperationKind::Copy,
+                &d.join("source"),
+                &d.join("dest"),
+            )),
+            &c,
+        );
+        drop(e);
+        if racer {
+            fs::write(d.join("dest/source"), b"user changed").unwrap();
+        }
+        let e = FileExecutor::new(d.join("app")).unwrap();
+        let recovery = e.recoveries().unwrap()[0].clone();
+        let c = OperationContext::detached("restore");
+        e.execute(
+            &Work::Recovery {
+                recovery_id: recovery.recovery_id,
+                action: RecoveryAction::RestoreBackup,
+            },
+            &c,
+        );
+        if racer {
+            assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Failed);
+            assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"user changed");
+            assert_eq!(e.recoveries().unwrap().len(), 1);
+        } else {
+            assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Succeeded);
+            assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"original");
+            assert!(e.recoveries().unwrap().is_empty());
+            assert_eq!(fs::read(d.join("app/Trash/source")).unwrap(), b"incoming");
+        }
+    }
+}
+#[test]
+fn recovery_save_failure_after_restore_reports_real_partial_effect() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    fs::write(d.join("dest/source"), b"original").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|p, _, _| {
+        if p == Point::AfterBackupCapture {
+            Err(io::Error::other("stop after backup"))
+        } else {
+            Ok(())
+        }
+    });
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached_with_decisions("copy", vec![ConflictDecision::Replace]),
+    );
+    let recovery = e.recoveries().unwrap()[0].clone();
+    let calls = Arc::new(AtomicU64::new(0));
+    e.hook = Arc::new(move |p, _, _| {
+        if p == Point::Journal && calls.fetch_add(1, Ordering::Relaxed) == 1 {
+            return Err(io::Error::other("post-restore journal failure"));
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("recover");
+    e.execute(
+        &Work::Recovery {
+            recovery_id: recovery.recovery_id,
+            action: RecoveryAction::RestoreBackup,
+        },
+        &c,
+    );
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"original");
+    let out = &c.recorded_outcomes()[0];
+    assert_eq!(out.status, OutcomeStatus::Partial);
+    assert!(out.published);
+    assert!(out.effect_id.is_some());
+    assert!(out.affected_directories.contains(&display(&d.join("dest"))));
 }
