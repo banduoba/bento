@@ -97,6 +97,7 @@ impl FileExecutor {
             if !source.is_absolute() {
                 return Err(invalid("压缩源必须为绝对路径"));
             }
+            ensure_public_tree(source, c)?;
             ensure_outside(source, &parent)?;
         }
         let name = if r.options.separate {
@@ -145,7 +146,7 @@ impl FileExecutor {
         }
         let result = (|| {
             let mut cmd = Command::new("zip");
-            cmd.args(["-r", "-q"]).arg(format!(
+            cmd.args(["-r", "-q", "-y"]).arg(format!(
                 "-{}",
                 r.options.compression_level.unwrap_or(1).min(9)
             ));
@@ -160,17 +161,23 @@ impl FileExecutor {
                 .filter(|p| sources.iter().all(|s| s.parent() == Some(*p)));
             let mut names = vec![];
             if let Some(common) = common {
-                cmd.arg("-y").current_dir(common);
+                cmd.current_dir(common);
                 for s in &sources {
                     names.push(format!("./{}", basename(s)?));
                 }
             } else {
                 let input = root.path.join("inputs");
                 crate::create_private_dir(&input)?;
-                for s in &sources {
-                    let link = crate::unique_path(&input, &basename(s)?);
-                    std::os::unix::fs::symlink(s, &link)?;
-                    names.push(format!("./{}", basename(&link)?));
+                for (s, guard) in sources.iter().zip(&guards) {
+                    let staged = crate::unique_path(&input, &basename(s)?);
+                    // Real copies allow -y for every archive. Following synthetic
+                    // input links also followed nested user links into private data.
+                    self.copy_tree(s, &staged, c, &items[0].item_id, &mut 0)?;
+                    let copied = self.scan_manifest(&staged, c, Point::PreparedVerify)?;
+                    if !guard.same_contents(&copied) {
+                        return Err(identity::changed());
+                    }
+                    names.push(format!("./{}", basename(&staged)?));
                 }
                 cmd.current_dir(input);
             }

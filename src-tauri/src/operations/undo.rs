@@ -199,9 +199,16 @@ impl FileExecutor {
                 break;
             }
         }
-        let complete = self.undo.lock().unwrap_or_else(|e| e.into_inner())[id]
-            .iter()
-            .all(|e| e.complete && e.pending_inverse_receipt.is_none());
+        let complete = {
+            let mut owners = self.undo.lock().unwrap_or_else(|e| e.into_inner());
+            let complete = owners[id]
+                .iter()
+                .all(|e| e.complete && e.pending_inverse_receipt.is_none());
+            if complete {
+                owners.remove(id);
+            }
+            complete
+        };
         ExecutionResult {
             undo_complete: complete,
             ..Default::default()

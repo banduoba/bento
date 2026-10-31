@@ -181,6 +181,11 @@ impl FileExecutor {
         if !creating && source.is_none() {
             return Err(invalid("源路径缺失"));
         }
+        if let Some(source) = source {
+            // Private recovery is neither user export data nor movable descendants.
+            // Reject before staging/capture so EXDEV cleanup cannot delete omitted data.
+            ensure_public_tree(source, c)?;
+        }
         let default_name = if creating {
             match item.create_kind {
                 Some(CreateKind::Directory) => "未命名文件夹".into(),
@@ -275,16 +280,12 @@ impl FileExecutor {
         }
         let prepared = (|| {
             if creating && item.create_kind != Some(CreateKind::Template) {
-                if item.create_kind == Some(CreateKind::Directory) {
-                    crate::create_private_dir(&incoming)?;
-                } else {
-                    OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .mode(0o644)
-                        .open(&incoming)?
-                        .sync_all()?;
-                }
+                create_user_item(
+                    &root.path,
+                    &parent,
+                    &incoming,
+                    item.create_kind == Some(CreateKind::Directory),
+                )?;
             } else {
                 self.copy_tree(source.unwrap(), &incoming, c, &item.item_id, &mut 0)?;
             }
@@ -296,6 +297,18 @@ impl FileExecutor {
                     return Err(identity::changed());
                 }
             }
+            // Template contents/mode/xattrs are verified before replacing its source
+            // ACL with the ACL a native new file inherits from the destination.
+            let manifest = if creating && item.create_kind == Some(CreateKind::Template) {
+                let reference = root.path.join("creation-reference");
+                create_user_item(&root.path, &parent, &reference, false)?;
+                copy_creation_ownership(&reference, &incoming)?;
+                copy_creation_acl(&reference, &incoming)?;
+                remove_captured(&reference)?;
+                self.scan_manifest(&incoming, c, Point::PreparedVerify)?
+            } else {
+                manifest
+            };
             record.incoming_manifest = Some(manifest);
             record.phase = "prepared".into();
             self.save(&record, c)?;
@@ -1033,6 +1046,18 @@ impl OperationExecutor for FileExecutor {
     fn recoveries(&self) -> Result<Vec<RecoveryRecord>, String> {
         Ok(self.journal.recoveries())
     }
+    fn forget_undo(&self, id: &str) {
+        let mut owners = self.undo.lock().unwrap_or_else(|e| e.into_inner());
+        // Unsettled inverse receipts remain retryable; ordinary history expiry must
+        // not discard their saved pre-mutation guards. Journals/roots are untouched.
+        if owners.get(id).is_some_and(|effects| {
+            effects
+                .iter()
+                .all(|effect| effect.pending_inverse_receipt.is_none())
+        }) {
+            owners.remove(id);
+        }
+    }
 }
 enum Choice {
     Skip,
@@ -1102,6 +1127,85 @@ fn kind(p: &Path) -> String {
     }
     .into()
 }
+/// Exact registered identities, never a filename prefix. Symlinks are not traversed:
+/// copy preserves them, and ZIP always uses -y (including multi-parent inputs).
+fn ensure_public_tree(path: &Path, c: &OperationContext) -> io::Result<()> {
+    checkpoint(c)?;
+    if bento_fswatch::is_internal(path) {
+        return Err(invalid("所选文件夹包含 Bento 私有恢复数据；请先完成恢复，再复制、压缩、移动、重命名或移到废纸篓"));
+    }
+    if fs::symlink_metadata(path)?.is_dir() {
+        for entry in fs::read_dir(path)? {
+            ensure_public_tree(&entry?.path(), c)?;
+        }
+    }
+    Ok(())
+}
+
+/// Keep the outer root private. Give an inner parent the real destination's ACL,
+/// then let the kernel perform inheritance on ordinary mkdir/open creation. Do not
+/// simulate ACE inheritance or change the process-global umask.
+fn create_user_item(root: &Path, parent: &Path, incoming: &Path, directory: bool) -> io::Result<()> {
+    let creation_parent = root.join("creation-parent");
+    fs::create_dir(&creation_parent)?;
+    copy_creation_acl(parent, &creation_parent)?;
+    let native = creation_parent.join("new");
+    if directory {
+        fs::create_dir(&native)?;
+    } else {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&native)?
+            .sync_all()?;
+    }
+    // The synthetic parent's own delete_child restriction must not prevent moving
+    // the child out of private staging after the kernel has inherited its ACL.
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::io::AsRawFd;
+        let parent = fs::File::open(&creation_parent)?;
+        DirectoryAcl::read(parent.as_raw_fd())?.clear()?;
+    }
+    rename_prepared(&native, incoming)
+}
+
+fn copy_creation_ownership(reference: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::unix::{fs::MetadataExt, io::AsRawFd};
+    let native = fs::metadata(reference)?;
+    let output = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(destination)?;
+    let mode = output.metadata()?.mode() & 0o7777;
+    if unsafe { libc::fchown(output.as_raw_fd(), native.uid(), native.gid()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // chown can clear set-ID bits; templates retain their verified source mode.
+    if unsafe { libc::fchmod(output.as_raw_fd(), mode as libc::mode_t) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn copy_creation_acl(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let source = fs::File::open(source)?;
+    let destination = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(destination)?;
+    // SDK sys/acl.h and acl_get_fd_np(3)/acl_set_fd_np(3): copy the ACL verbatim;
+    // inheritance flags are interpreted only by native creation, not this code.
+    let acl = DirectoryAcl::read(source.as_raw_fd())?;
+    acl.apply_to(destination.as_raw_fd())
+}
+#[cfg(not(target_os = "macos"))]
+fn copy_creation_acl(_source: &Path, _destination: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 fn ensure_outside(source: &Path, parent: &Path) -> io::Result<()> {
     if fs::symlink_metadata(source)?.is_dir() {
         let src = fs::canonicalize(source)?;
@@ -1119,8 +1223,9 @@ mod tests;
 #[path = "archive.rs"]
 mod archive;
 
-/// macOS needs owner write permission when changing a directory's parent, even if
-/// its parent is writable. Restore through the open descriptor before source cleanup.
+/// macOS needs owner write permission when changing a directory's parent; an
+/// inherited delete denial can also block a staged file. Temporarily restrict the
+/// object to its owner and restore its mode/ACL through the same open descriptor.
 /// The surrounding finishing section owns the staged object and records any failure.
 pub(crate) fn rename_prepared(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::unix::{fs::MetadataExt, io::AsRawFd};
@@ -1128,12 +1233,13 @@ pub(crate) fn rename_prepared(source: &Path, destination: &Path) -> io::Result<(
     let first = crate::rename_no_replace(source, destination);
     match first {
         Ok(()) => return Ok(()),
-        Err(ref e) if e.kind() == io::ErrorKind::PermissionDenied && md.is_dir() => {}
+        Err(ref e)
+            if e.kind() == io::ErrorKind::PermissionDenied && (md.is_dir() || md.is_file()) => {}
         Err(e) => return Err(e),
     }
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .custom_flags(libc::O_NOFOLLOW | if md.is_dir() { libc::O_DIRECTORY } else { 0 })
         .open(source)?;
     if file.metadata()?.ino() != md.ino() || file.metadata()?.dev() != md.dev() {
         return Err(identity::changed());
@@ -1141,7 +1247,7 @@ pub(crate) fn rename_prepared(source: &Path, destination: &Path) -> io::Result<(
     #[cfg(target_os = "macos")]
     let acl = DirectoryAcl::read(file.as_raw_fd())?;
     // Restrict group/other access before temporarily removing a deny-write ACL.
-    if unsafe { libc::fchmod(file.as_raw_fd(), 0o700) } != 0 {
+    if unsafe { libc::fchmod(file.as_raw_fd(), if md.is_dir() { 0o700 } else { 0o600 }) } != 0 {
         return Err(io::Error::last_os_error());
     }
     #[cfg(target_os = "macos")]
@@ -1221,7 +1327,10 @@ impl DirectoryAcl {
         }
     }
     fn restore(&self) -> io::Result<()> {
-        if unsafe { acl_set_fd_np(self.fd, self.original, 0x100) } == 0 {
+        self.apply_to(self.fd)
+    }
+    fn apply_to(&self, fd: libc::c_int) -> io::Result<()> {
+        if unsafe { acl_set_fd_np(fd, self.original, 0x100) } == 0 {
             Ok(())
         } else {
             Err(io::Error::last_os_error())
@@ -1241,15 +1350,18 @@ pub(crate) fn remove_captured(path: &Path) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
     let md = fs::symlink_metadata(path)?;
     if !md.is_dir() {
-        return fs::remove_file(path);
+        match fs::remove_file(path) {
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied && md.is_file() => {}
+            result => return result,
+        }
     }
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .custom_flags(libc::O_NOFOLLOW | if md.is_dir() { libc::O_DIRECTORY } else { 0 })
         .open(path)?;
     #[cfg(target_os = "macos")]
     let acl = DirectoryAcl::read(file.as_raw_fd())?;
-    if unsafe { libc::fchmod(file.as_raw_fd(), 0o700) } != 0 {
+    if unsafe { libc::fchmod(file.as_raw_fd(), if md.is_dir() { 0o700 } else { 0o600 }) } != 0 {
         return Err(io::Error::last_os_error());
     }
     #[cfg(target_os = "macos")]
@@ -1263,10 +1375,14 @@ pub(crate) fn remove_captured(path: &Path) -> io::Result<()> {
         return Err(err);
     }
     let result = (|| {
-        for e in fs::read_dir(path)? {
-            remove_captured(&e?.path())?;
+        if md.is_dir() {
+            for e in fs::read_dir(path)? {
+                remove_captured(&e?.path())?;
+            }
+            fs::remove_dir(path)
+        } else {
+            fs::remove_file(path)
         }
-        fs::remove_dir(path)
     })();
     if result.is_err() {
         #[cfg(target_os = "macos")]

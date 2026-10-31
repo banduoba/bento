@@ -12,6 +12,9 @@ pub trait OperationExecutor: Send + Sync + 'static {
     fn recoveries(&self) -> Result<Vec<RecoveryRecord>, String> {
         Ok(vec![])
     }
+    /// Retire session-only inverse ownership. Called by the worker outside queue
+    /// locks; must preserve durable recovery data and unresolved inverse receipts.
+    fn forget_undo(&self, _undo_id: &str) {}
 }
 type EventSink = Arc<dyn Fn(JobSnapshot) + Send + Sync>;
 struct Job {
@@ -861,7 +864,7 @@ fn worker(shared: Arc<Shared>, executor: Arc<dyn OperationExecutor>) {
             }, true),
         };
         redact_error(&work, &mut result.error);
-        let finished = {
+        let (finished, retired) = {
             let mut state = shared.state.lock().unwrap();
             let job = state.jobs.get_mut(&id).unwrap();
             if unknown_effects {
@@ -952,9 +955,18 @@ fn worker(shared: Arc<Shared>, executor: Arc<dyn OperationExecutor>) {
                     state.undo.push(undo_id);
                 }
             }
-            state.running = None;
-            bump(&mut state, &id)
+            // Evict only a prefix: barriers/partial work inside the retained window
+            // keep their order, and nothing older can reappear across a barrier.
+            let excess = state.undo.len().saturating_sub(30);
+            let retired = state.undo.drain(..excess).flatten().collect::<Vec<_>>();
+            (bump(&mut state, &id), retired)
         };
+        for undo_id in retired {
+            executor.forget_undo(&undo_id);
+        }
+        // Stay busy until ownership retirement finishes. No executor callback or
+        // filesystem IO runs while holding the coordinator lock.
+        shared.state.lock().unwrap().running = None;
         (shared.emit)(finished);
         shared.wake.notify_all();
     }

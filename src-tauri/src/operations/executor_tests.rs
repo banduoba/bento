@@ -2942,3 +2942,6 @@ fn fix3_independent_precommit_failure_still_allows_other_inverse_items() {
     );
     assert_eq!(fs::read(d.join("source/b")).unwrap(), b"B");
 }
+
+#[path = "final_review_tests.rs"]
+mod final_review;

@@ -970,3 +970,85 @@ fn round1_late_cancel_preserves_completed_undo_with_or_without_new_outcomes() {
         assert!(q.list().latest_undo_id.is_none());
     }
 }
+
+
+#[test]
+fn finalreview_history_retirement_runs_unlocked_and_does_not_cross_partial_barrier() {
+    struct Window {
+        shared: Mutex<Option<std::sync::Weak<Shared>>>,
+        retired: Mutex<Vec<String>>,
+    }
+    impl OperationExecutor for Window {
+        fn execute(&self, work: &Work, c: &OperationContext) -> ExecutionResult {
+            if let Work::Operation(r) = work {
+                let mut out = ItemOutcome::new(
+                    "i-1",
+                    if r.request_id == "barrier" {
+                        OutcomeStatus::Partial
+                    } else {
+                        OutcomeStatus::Succeeded
+                    },
+                );
+                out.published = true;
+                c.record_outcome(out);
+                ExecutionResult {
+                    undo_id: (r.request_id != "barrier").then(|| r.request_id.clone()),
+                    ..Default::default()
+                }
+            } else {
+                c.record_outcome(ItemOutcome::new("inverse", OutcomeStatus::Succeeded));
+                ExecutionResult {
+                    undo_complete: true,
+                    ..Default::default()
+                }
+            }
+        }
+        fn forget_undo(&self, id: &str) {
+            let shared = self
+                .shared
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .upgrade()
+                .unwrap();
+            let state = shared
+                .state
+                .try_lock()
+                .expect("retirement ran under queue lock");
+            assert!(busy(&state), "idle was exposed before retirement completed");
+            self.retired.lock().unwrap().push(id.into());
+        }
+    }
+    let executor = Arc::new(Window {
+        shared: Mutex::new(None),
+        retired: Mutex::new(vec![]),
+    });
+    let q = OperationManager::new(executor.clone(), Arc::new(|_| {}));
+    *executor.shared.lock().unwrap() = Some(Arc::downgrade(&q.shared));
+    for i in 0..5 {
+        q.enqueue(request(&format!("old-{i}"))).unwrap();
+        q.wait_idle();
+    }
+    q.enqueue(request("barrier")).unwrap();
+    q.wait_idle();
+    for i in 0..29 {
+        q.enqueue(request(&format!("new-{i}"))).unwrap();
+        q.wait_idle();
+    }
+    assert_eq!(
+        *executor.retired.lock().unwrap(),
+        (0..5).map(|i| format!("old-{i}")).collect::<Vec<_>>()
+    );
+    for i in 0..29 {
+        q.undo(
+            q.wait_idle().latest_undo_id.unwrap(),
+            format!("inverse-{i}"),
+        )
+        .unwrap();
+        q.wait_idle();
+    }
+    assert!(q.wait_idle().latest_undo_id.is_none());
+    assert!(q.undo("old-4".into(), "cannot-cross".into()).is_err());
+    assert_eq!(q.shared.state.lock().unwrap().undo, vec![None]);
+}

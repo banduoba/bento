@@ -71,6 +71,8 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 
 Name conflicts default to **Skip**; **Keep Both** is also available. **Replace** is offered only for ordinary files when Bento can retain the original for recovery. Directories are never merged or replaced. Cancellation stops at safe checkpoints and may wait while a protected finishing step completes; already completed items remain. If a file has changed since an operation, undo blocks the destructive reversal and preserves the data for inspection or retry. Retained originals are not automatically discarded.
 
+Ordinary Undo keeps the latest 30 effect-bearing jobs for this session; completed inverses release their manifests. Evicting history never deletes protected originals or their durable recovery records. While a selected folder contains registered private recovery data, Bento rejects Copy, ZIP, Rename, Move and Trash before changing that folder. Finish recovery first, or select unaffected contents. Similarly named user folders are ordinary data. New folders and documents inherit destination access permissions while their enclosing staging remains private. If destination permissions prohibit removing temporary folders, an empty staging cleanup record can remain; Bento does not relax the destination permissions.
+
 When closing the last window while work is active, you can keep working or cancel remaining work and wait for it to drain; the session is saved before exit. A failed archive retry may require entering its password again.
 
 ## Install

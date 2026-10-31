@@ -5,7 +5,7 @@ const operationNames = { copy: '拷贝', move: '移动', trash: '移到废纸篓
 const states = { queued: '排队中', running: '进行中', waitingConflict: '等待处理冲突', cancelling: '正在取消', completed: '已完成', partial: '部分完成', failed: '失败', cancelled: '已取消' }
 const phases = { preparing: '准备', scanning: '扫描文件', copying: '拷贝内容', metadata: '保留元数据', publishing: '发布文件', removingSource: '清理源文件', archiving: '创建归档', undoing: '恢复原状', recovering: '处理恢复记录', finished: '已结束' }
 const outcomeNames = { succeeded: '成功', noop: '无需更改', skipped: '跳过', failed: '失败', cancelled: '取消', notStarted: '未开始', partial: '部分完成' }
-const recoveryNames = { restoreBackup: '恢复受保护的原文件', finishSourceCleanup: '完成源文件清理', discardStaging: '将暂存文件移到废纸篓' }
+const recoveryNames = { restoreBackup: '恢复受保护的原文件', finishSourceCleanup: '完成源文件清理', discardStaging: '永久删除暂存数据' }
 
 export function byteLabel(value) {
   if (value == null || !/^\d+$/.test(String(value))) return '未知'

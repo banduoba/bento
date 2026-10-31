@@ -112,7 +112,7 @@ test('recovery exposes only server actions and passes opaque ID rather than back
   await h.run(()=>button(h,'恢复受保护的原文件').props.onClick())
   const call=b.calls.find(c=>c[0]==='recover')
   assert.equal(call[1],'safe1');assert.equal(call[2],'restoreBackup')
-  assert.equal(call.length,4);assert.equal(button(h,'将暂存文件移到废纸篓'),undefined)
+  assert.equal(call.length,4);assert.equal(button(h,'永久删除暂存数据'),undefined)
 })
 test('duplicate, F5/F6, rename, batch rename, new files/templates and zip all submit the canonical queue',async t=>{
   const b=operationBoundary(),forbidden=()=>assert.fail('legacy mutation bypassed queue')
