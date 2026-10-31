@@ -44,7 +44,8 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | **Instant search** | Global file-name search backed by the [fsearch](https://github.com/noahdunnagan/fsearch) index — fuzzy matching, `*` / `?` wildcards, `ext:` filters and `re:` regular expressions — plus **content search** with a side preview that highlights matching lines. |
 | **Native drag & drop** | Drag files out to Finder or any other app, drop files in from anywhere, or move them between panes. It works even when Bento sits behind other windows, and drop targets are highlighted as you hover. |
 | **Real clipboard** | <kbd>⌘C</kbd> puts real file URLs on the system pasteboard, so <kbd>⌘V</kbd> in Finder and other apps pastes the files themselves. |
-| **Fast file operations** | APFS `clonefile` makes same-volume copies instant. Undo with <kbd>⌘Z</kbd>, duplicates are named `name copy.ext`, `name copy 1.ext`, `name copy 2.ext`, and deletions go to the Trash. |
+| **Queued file operations** | Copy, move, rename, create, archive and Trash actions run in submission order with progress and per-item results. Cancel stops future work; completed items remain. Undo with <kbd>⌘Z</kbd> when the queue is idle. |
+| **Fast file operations** | APFS `clonefile` can speed up same-volume copies, though safety checks still scan files and use disk I/O. Duplicates are named `name copy.ext`, `name copy 1.ext`, `name copy 2.ext`, and deletions go to the Trash. |
 | **Create Archive** | A QSpace-style dialog: choose location and name, speed / size / custom compression level, optional password, one-click mode and per-item archives. |
 | **Batch rename** | Replace, add, format (with counters and dates) and change case, with a live before/after preview. |
 | **New file** | Right-click empty space in a pane and choose **新建**: Text (`未命名.txt`), Markdown (`未命名.md`), or any file you drop in `~/Library/Application Support/com.bento.app/templates/` (for example a `.docx`). The new item is renamed immediately. A clash becomes `未命名 2.txt` and never overwrites. |
@@ -65,6 +66,12 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
     </td>
   </tr>
 </table>
+
+### File operation behavior
+
+Name conflicts default to **Skip**; **Keep Both** is also available. **Replace** is offered only for ordinary files when Bento can retain the original for recovery. Directories are never merged or replaced. Cancellation stops at safe checkpoints and may wait while a protected finishing step completes; already completed items remain. If a file has changed since an operation, undo blocks the destructive reversal and preserves the data for inspection or retry. Retained originals are not automatically discarded.
+
+When closing the last window while work is active, you can keep working or cancel remaining work and wait for it to drain; the session is saved before exit. A failed archive retry may require entering its password again.
 
 ## Install
 
@@ -143,7 +150,7 @@ npm run dev        # Tauri dev mode with hot reload
 | <kbd>⌥⌘T</kbd> | Keep window on top |
 | <kbd>⌘,</kbd> | Settings |
 
-Move and Trash undo restore the original full filename. If restoration fails, the undo stays available for retry; already restored items are skipped.
+File-operation undo is available while the queue is idle. If a file has changed, Bento blocks the destructive reversal and keeps the data available for inspection or retry; completed inverses are not repeated. Partial results remain visible.
 
 </details>
 
@@ -186,7 +193,7 @@ Fixture generators and a headless bench live in [`scripts/bench/README.md`](./sc
 
 ## Contributing
 
-Issues and pull requests are welcome. Please run `npm run build` and, for Rust changes, `cargo test` in `src-tauri/` before submitting. For UI changes, a screenshot or short clip helps a lot.
+Issues and pull requests are welcome. Please run `npm run build` and `node --test` (which includes nested operation tests). For Rust changes, run the relevant tests from the repository root, for example `cargo test --manifest-path src-tauri/Cargo.toml --lib` and `cargo test --manifest-path src-tauri/fswatch/Cargo.toml --lib`. For UI changes, a screenshot or short clip helps a lot.
 
 ## Acknowledgements
 
