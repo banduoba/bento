@@ -17,6 +17,7 @@ import ZipDialog, { normalizeZipPrefs, levelOf } from './components/ZipDialog'
 import SettingsDialog from './components/SettingsDialog'
 import SearchOverlay from './components/SearchOverlay'
 import { IconEye, IconEyeOff, IconSearch, IconChevronDown, IconSettings, IconPin } from './icons'
+import { listIndexAfterKey, normalizeEnterAction, pageStride, resolveListKey } from './shortcuts'
 
 const MIME = 'application/x-bento'
 
@@ -133,6 +134,7 @@ const defaultConfig = (home) => ({
   showSidebar: true,
   autoRefresh: true,
   alwaysOnTop: false,
+  enterAction: 'rename',
   zipPrefs: normalizeZipPrefs(null),
   focusedIdx: 0,
   searchPrefs: { scope: 'global', sort: 'btime' },
@@ -186,6 +188,7 @@ function sanitizeConfig(saved, home) {
     showSidebar: saved.showSidebar !== false,
     autoRefresh: saved.autoRefresh !== false,
     alwaysOnTop: saved.alwaysOnTop === true,
+    enterAction: normalizeEnterAction(saved.enterAction),
     zipPrefs: normalizeZipPrefs(saved.zipPrefs),
     focusedIdx,
     searchPrefs: {
@@ -1061,7 +1064,7 @@ export default function App() {
           .filter(Boolean)
       : []
     const items = [
-      { label: '打开', action: () => openEntry(tabId, entry) },
+      { label: '打开', shortcut: '⌘↓', action: () => openEntry(tabId, entry) },
       ...paneOpenItems,
       paneOpenItems.length ? { sep: true } : null,
       { label: '拷贝', shortcut: '⌘C', action: () => doCopyCut(tabId, 'copy') },
@@ -1069,7 +1072,7 @@ export default function App() {
       { sep: true },
       {
         label: paths.length > 1 ? `重新命名 ${paths.length} 个项目…` : '重新命名',
-        shortcut: '↩',
+        shortcut: normalizeEnterAction(cfg?.enterAction) === 'open' ? 'F2' : '↩',
         action: () =>
           paths.length > 1
             ? openBatchRename(tabId, paths)
@@ -1234,40 +1237,50 @@ export default function App() {
     const paneRows = rowsCache.current[tid] || []
     const firstEntry = () => paneRows.find((x) => x.path === paths[0])
 
-    if (!searchOpen && !settingsOpen && !batchRename && !menu && !e.altKey && !e.ctrlKey && !e.shiftKey) {
-      if (!meta && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-        e.preventDefault()
-        const rows = paneRows.filter((r) => !r.isPseudo)
-        if (!rows.length) return
-        const current = rows.findIndex((r) => r.path === paths[0])
-        const down = e.key === 'ArrowDown'
-        const next = current === -1
-          ? (down ? 0 : rows.length - 1)
-          : Math.max(0, Math.min(rows.length - 1, current + (down ? 1 : -1)))
-        const path = rows[next].path
-        onSelect(tid, new Set([path]))
-        requestAnimationFrame(() => {
-          const pane = document.querySelectorAll('.panes > .pane')[focusIdx]
-          const row = pane?.querySelector('.row.selected')
-          if (row) row.scrollIntoView({ block: 'nearest' })
-          else {
-            const scroller = pane?.querySelector('.rows')
-            if (scroller) setRevealReq({ tabId: tid, path, nonce: Date.now(), scrollTop: scroller.scrollTop })
-          }
-        })
+    const listBlocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen
+    const listAction = listBlocked ? null : resolveListKey(e, cfg?.enterAction)
+    if (listAction) {
+      e.preventDefault()
+      if (listAction === 'open') {
+        const entry = firstEntry()
+        if (entry && !entry.isPseudo) openEntry(tid, entry)
         return
       }
-      if ((!meta && e.key === 'ArrowRight') || (meta && e.key === 'ArrowDown')) {
-        e.preventDefault()
+      if (listAction === 'enterDir') {
         const entry = firstEntry()
         if (entry?.is_dir && !entry.isPseudo) openEntry(tid, entry)
         return
       }
-      if ((!meta && e.key === 'ArrowLeft') || (meta && e.key === 'ArrowUp')) {
-        e.preventDefault()
+      if (listAction === 'parent') {
         nav(tid, parentPath(tab.path))
         return
       }
+      if (listAction === 'rename') {
+        if (paths.length > 1) openBatchRename(tid, paths)
+        else if (paths.length === 1 && paneRows.some((r) => r.path === paths[0])) {
+          startRename(tid, paths[0], basename(paths[0]))
+        }
+        return
+      }
+      const rows = paneRows.filter((r) => !r.isPseudo)
+      if (!rows.length) return
+      const scroller = document.querySelectorAll('.panes > .pane')[focusIdx]?.querySelector('.rows')
+      const nextIdx = listIndexAfterKey(
+        listAction,
+        rows.findIndex((r) => r.path === paths[0]),
+        rows.length,
+        pageStride(scroller?.clientHeight),
+      )
+      if (nextIdx < 0) return
+      const path = rows[nextIdx].path
+      onSelect(tid, new Set([path]))
+      requestAnimationFrame(() => {
+        const pane = document.querySelectorAll('.panes > .pane')[focusIdx]
+        const row = pane?.querySelector('.row.selected')
+        if (row) row.scrollIntoView({ block: 'nearest' })
+        else if (scroller) setRevealReq({ tabId: tid, path, nonce: Date.now(), scrollTop: scroller.scrollTop })
+      })
+      return
     }
 
     if (meta && !e.shiftKey && e.key === 'c') { e.preventDefault(); doCopyCut(tid, 'copy'); return }
@@ -1347,21 +1360,6 @@ export default function App() {
       const pane = cfg.panes[focusIdx]
       const n = pane.tabs.length
       switchTab(focusIdx, (pane.active + (e.shiftKey ? n - 1 : 1)) % n)
-      return
-    }
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      if (paths.length > 1) {
-        openBatchRename(tid, paths)
-      } else if (paths.length === 1) {
-        const path = paths[0]
-        if (paneRows.some((r) => r.path === path)) startRename(tid, path, basename(path))
-      }
-      return
-    }
-    if (e.key === 'F2' && paths.length === 1) {
-      e.preventDefault()
-      startRename(tid, paths[0], basename(paths[0]))
       return
     }
     if (e.key === 'Backspace') { e.preventDefault(); nav(tid, parentPath(tab.path)); return }
@@ -1623,6 +1621,8 @@ export default function App() {
         }}
         layout={normalizeLayout(cfg.layout)}
         onLayoutChange={setLayout}
+        enterAction={normalizeEnterAction(cfg.enterAction)}
+        onEnterActionChange={(enterAction) => setCfg((c) => ({ ...c, enterAction: normalizeEnterAction(enterAction) }))}
         onClose={() => setSettingsOpen(false)}
       />
       {zipDlg && (

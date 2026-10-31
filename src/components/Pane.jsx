@@ -97,6 +97,7 @@ export default function Pane({
     toastTimer.current = setTimeout(() => setCopyToast(null), 2200)
   }
   const [moreMenu, setMoreMenu] = useState(null) // { x, y, segs } 折叠层级的悬停列表
+  const [clickFocus, setClickFocus] = useState(null) // 最近一次点击的行；键盘移动选择后若不在选区里则回退到当前选中项
   const moreTimer = useRef(null)
   const anchorRef = useRef(null)
   const scrollRef = useRef(null)
@@ -339,7 +340,7 @@ export default function Pane({
     return m
   }, [rows])
 
-  // 注册当前行数据到 App（供 ⌘A 全选 / ⌘O 打开 / 回车重命名）
+  // 注册当前行数据到 App（供 ⌘A 全选 / ⌘↓ 打开 / 回车按设置打开或重命名）
   useEffect(() => {
     onRowsCache(tab.id, rows.filter((r) => !r.isPseudo))
   }, [rows, tab.id])
@@ -601,6 +602,7 @@ export default function Pane({
       suppressClickRef.current = false
       return
     }
+    setClickFocus(entry.path)
     onFocus(index)
     let next
     if (e.metaKey || e.ctrlKey) {
@@ -677,6 +679,9 @@ export default function Pane({
   }, [crumbs, collapsedCount, editingPath, tab.path])
 
   const renamingHere = renaming && renaming.tabId === tab.id ? renaming : null
+  const kbdCurrent = clickFocus && selection?.has(clickFocus)
+    ? clickFocus
+    : rows.find((r) => !r.isPseudo && selection?.has(r.path))?.path
 
   return (
     <section
@@ -920,8 +925,14 @@ export default function Pane({
       <div
         className="rows"
         ref={scrollRef}
+        tabIndex={0}
+        aria-label="文件列表"
+        onFocus={() => onFocus(index)}
         onMouseDown={(e) => {
-          if (e.target === scrollRef.current || e.target === innerRef.current) startMarquee(e)
+          if (e.target === scrollRef.current || e.target === innerRef.current) {
+            scrollRef.current?.focus({ preventScroll: true })
+            startMarquee(e)
+          }
         }}
       >
         {error ? (
@@ -944,13 +955,17 @@ export default function Pane({
                   key={entry.path}
                   data-path={entry.isPseudo ? undefined : entry.path}
                   data-dir={entry.is_dir && !entry.isPseudo ? '1' : undefined}
-                  className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${
+                  className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${focused && kbdCurrent === entry.path ? ' kbd-current' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${
                     dropTarget === entry.path ? ' drop-target' : ''
                   }`}
                   style={{ transform: `translateY(${vi.start}px)` }}
                   onDragStart={(e) => e.preventDefault()}
                   onMouseDown={(e) => {
-                    if (e.button === 0 && !entry.isPseudo) beginRowDrag(e, entry)
+                    if (e.button !== 0 || entry.isPseudo) return
+                    if (!e.target?.closest?.('input, textarea, button')) {
+                      scrollRef.current?.focus({ preventScroll: true })
+                    }
+                    beginRowDrag(e, entry)
                   }}
                   onClick={(e) => {
                     if (rowSuppressRef.current) {

@@ -7,7 +7,7 @@ import { api, hasTauri } from '../api'
  * cfg.searchPaths 为空 = 搜索全部已索引位置；非空 = 结果限定在这些目录（及其子目录）内
  */
 export default function SettingsDialog({
-  open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, onClose,
+  open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, enterAction, onEnterActionChange, onClose,
 }) {
   const [busy, setBusy] = useState(false)
   const [fda, setFda] = useState(null) // null=查询中
@@ -116,6 +116,22 @@ export default function SettingsDialog({
                     onClick={() => onAutoRefreshChange(!autoRefresh)}>
                     <span />
                   </button>
+                </div>
+                <div className="settings-option">
+                  <div className="settings-label">
+                    <div className="settings-option-title" id="settings-enter-title">回车键</div>
+                    <p id="settings-enter-description">
+                      打开：回车打开所选项目，F2 重命名。重命名：回车开始重命名。⌘↓ 与双击始终打开。
+                    </p>
+                  </div>
+                  <div className="settings-segments" role="group" aria-labelledby="settings-enter-title" aria-describedby="settings-enter-description">
+                    {[['open', '打开'], ['rename', '重命名']].map(([id, label]) => (
+                      <button key={id} type="button" className="seg-btn" aria-pressed={enterAction === id}
+                        onClick={() => onEnterActionChange(id)}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="settings-option">
                   <div className="settings-label">
