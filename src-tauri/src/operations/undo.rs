@@ -25,6 +25,13 @@ pub(crate) struct AncestorReceipt {
     pub before: Manifest,
 }
 #[derive(Clone)]
+pub(crate) struct PendingInverseReceipt {
+    receipts: Vec<AncestorReceipt>,
+    backup: Option<Protected>,
+    paths: Vec<PathBuf>,
+    inverse_before: bool,
+}
+#[derive(Clone)]
 pub(crate) struct Effect {
     pub id: String,
     pub item_id: String,
@@ -43,6 +50,7 @@ pub(crate) struct Effect {
     pub inverse_destination: Option<PathBuf>,
     pub held: Option<Protected>,
     pub ancestor_receipts: Vec<AncestorReceipt>,
+    pub pending_inverse_receipt: Option<PendingInverseReceipt>,
 }
 impl Effect {
     pub fn new(
@@ -71,6 +79,7 @@ impl Effect {
             inverse_destination: None,
             held: None,
             ancestor_receipts: vec![],
+            pending_inverse_receipt: None,
         }
     }
 }
@@ -90,7 +99,7 @@ impl FileExecutor {
         };
         for index in (0..count).rev() {
             let mut effect = self.undo.lock().unwrap_or_else(|e| e.into_inner())[id][index].clone();
-            if effect.complete {
+            if effect.complete && effect.pending_inverse_receipt.is_none() {
                 continue;
             }
             if c.is_cancelled() {
@@ -109,58 +118,36 @@ impl FileExecutor {
             if let Some(p) = &backup_snapshot {
                 paths.push(p.original.clone());
             }
-            let receipt_result = self.capture_ancestor_receipts(&paths, c);
-            let (receipts, result) = match receipt_result {
-                Ok(receipts) => {
-                    let result = self.undo_effect(&mut effect, c);
-                    (receipts, result)
-                }
-                Err(e) => (vec![], Err(e)),
+            // The pre-inverse snapshot belongs to this effect until its exact delta
+            // has been checked. A later retry cannot reconstruct it from changed disk.
+            let mut result = if effect.pending_inverse_receipt.is_none() {
+                self.capture_ancestor_receipts(&paths, c)
+                    .map(|mut receipts| {
+                        receipts.retain(|r| r.effect_id != effect.id);
+                        effect.pending_inverse_receipt = Some(PendingInverseReceipt {
+                            receipts,
+                            backup: backup_snapshot.clone(),
+                            paths,
+                            inverse_before,
+                        });
+                    })
+            } else {
+                Ok(())
             };
-            if result.is_ok() && effect.complete {
-                let mut removed = vec![];
-                let mut added = vec![];
-                if !inverse_before && effect.inverse_done {
-                    removed.push((effect.destination.clone(), effect.manifest.clone()));
-                    if let (Some(path), Some(guard)) =
-                        (&effect.inverse_destination, &effect.inverse_guard)
-                    {
-                        added.push((path.clone(), guard.clone()));
+            if result.is_ok() && !effect.complete {
+                result = self.undo_effect(&mut effect, c);
+            }
+            if let Some(pending) = &effect.pending_inverse_receipt {
+                let changed = (!pending.inverse_before && effect.inverse_done)
+                    || (pending.backup.is_some() && effect.backup.is_none());
+                if !changed {
+                    effect.pending_inverse_receipt = None;
+                } else if result.is_ok() && effect.complete {
+                    result = self.finish_inverse_receipt(&effect, pending, c);
+                    if result.is_ok() {
+                        effect.pending_inverse_receipt = None;
                     }
                 }
-                if let Some(backup) = &backup_snapshot {
-                    if effect.backup.is_none() {
-                        added.push((backup.original.clone(), backup.manifest.clone()));
-                    }
-                }
-                self.apply_ancestor_receipts(&receipts, &removed, &added, &paths, c);
-                // If cancellation suppressed the forward post-receipt, a complete inverse
-                // may repair only the exact pre-operation owner snapshot we retained.
-                let mut original_removed = vec![];
-                let mut original_added = vec![];
-                if effect.kind == EffectKind::Move {
-                    if let (Some(path), Some(old), Some(new)) = (
-                        &effect.source,
-                        &effect.source_manifest,
-                        &effect.inverse_guard,
-                    ) {
-                        original_removed.push((path.clone(), old.clone()));
-                        original_added.push((path.clone(), new.clone()));
-                    }
-                }
-                if let Some(backup) = &backup_snapshot {
-                    if effect.backup.is_none() {
-                        original_removed.push((backup.original.clone(), backup.manifest.clone()));
-                        original_added.push((backup.original.clone(), backup.manifest.clone()));
-                    }
-                }
-                self.apply_ancestor_receipts(
-                    &effect.ancestor_receipts,
-                    &original_removed,
-                    &original_added,
-                    &paths,
-                    c,
-                );
             }
             let moved = !inverse_before && effect.inverse_done;
             let restored = backup_before && effect.backup.is_none();
@@ -207,11 +194,60 @@ impl FileExecutor {
         }
         let complete = self.undo.lock().unwrap_or_else(|e| e.into_inner())[id]
             .iter()
-            .all(|e| e.complete);
+            .all(|e| e.complete && e.pending_inverse_receipt.is_none());
         ExecutionResult {
             undo_complete: complete,
             ..Default::default()
         }
+    }
+    fn finish_inverse_receipt(
+        &self,
+        effect: &Effect,
+        pending: &PendingInverseReceipt,
+        c: &OperationContext,
+    ) -> io::Result<()> {
+        let mut removed = vec![];
+        let mut added = vec![];
+        if !pending.inverse_before && effect.inverse_done {
+            removed.push((effect.destination.clone(), effect.manifest.clone()));
+            if let (Some(path), Some(guard)) = (&effect.inverse_destination, &effect.inverse_guard)
+            {
+                added.push((path.clone(), guard.clone()));
+            }
+        }
+        if let Some(backup) = &pending.backup {
+            if effect.backup.is_none() {
+                added.push((backup.original.clone(), backup.manifest.clone()));
+            }
+        }
+        self.try_apply_ancestor_receipts(&pending.receipts, &removed, &added, &pending.paths, c)?;
+        // A forward post-receipt can also have been cancelled. This alternative
+        // is usable only while the owner's exact pre-forward guard still matches.
+        let mut original_removed = vec![];
+        let mut original_added = vec![];
+        if effect.kind == EffectKind::Move {
+            if let (Some(path), Some(old), Some(new)) = (
+                &effect.source,
+                &effect.source_manifest,
+                &effect.inverse_guard,
+            ) {
+                original_removed.push((path.clone(), old.clone()));
+                original_added.push((path.clone(), new.clone()));
+            }
+        }
+        if let Some(backup) = &pending.backup {
+            if effect.backup.is_none() {
+                original_removed.push((backup.original.clone(), backup.manifest.clone()));
+                original_added.push((backup.original.clone(), backup.manifest.clone()));
+            }
+        }
+        self.try_apply_ancestor_receipts(
+            &effect.ancestor_receipts,
+            &original_removed,
+            &original_added,
+            &pending.paths,
+            c,
+        )
     }
     pub(crate) fn capture_ancestor_receipts(
         &self,
@@ -255,9 +291,37 @@ impl FileExecutor {
         c: &OperationContext,
     ) {
         for receipt in receipts {
-            let Ok(actual) = self.scan_manifest(&receipt.root, c, Point::AncestorVerify) else {
+            let _ = self.try_apply_ancestor_receipts(
+                std::slice::from_ref(receipt),
+                removals,
+                additions,
+                touches,
+                c,
+            );
+        }
+    }
+    fn try_apply_ancestor_receipts(
+        &self,
+        receipts: &[AncestorReceipt],
+        removals: &[(PathBuf, Manifest)],
+        additions: &[(PathBuf, Manifest)],
+        touches: &[PathBuf],
+        c: &OperationContext,
+    ) -> io::Result<()> {
+        for receipt in receipts {
+            // A previous attempt may already have amended this owner before a later
+            // scan failed. Never apply the same delta twice or replace a newer guard.
+            let current = self
+                .undo
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&receipt.undo_id)
+                .and_then(|v| v.iter().find(|e| e.id == receipt.effect_id))
+                .is_some_and(|e| e.manifest == receipt.before);
+            if !current {
                 continue;
-            };
+            }
+            let actual = self.scan_manifest(&receipt.root, c, Point::AncestorVerify)?;
             let Some(amended) =
                 receipt
                     .before
@@ -275,6 +339,7 @@ impl FileExecutor {
                 }
             }
         }
+        Ok(())
     }
     pub(crate) fn apply_forward_receipts(
         &self,
@@ -838,6 +903,16 @@ impl FileExecutor {
                                 restored_entries
                                     .push((protected.original.clone(), protected.manifest.clone()));
                                 recovered_undo = self.reconcile_recovered_owner(id, |e| {
+                                    if e.kind == EffectKind::IncompleteMove
+                                        && !disposed_incoming
+                                        && e.backup.is_none()
+                                        && e.source.as_ref() == Some(&protected.original)
+                                    {
+                                        e.kind = EffectKind::Created;
+                                        e.source = None;
+                                        e.source_manifest = None;
+                                        e.complete = false;
+                                    }
                                     if e.backup.as_ref().is_some_and(|p| p.path == protected.path) {
                                         e.backup = None;
                                         if e.kind == EffectKind::RestoreOnly {
@@ -871,6 +946,16 @@ impl FileExecutor {
                         restored_entries
                             .push((protected.original.clone(), protected.manifest.clone()));
                         recovered_undo = self.reconcile_recovered_owner(id, |e| {
+                            if e.kind == EffectKind::IncompleteMove
+                                && !disposed_incoming
+                                && e.backup.is_none()
+                                && e.source.as_ref() == Some(&protected.original)
+                            {
+                                e.kind = EffectKind::Created;
+                                e.source = None;
+                                e.source_manifest = None;
+                                e.complete = false;
+                            }
                             if e.backup.as_ref().is_some_and(|p| p.path == protected.path) {
                                 e.backup = None;
                                 if e.kind == EffectKind::RestoreOnly {
@@ -920,6 +1005,21 @@ impl FileExecutor {
                     }
                     recovered_undo = self.reconcile_recovered_owner(id, |e| {
                         e.manifest = actual.clone();
+                        e.held = None;
+                        e.inverse_cleanup_pending = false;
+                        e.complete = false;
+                    });
+                } else if owner_before
+                    .as_ref()
+                    .is_some_and(|e| e.kind == EffectKind::IncompleteMove)
+                    && !disposed_incoming
+                {
+                    // Restoring the source reverses cleanup only. The already-published
+                    // destination remains a guarded copy inverse; never move the source again.
+                    recovered_undo = self.reconcile_recovered_owner(id, |e| {
+                        e.kind = EffectKind::Created;
+                        e.source = None;
+                        e.source_manifest = None;
                         e.held = None;
                         e.inverse_cleanup_pending = false;
                         e.complete = false;
