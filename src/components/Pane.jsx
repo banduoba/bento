@@ -555,7 +555,7 @@ export default function Pane({
   const virt = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 28,
+    estimateSize: () => 30,
     overscan: 14,
   })
 
