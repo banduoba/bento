@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 mod stream;
+mod internal;
+pub use internal::{register_internal, unregister_internal, is_internal};
 pub use stream::{
     begin_list_request, cancel_list_request, finish_list_request, name_sort_desc, stream_list_dir,
     DirBatch, LIST_BATCH,
@@ -34,6 +36,7 @@ pub struct Entry {
 }
 
 pub fn make_entry(p: &Path, name: String) -> Option<Entry> {
+    if is_internal(p) { return None; }
     let md = fs::metadata(p).or_else(|_| fs::symlink_metadata(p)).ok()?;
     let is_dir = md.is_dir();
     let size = if is_dir { 0 } else { md.len() };
@@ -314,6 +317,7 @@ fn classify(watched: &HashMap<PathBuf, Vec<String>>, ev: &Event) -> Vec<Note> {
 }
 
 fn classify_path(watched: &HashMap<PathBuf, Vec<String>>, path: &Path, op: Op) -> Option<Note> {
+    if is_internal(path) { return None; }
     if watched.contains_key(path) {
         return Some(Note::Reload(path.to_path_buf()));
     }
@@ -325,6 +329,7 @@ fn classify_path(watched: &HashMap<PathBuf, Vec<String>>, path: &Path, op: Op) -
 }
 
 fn classify_ambiguous(watched: &HashMap<PathBuf, Vec<String>>, path: &Path) -> Option<Note> {
+    if is_internal(path) { return None; }
     if watched.contains_key(path) {
         return Some(Note::Reload(path.to_path_buf()));
     }

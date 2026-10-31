@@ -177,7 +177,7 @@ pub fn stream_list_dir(
             Err(_) => continue,
         };
         let name = ent.file_name().to_string_lossy().into_owned();
-        if !show_hidden && name.starts_with('.') {
+        if super::is_internal(&ent.path()) || (!show_hidden && name.starts_with('.')) {
             continue;
         }
         items.push((ent.path(), name));
