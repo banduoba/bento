@@ -779,3 +779,194 @@ fn retained_partial_effect_before_publication_blocks_older_undo() {
         "protected original awaiting recovery must block older undo"
     );
 }
+
+struct PanicAfterMutation {
+    marker: std::path::PathBuf,
+    mutated: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+impl OperationExecutor for PanicAfterMutation {
+    fn execute(&self, work: &Work, ctx: &OperationContext) -> ExecutionResult {
+        if matches!(work, Work::Operation(r) if r.request_id == "first") {
+            return Success.execute(work, ctx);
+        }
+        std::fs::write(&self.marker, b"real unreported effect").unwrap();
+        self.mutated.send(()).unwrap();
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        panic!("injected failure after mutation and before outcome publication");
+    }
+}
+fn panic_after_mutation_case(cancel: bool, inverse: bool) {
+    struct Marker(std::path::PathBuf);
+    impl Drop for Marker {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let marker = Marker(std::env::temp_dir().join(format!(
+            "bento-m6-panic-regression-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+    let (mutated, observed) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let q = OperationManager::new(
+        Arc::new(PanicAfterMutation {
+            marker: marker.0.clone(),
+            mutated,
+            release: Mutex::new(wait),
+        }),
+        Arc::new(|_| {}),
+    );
+    q.enqueue(request("first")).unwrap();
+    q.wait_idle();
+    let job = if inverse {
+        q.undo("undo-1".into(), "panic-undo".into()).unwrap()
+    } else {
+        q.enqueue(request("panic")).unwrap()
+    };
+    observed.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert!(marker.0.exists());
+    if cancel {
+        q.cancel(&job.job_id).unwrap();
+    }
+    release.send(()).unwrap();
+    q.wait_idle();
+    let snapshot = q.get(&job.job_id).unwrap();
+    assert_eq!(snapshot.state, JobState::Partial);
+    assert_eq!(snapshot.error.as_ref().unwrap().code, "executorPanic");
+    let outcomes = q.outcomes(&job.job_id, 0, 200).unwrap().outcomes;
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(outcomes[0].status, OutcomeStatus::Partial);
+    assert_eq!(outcomes[0].source_disposition, SourceDisposition::Unknown);
+    assert_eq!(outcomes[0].retry, RetryKind::ManualRecovery);
+    assert!(outcomes[0].error.is_some());
+    assert!(q.list().latest_undo_id.is_none());
+    assert!(q.undo("undo-1".into(), "unsafe-retry".into()).is_err());
+}
+#[test]
+fn round1_panic_after_real_mutation_blocks_older_undo() {
+    panic_after_mutation_case(false, false);
+}
+#[test]
+fn round1_cancelled_panic_does_not_claim_real_mutation_was_not_started() {
+    panic_after_mutation_case(true, false);
+}
+#[test]
+fn round1_panicked_inverse_requires_recovery_before_retry() {
+    panic_after_mutation_case(true, true);
+}
+
+struct PausingUndo {
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+    calls: AtomicU64,
+    first_applied: bool,
+    first_complete: bool,
+    steps: Mutex<Vec<&'static str>>,
+}
+impl OperationExecutor for PausingUndo {
+    fn execute(&self, work: &Work, ctx: &OperationContext) -> ExecutionResult {
+        if !matches!(work, Work::Undo { .. }) {
+            return Success.execute(work, ctx);
+        }
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        if !first || self.first_applied {
+            let step = if first {
+                "inverse-first"
+            } else {
+                "inverse-second"
+            };
+            self.steps.lock().unwrap().push(step);
+            let mut outcome = ItemOutcome::new(step, OutcomeStatus::Succeeded);
+            outcome.published = true;
+            outcome.effect_id = Some(step.into());
+            ctx.record_outcome(outcome);
+        }
+        if first {
+            self.entered.send(()).unwrap();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+        }
+        ExecutionResult {
+            undo_complete: !first || self.first_complete,
+            ..Default::default()
+        }
+    }
+}
+fn paused_undo(
+    applied: bool,
+    complete: bool,
+) -> (
+    OperationManager,
+    Arc<PausingUndo>,
+    JobSnapshot,
+    mpsc::Receiver<()>,
+    mpsc::Sender<()>,
+) {
+    let (entered, observed) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let executor = Arc::new(PausingUndo {
+        entered,
+        release: Mutex::new(wait),
+        calls: AtomicU64::new(0),
+        first_applied: applied,
+        first_complete: complete,
+        steps: Mutex::new(vec![]),
+    });
+    let q = OperationManager::new(executor.clone(), Arc::new(|_| {}));
+    q.enqueue(request("first")).unwrap();
+    q.wait_idle();
+    let inverse = q.undo("undo-1".into(), "inverse".into()).unwrap();
+    (q, executor, inverse, observed, release)
+}
+#[test]
+fn round1_cancelled_incomplete_undo_is_partial_and_retry_only_applies_remaining_step() {
+    let (q, executor, inverse, observed, release) = paused_undo(true, false);
+    observed.recv_timeout(Duration::from_secs(3)).unwrap();
+    q.cancel(&inverse.job_id).unwrap();
+    release.send(()).unwrap();
+    q.wait_idle();
+    assert_eq!(q.get(&inverse.job_id).unwrap().state, JobState::Partial);
+    assert_eq!(q.list().latest_undo_id.as_deref(), Some("undo-1"));
+    let retry = q.undo("undo-1".into(), "retry".into()).unwrap();
+    q.wait_idle();
+    assert_eq!(q.get(&retry.job_id).unwrap().state, JobState::Completed);
+    assert_eq!(
+        *executor.steps.lock().unwrap(),
+        vec!["inverse-first", "inverse-second"]
+    );
+    assert!(q.list().latest_undo_id.is_none());
+}
+#[test]
+fn round1_cancelled_incomplete_undo_without_applied_steps_is_cancelled() {
+    let (q, _, inverse, observed, release) = paused_undo(false, false);
+    observed.recv_timeout(Duration::from_secs(3)).unwrap();
+    q.cancel(&inverse.job_id).unwrap();
+    release.send(()).unwrap();
+    q.wait_idle();
+    assert_eq!(q.get(&inverse.job_id).unwrap().state, JobState::Cancelled);
+    assert_eq!(q.list().latest_undo_id.as_deref(), Some("undo-1"));
+}
+#[test]
+fn round1_late_cancel_preserves_completed_undo_with_or_without_new_outcomes() {
+    for applied in [true, false] {
+        let (q, _, inverse, observed, release) = paused_undo(applied, true);
+        observed.recv_timeout(Duration::from_secs(3)).unwrap();
+        q.cancel(&inverse.job_id).unwrap();
+        release.send(()).unwrap();
+        q.wait_idle();
+        assert_eq!(q.get(&inverse.job_id).unwrap().state, JobState::Completed);
+        assert!(q.list().latest_undo_id.is_none());
+    }
+}

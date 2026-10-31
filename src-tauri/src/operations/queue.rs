@@ -561,6 +561,40 @@ fn fill_unvisited(job: &mut Job, status: OutcomeStatus) {
     job.snapshot.outcome_count = job.outcomes.len();
     job.snapshot.progress.items_finished = job.outcomes.len();
 }
+/// Unwinding is not evidence that unreported items were untouched. Preserve
+/// recorded outcomes, and make every missing result explicitly uncertain.
+fn fill_unknown_outcomes(job: &mut Job, error: &OperationError) {
+    let visited: HashSet<_> = job.outcomes.iter().map(|o| o.item_id.clone()).collect();
+    let mut unknown: Vec<_> = match &job.work {
+        Work::Operation(request) => request
+            .items
+            .iter()
+            .filter(|item| !visited.contains(&item.item_id))
+            .map(|item| (item.item_id.clone(), item.source.clone()))
+            .collect(),
+        _ => vec![],
+    };
+    if unknown.is_empty() {
+        // Undo/recovery have executor-owned steps; a panic can also occur after
+        // all ordinary item reports but before their final bookkeeping settles.
+        let item_id = (0..)
+            .map(|n| format!("unknown-{}-{n}", job.snapshot.job_id))
+            .find(|id| !visited.contains(id))
+            .unwrap();
+        unknown.push((item_id, None));
+    }
+    for (item_id, source) in unknown {
+        let mut outcome = ItemOutcome::new(item_id, OutcomeStatus::Partial);
+        outcome.source = source;
+        outcome.source_disposition = SourceDisposition::Unknown;
+        outcome.retry = RetryKind::ManualRecovery;
+        outcome.error = Some(error.clone());
+        job.outcomes.push(outcome);
+    }
+    job.snapshot.outcome_count = job.outcomes.len();
+    job.snapshot.progress.items_finished = job.outcomes.len();
+    job.snapshot.progress.items_total = job.snapshot.progress.items_total.max(job.outcomes.len());
+}
 fn cancel_job(job: &mut Job) {
     job.cancel.store(true, Ordering::Release);
     job.snapshot.cancel_requested = true;
@@ -810,29 +844,38 @@ fn worker(shared: Arc<Shared>, executor: Arc<dyn OperationExecutor>) {
             detached_outcomes: Mutex::new(vec![]),
             detached_decisions: Mutex::new(VecDeque::new()),
         };
-        let mut result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             executor.execute(&work, &context)
-        }))
-        .unwrap_or_else(|_| ExecutionResult {
-            error: Some(OperationError {
-                code: "executorPanic".into(),
-                message: "Operation stopped unexpectedly; inspect recovery records".into(),
-                phase: Phase::Finished,
-            }),
-            ..Default::default()
-        });
+        }));
+        // Keep uncertainty separate from reported effects: an executor may have
+        // mutated files before it managed to publish its first outcome.
+        let (mut result, unknown_effects) = match execution {
+            Ok(result) => (result, false),
+            Err(_) => (ExecutionResult {
+                error: Some(OperationError {
+                    code: "executorPanic".into(),
+                    message: "Operation stopped unexpectedly; effects are unknown; inspect recovery records".into(),
+                    phase: Phase::Finished,
+                }),
+                ..Default::default()
+            }, true),
+        };
         redact_error(&work, &mut result.error);
         let finished = {
             let mut state = shared.state.lock().unwrap();
             let job = state.jobs.get_mut(&id).unwrap();
-            fill_unvisited(
-                job,
-                if context.is_cancelled() {
-                    OutcomeStatus::NotStarted
-                } else {
-                    OutcomeStatus::Failed
-                },
-            );
+            if unknown_effects {
+                fill_unknown_outcomes(job, result.error.as_ref().unwrap());
+            } else {
+                fill_unvisited(
+                    job,
+                    if context.is_cancelled() {
+                        OutcomeStatus::NotStarted
+                    } else {
+                        OutcomeStatus::Failed
+                    },
+                );
+            }
             let effects = job.outcomes.iter().any(|o| {
                 o.published || o.effect_id.is_some() || o.status == OutcomeStatus::Partial
             });
@@ -851,12 +894,22 @@ fn worker(shared: Arc<Shared>, executor: Arc<dyn OperationExecutor>) {
                     OutcomeStatus::NotStarted | OutcomeStatus::Cancelled
                 )
             });
-            job.snapshot.state = if partial || (effects && (failures || unfinished)) {
+            let is_undo = matches!(&work, Work::Undo { .. });
+            let incomplete_undo = is_undo && !result.undo_complete;
+            job.snapshot.state = if unknown_effects
+                || partial
+                || (effects && (failures || unfinished || incomplete_undo))
+            {
                 JobState::Partial
             } else if failures {
                 JobState::Failed
-            } else if unfinished || (context.is_cancelled() && job.outcomes.is_empty()) {
+            } else if unfinished
+                || (context.is_cancelled()
+                    && (incomplete_undo || (!is_undo && job.outcomes.is_empty())))
+            {
                 JobState::Cancelled
+            } else if incomplete_undo {
+                JobState::Failed
             } else {
                 JobState::Completed
             };
@@ -866,7 +919,13 @@ fn worker(shared: Arc<Shared>, executor: Arc<dyn OperationExecutor>) {
             job.snapshot.error = result.error;
             job.snapshot.undo_id = result.undo_id.clone().filter(|id| valid_id(id));
             let undo_id = job.snapshot.undo_id.clone();
-            if let Work::Undo { undo_id } = &work {
+            if unknown_effects {
+                // Includes panicked inverse/recovery work. No earlier inverse is
+                // safe to admit until a verified recovery establishes eligibility.
+                if state.undo.last() != Some(&None) {
+                    state.undo.push(None);
+                }
+            } else if let Work::Undo { undo_id } = &work {
                 if result.undo_complete
                     && !failures
                     && state.undo.last().and_then(|id| id.as_ref()) == Some(undo_id)
