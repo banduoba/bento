@@ -125,9 +125,12 @@ npm run dev        # Tauri dev mode with hot reload
 | <kbd>⌘C</kbd> · <kbd>⌘X</kbd> · <kbd>⌘V</kbd> · <kbd>⌘D</kbd> | Copy · cut · paste · duplicate |
 | <kbd>⌘⌫</kbd> · <kbd>⌘Z</kbd> | Move to Trash · undo |
 | <kbd>⇧⌘N</kbd> | New folder |
-| <kbd>↩</kbd> or <kbd>F2</kbd> | Rename |
+| <kbd>↩</kbd> | Open or rename (Settings → General → Return key; rename by default) |
+| <kbd>F2</kbd> | Rename |
+| <kbd>⌘↓</kbd> | Open the selection |
 | <kbd>Space</kbd> | Quick Look |
-| <kbd>↑</kbd> <kbd>↓</kbd> · <kbd>→</kbd> <kbd>←</kbd> | Move selection · expand / collapse or enter / leave a folder |
+| <kbd>↑</kbd> <kbd>↓</kbd> · <kbd>Home</kbd> <kbd>End</kbd> · <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move the selection |
+| <kbd>→</kbd> <kbd>←</kbd> | Enter a folder / go to the parent |
 | <kbd>⌫</kbd> | Go to parent folder |
 | <kbd>⌘A</kbd> · <kbd>Esc</kbd> | Select all · clear selection |
 | <kbd>⌘R</kbd> | Refresh |

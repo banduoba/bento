@@ -125,9 +125,12 @@ npm run dev        # Tauri 开发模式（热更新）
 | <kbd>⌘C</kbd> · <kbd>⌘X</kbd> · <kbd>⌘V</kbd> · <kbd>⌘D</kbd> | 拷贝 · 剪切 · 粘贴 · 拷贝副本 |
 | <kbd>⌘⌫</kbd> · <kbd>⌘Z</kbd> | 移到废纸篓 · 撤销 |
 | <kbd>⇧⌘N</kbd> | 新建文件夹 |
-| <kbd>↩</kbd> 或 <kbd>F2</kbd> | 重命名 |
+| <kbd>↩</kbd> | 打开或重命名（设置 → 通用 → 回车键，默认重命名） |
+| <kbd>F2</kbd> | 重命名 |
+| <kbd>⌘↓</kbd> | 打开所选项目 |
 | <kbd>空格</kbd> | 快速查看 |
-| <kbd>↑</kbd> <kbd>↓</kbd> · <kbd>→</kbd> <kbd>←</kbd> | 移动选择 · 展开 / 折叠或进入 / 退出文件夹 |
+| <kbd>↑</kbd> <kbd>↓</kbd> · <kbd>Home</kbd> <kbd>End</kbd> · <kbd>PgUp</kbd> <kbd>PgDn</kbd> | 移动选择 |
+| <kbd>→</kbd> <kbd>←</kbd> | 进入文件夹 / 返回上级 |
 | <kbd>⌫</kbd> | 返回上级文件夹 |
 | <kbd>⌘A</kbd> · <kbd>Esc</kbd> | 全选 · 取消选择 |
 | <kbd>⌘R</kbd> | 刷新 |
