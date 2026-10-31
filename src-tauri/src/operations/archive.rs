@@ -32,8 +32,15 @@ impl FileExecutor {
             }
             let mut out = ItemOutcome::new(&items[0].item_id, OutcomeStatus::Failed);
             out.source = items[0].source.clone();
-            match self.archive_group(r, &items, c, &mut out) {
-                Ok(Some(e)) => {
+            let paths = r.destination.iter().map(PathBuf::from).collect::<Vec<_>>();
+            let (ancestors, result) = match self.capture_ancestor_receipts(&paths, c) {
+                Ok(receipts) => (receipts, self.archive_group(r, &items, c, &mut out)),
+                Err(err) => (vec![], Err(err)),
+            };
+            match result {
+                Ok(Some(mut e)) => {
+                    e.ancestor_receipts = ancestors;
+                    self.apply_forward_receipts(&e, &out, c);
                     out.effect_id = Some(e.id.clone());
                     effects.push(e);
                 }
@@ -197,11 +204,11 @@ impl FileExecutor {
                 }
             }
             for (source, guard) in sources.iter().zip(&guards) {
-                if !guard.matches(source) {
+                if self.scan_manifest(source, c, Point::SourceVerify)? != *guard {
                     return Err(identity::changed());
                 }
             }
-            let manifest = Manifest::capture(&archive, &|| checkpoint(c))?;
+            let manifest = self.scan_manifest(&archive, c, Point::PreparedVerify)?;
             record.incoming_manifest = Some(manifest);
             record.phase = "archivePrepared".into();
             self.save(&record, c)?;
@@ -236,19 +243,23 @@ impl FileExecutor {
         out.published = true;
         out.actual_destination = Some(display(&dest));
         out.affected_directories = affected(None, &dest);
-        let manifest = Manifest::capture(&dest, &|| Ok(()))?;
-        if !record
-            .incoming_manifest
-            .as_ref()
-            .unwrap()
-            .same_captured_manifest(&manifest)
+        let expected = record.incoming_manifest.clone().unwrap();
+        let manifest = match self
+            .at(Point::PublishedVerify, &dest, c)
+            .and_then(|_| Manifest::capture(&dest, &|| Ok(())))
         {
-            out.status = OutcomeStatus::Partial;
-            out.effect_id = Some(record.id.clone());
-            out.retry = RetryKind::ManualRecovery;
-            let _ = self.journal.save(&record);
-            return Err(identity::changed());
-        }
+            Ok(m) if expected.same_captured_manifest(&m) => m,
+            other => {
+                return Ok(Some(self.published_failure(
+                    &mut record,
+                    &items[0].item_id,
+                    out,
+                    EffectKind::Created,
+                    expected,
+                    other.err().unwrap_or_else(identity::changed),
+                )))
+            }
+        };
         record.destination_manifest = Some(manifest.clone());
         record.phase = "published".into();
         let mut effect = Effect::new(

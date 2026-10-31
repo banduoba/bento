@@ -34,6 +34,12 @@ pub(crate) enum Point {
     UndoRename,
     UndoSourceCleanup,
     AfterSourceRemoved,
+    PreparedVerify,
+    SourceVerify,
+    ConflictVerify,
+    UndoVerify,
+    PublishedVerify,
+    AncestorVerify,
 }
 type Hook = Arc<dyn Fn(Point, &Path, &OperationContext) -> io::Result<()> + Send + Sync>;
 pub struct FileExecutor {
@@ -61,6 +67,18 @@ impl FileExecutor {
     pub(crate) fn at(&self, p: Point, path: &Path, c: &OperationContext) -> io::Result<()> {
         (self.hook)(p, path, c)
     }
+    pub(crate) fn scan_manifest(
+        &self,
+        path: &Path,
+        c: &OperationContext,
+        point: Point,
+    ) -> io::Result<Manifest> {
+        c.set_phase(Phase::Scanning, Cancelability::Checkpoint);
+        Manifest::capture(path, &|| {
+            self.at(point, path, c)?;
+            checkpoint(c)
+        })
+    }
     pub(crate) fn save(&self, r: &Record, c: &OperationContext) -> io::Result<()> {
         self.at(Point::Journal, &r.destination, c)?;
         self.journal.save(r)
@@ -77,9 +95,23 @@ impl FileExecutor {
             c.set_phase(Phase::Scanning, Cancelability::Checkpoint);
             let mut out = ItemOutcome::new(&item.item_id, OutcomeStatus::Failed);
             out.source = item.source.clone();
-            match self.item(r, item, c, &mut out) {
+            let mut paths = vec![];
+            if let Some(source) = &item.source {
+                paths.push(PathBuf::from(source));
+            }
+            if let Some(destination) = &r.destination {
+                paths.push(PathBuf::from(destination));
+            }
+            let ancestors = self.capture_ancestor_receipts(&paths, c);
+            let (ancestors, result) = match ancestors {
+                Ok(receipts) => (receipts, self.item(r, item, c, &mut out)),
+                Err(e) => (vec![], Err(e)),
+            };
+            match result {
                 Ok(effect) => {
-                    if let Some(e) = effect {
+                    if let Some(mut e) = effect {
+                        e.ancestor_receipts = ancestors;
+                        self.apply_forward_receipts(&e, &out, c);
                         out.effect_id = Some(e.id.clone());
                         effects.push(e);
                     }
@@ -217,14 +249,15 @@ impl FileExecutor {
             ) {
                 Ok(Some(effect)) => return Ok(Some(effect)),
                 Ok(None) => {
+                    let actual = self.scan_manifest(source.unwrap(), c, Point::SourceVerify)?;
                     if !source_manifest
                         .as_ref()
                         .unwrap()
-                        .matches_captured(source.unwrap())
+                        .same_captured_manifest(&actual)
                     {
                         return Err(identity::changed());
                     }
-                    source_manifest = Some(Manifest::capture(source.unwrap(), &|| checkpoint(c))?);
+                    source_manifest = Some(actual);
                 }
                 Err(e) => return Err(e),
             }
@@ -255,9 +288,11 @@ impl FileExecutor {
             } else {
                 self.copy_tree(source.unwrap(), &incoming, c, &item.item_id, &mut 0)?;
             }
-            let manifest = Manifest::capture(&incoming, &|| checkpoint(c))?;
+            let manifest = self.scan_manifest(&incoming, c, Point::PreparedVerify)?;
             if let Some(original) = &source_manifest {
-                if !original.matches(source.unwrap()) || !original.same_contents(&manifest) {
+                if self.scan_manifest(source.unwrap(), c, Point::SourceVerify)? != *original
+                    || !original.same_contents(&manifest)
+                {
                     return Err(identity::changed());
                 }
             }
@@ -310,7 +345,9 @@ impl FileExecutor {
             record.id.clone(),
         );
         // Capture once, then compare; never adopt an intervening user modification.
-        let published_manifest = Manifest::capture(&destination, &|| Ok(()));
+        let published_manifest = self
+            .at(Point::PublishedVerify, &destination, c)
+            .and_then(|_| Manifest::capture(&destination, &|| Ok(())));
         let published_manifest = match published_manifest {
             Ok(m)
                 if record
@@ -321,13 +358,21 @@ impl FileExecutor {
             {
                 m
             }
-            _ => {
-                out.status = OutcomeStatus::Partial;
-                out.retry = RetryKind::ManualRecovery;
-                out.effect_id = Some(record.id.clone());
-                record.phase = "publishedUncertain".into();
-                let _ = self.journal.save(&record);
-                return Err(identity::changed());
+            other => {
+                let err = other.err().unwrap_or_else(identity::changed);
+                let expected = record.incoming_manifest.clone().unwrap();
+                return Ok(Some(self.published_failure(
+                    &mut record,
+                    &item.item_id,
+                    out,
+                    if moving {
+                        EffectKind::IncompleteMove
+                    } else {
+                        EffectKind::Created
+                    },
+                    expected,
+                    err,
+                )));
             }
         };
         record.destination_manifest = Some(published_manifest);
@@ -341,7 +386,7 @@ impl FileExecutor {
             self.at(Point::AfterPublish, &destination, c)?;
             if moving {
                 c.set_phase(Phase::RemovingSource, Cancelability::Finishing);
-                self.finish_source(&mut record, c)?;
+                self.finish_source(&mut record, c, true)?;
             }
             Ok(())
         })();
@@ -436,7 +481,7 @@ impl FileExecutor {
                     None,
                 ));
             }
-            let old = Manifest::capture(requested, &|| checkpoint(c))?;
+            let identity = identity::ConflictIdentity::read(requested)?;
             let source_kind = source.map(kind).unwrap_or("file".into());
             let target_kind = kind(requested);
             let mut allowed = vec![
@@ -459,7 +504,11 @@ impl FileExecutor {
                 reason: "目标名称已被占用".into(),
                 allowed_decisions: allowed.clone(),
             });
-            if !old.matches(requested) {
+            if decision == ConflictDecision::Cancel {
+                return Err(cancelled());
+            }
+            checkpoint(c)?;
+            if !identity.matches(requested) {
                 continue;
             }
             match decision {
@@ -472,7 +521,11 @@ impl FileExecutor {
                     ))
                 }
                 ConflictDecision::Replace if allowed.contains(&ConflictDecision::Replace) => {
-                    return Ok(Choice::Target(requested.to_path_buf(), Some(old)))
+                    let old = self.scan_manifest(requested, c, Point::ConflictVerify)?;
+                    if !identity.matches(requested) {
+                        continue;
+                    }
+                    return Ok(Choice::Target(requested.to_path_buf(), Some(old)));
                 }
                 _ => return Err(invalid("不支持替换此类对象")),
             }
@@ -485,9 +538,11 @@ impl FileExecutor {
         old: &Manifest,
         c: &OperationContext,
     ) -> io::Result<()> {
-        if !old.matches(&r.destination) {
+        if self.scan_manifest(&r.destination, c, Point::ConflictVerify)? != *old {
             return Err(identity::changed());
         }
+        checkpoint(c)?;
+        c.set_phase(Phase::Publishing, Cancelability::Finishing);
         let backup = r.roots[0].path.join("original");
         r.protected.push(Protected {
             path: backup.clone(),
@@ -550,15 +605,22 @@ impl FileExecutor {
                 out.actual_destination = Some(display(dest));
                 out.source_disposition = SourceDisposition::Removed;
                 out.affected_directories = affected(Some(source), dest);
-                let moved = Manifest::capture(dest, &|| Ok(()))?;
-                if !manifest.same_captured_manifest(&moved) {
-                    out.status = OutcomeStatus::Partial;
-                    out.retry = RetryKind::ManualRecovery;
-                    out.effect_id = Some(r.id.clone());
-                    r.phase = "publishedUncertain".into();
-                    let _ = self.journal.save(&r);
-                    return Err(identity::changed());
-                }
+                let moved = match self
+                    .at(Point::PublishedVerify, dest, c)
+                    .and_then(|_| Manifest::capture(dest, &|| Ok(())))
+                {
+                    Ok(m) if manifest.same_captured_manifest(&m) => m,
+                    other => {
+                        return Ok(Some(self.published_failure(
+                            &mut r,
+                            &out.item_id.clone(),
+                            out,
+                            EffectKind::Move,
+                            manifest.clone(),
+                            other.err().unwrap_or_else(identity::changed),
+                        )))
+                    }
+                };
                 let mut effect = Effect::new(
                     out.item_id.clone(),
                     EffectKind::Move,
@@ -587,24 +649,55 @@ impl FileExecutor {
             Err(e) => {
                 if crate::published_destination(&e).is_some() {
                     if manifest.identity().matches(dest) {
-                        r.protected[0].path = dest.to_path_buf();
+                        return Ok(Some(self.published_failure(
+                            &mut r,
+                            &out.item_id.clone(),
+                            out,
+                            EffectKind::Move,
+                            manifest.clone(),
+                            e,
+                        )));
                     }
-                    r.phase = "moveMetadataUncertain".into();
                     let _ = self.journal.save(&r);
                     out.status = OutcomeStatus::Partial;
-                    out.effect_id = Some(r.id.clone());
                     out.retry = RetryKind::ManualRecovery;
                     out.source_disposition = SourceDisposition::Unknown;
+                    out.actual_destination =
+                        fs::symlink_metadata(&held).ok().map(|_| display(&held));
+                    out.error = Some(error(&e, Phase::Publishing));
                     out.affected_directories = affected(Some(source), dest);
-                    return Err(e);
+                    let mut effect = Effect::new(
+                        out.item_id.clone(),
+                        EffectKind::RestoreOnly,
+                        Some(source.to_path_buf()),
+                        source.to_path_buf(),
+                        manifest.clone(),
+                        r.id.clone(),
+                    );
+                    effect.inverse_done = true;
+                    effect.backup = r.protected.first().cloned();
+                    return Ok(Some(effect));
                 }
                 if held.exists() || fs::symlink_metadata(&held).is_ok() {
                     if rename_prepared(&held, source).is_err() {
                         let _ = self.journal.save(&r);
                         out.status = OutcomeStatus::Partial;
                         out.retry = RetryKind::ManualRecovery;
+                        out.source_disposition = SourceDisposition::Removed;
+                        out.actual_destination = Some(display(&held));
                         out.affected_directories = affected(Some(source), dest);
-                        return Err(e);
+                        out.error = Some(error(&e, Phase::Publishing));
+                        let mut effect = Effect::new(
+                            out.item_id.clone(),
+                            EffectKind::RestoreOnly,
+                            Some(source.to_path_buf()),
+                            source.to_path_buf(),
+                            manifest.clone(),
+                            r.id.clone(),
+                        );
+                        effect.inverse_done = true;
+                        effect.backup = r.protected.first().cloned();
+                        return Ok(Some(effect));
                     }
                 }
                 if let Ok(restored) = Manifest::capture(source, &|| Ok(())) {
@@ -622,13 +715,23 @@ impl FileExecutor {
             }
         }
     }
-    pub(crate) fn finish_source(&self, r: &mut Record, c: &OperationContext) -> io::Result<()> {
+    pub(crate) fn finish_source(
+        &self,
+        r: &mut Record,
+        c: &OperationContext,
+        mut protected: bool,
+    ) -> io::Result<()> {
         self.at(Point::BeforeSourceCleanup, r.source.as_deref().unwrap(), c)?;
         let dest_guard = r
             .destination_manifest
             .as_ref()
             .ok_or_else(|| invalid("目标身份缺失"))?;
-        if !dest_guard.matches(&r.destination) {
+        let actual = if protected {
+            Manifest::capture(&r.destination, &|| Ok(()))?
+        } else {
+            self.scan_manifest(&r.destination, c, Point::SourceVerify)?
+        };
+        if *dest_guard != actual {
             return Err(identity::changed());
         }
         let source = r.source.as_ref().unwrap().clone();
@@ -637,7 +740,12 @@ impl FileExecutor {
         let held = if let Some(held) = r.protected.iter().find(|p| p.original == source).cloned() {
             held
         } else {
-            if !original.matches(&source) {
+            let actual = if protected {
+                Manifest::capture(&source, &|| Ok(()))?
+            } else {
+                self.scan_manifest(&source, c, Point::SourceVerify)?
+            };
+            if original != actual {
                 return Err(identity::changed());
             }
             let root = OwnedRoot::create(source.parent().unwrap())?;
@@ -646,19 +754,47 @@ impl FileExecutor {
                 original: source.clone(),
                 manifest: original.clone(),
             };
-            r.roots.push(root);
+            r.roots.push(root.clone());
             r.protected.push(held.clone());
             r.phase = "capturingSource".into();
-            self.save(r, c)?;
-            rename_prepared(&source, &held.path)?;
+            let capture = (|| {
+                self.save(r, c)?;
+                if !protected {
+                    checkpoint(c)?;
+                    c.set_phase(Phase::RemovingSource, Cancelability::Finishing);
+                    protected = true;
+                }
+                rename_prepared(&source, &held.path)
+            })();
+            if let Err(err) = capture {
+                if fs::symlink_metadata(&held.path)
+                    .is_err_and(|e| e.kind() == io::ErrorKind::NotFound)
+                {
+                    r.protected.retain(|p| p.path != held.path);
+                    if root.cleanup().is_ok() {
+                        r.roots.retain(|r| r.path != root.path);
+                    }
+                    self.finish_record(r);
+                }
+                return Err(err);
+            }
             if !original.matches_captured(&held.path) {
                 let _ = crate::rename_no_replace(&held.path, &source);
                 return Err(identity::changed());
             }
             held
         };
-        if !held.manifest.matches_remaining(&held.path) {
+        let remaining = if protected {
+            Manifest::capture(&held.path, &|| Ok(()))?
+        } else {
+            self.scan_manifest(&held.path, c, Point::SourceVerify)?
+        };
+        if !held.manifest.remaining_agrees(&remaining) {
             return Err(identity::changed());
+        }
+        if !protected {
+            checkpoint(c)?;
+            c.set_phase(Phase::RemovingSource, Cancelability::Finishing);
         }
         r.phase = "removingSource".into();
         self.save(r, c)?;
@@ -780,6 +916,53 @@ impl FileExecutor {
             let _ = self.journal.save(r);
         }
     }
+    pub(crate) fn published_failure(
+        &self,
+        record: &mut Record,
+        item_id: &str,
+        out: &mut ItemOutcome,
+        kind: EffectKind,
+        expected: Manifest,
+        err: io::Error,
+    ) -> Effect {
+        record.phase = "publishedUncertain".into();
+        record.cleanup_pending = kind == EffectKind::IncompleteMove;
+        if kind == EffectKind::Move {
+            for p in &mut record.protected {
+                if record.source.as_ref() == Some(&p.original) {
+                    p.path = record.destination.clone();
+                }
+            }
+        }
+        let _ = self.journal.save(record);
+        out.status = OutcomeStatus::Partial;
+        out.published = true;
+        out.actual_destination = Some(display(&record.destination));
+        out.retry = RetryKind::ManualRecovery;
+        out.error = Some(error(&err, Phase::Publishing));
+        out.affected_directories = affected(record.source.as_deref(), &record.destination);
+        out.source_disposition = match kind {
+            EffectKind::Move => SourceDisposition::Removed,
+            EffectKind::IncompleteMove => SourceDisposition::CleanupIncomplete,
+            _ => SourceDisposition::Unchanged,
+        };
+        let mut effect = Effect::new(
+            item_id.into(),
+            kind,
+            record.source.clone(),
+            record.destination.clone(),
+            expected,
+            record.id.clone(),
+        );
+        effect.needs_receipt = true;
+        effect.source_manifest = record.source_manifest.clone();
+        effect.backup = record
+            .protected
+            .iter()
+            .find(|p| p.original == record.destination)
+            .cloned();
+        effect
+    }
     fn retained_failure(
         &self,
         record: &Record,
@@ -793,15 +976,20 @@ impl FileExecutor {
             .is_some_and(|m| m.identity().matches(&record.destination))
         {
             let mut retained = record.clone();
-            retained.phase = "publishedMetadataUncertain".into();
-            let _ = self.journal.save(&retained);
-            out.status = OutcomeStatus::Partial;
-            out.published = true;
-            out.effect_id = Some(record.id.clone());
-            out.actual_destination = Some(display(&record.destination));
-            out.retry = RetryKind::ManualRecovery;
-            out.affected_directories = affected(record.source.as_deref(), &record.destination);
-            return Err(err);
+            let kind = if record.move_intent {
+                EffectKind::IncompleteMove
+            } else {
+                EffectKind::Created
+            };
+            let expected = record.incoming_manifest.clone().unwrap();
+            return Ok(Some(self.published_failure(
+                &mut retained,
+                &item.item_id,
+                out,
+                kind,
+                expected,
+                err,
+            )));
         }
         let protected = record
             .protected
@@ -822,6 +1010,7 @@ impl FileExecutor {
                 backup.manifest.clone(),
                 record.id.clone(),
             );
+            effect.kind = EffectKind::RestoreOnly;
             effect.inverse_done = true;
             effect.backup = Some(backup);
             Ok(Some(effect))

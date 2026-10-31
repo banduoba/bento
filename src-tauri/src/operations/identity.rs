@@ -27,6 +27,33 @@ impl Identity {
         Self::read(path).is_ok_and(|id| id == *self)
     }
 }
+/// lstat-only guard for conflict choices that do not read or mutate the target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConflictIdentity {
+    identity: Identity,
+    mode: u32,
+    size: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+impl ConflictIdentity {
+    pub fn read(path: &Path) -> io::Result<Self> {
+        let m = fs::symlink_metadata(path)?;
+        Ok(Self {
+            identity: Identity {
+                dev: m.dev(),
+                ino: m.ino(),
+            },
+            mode: m.mode(),
+            size: m.len(),
+            mtime: (m.mtime(), m.mtime_nsec()),
+            ctime: (m.ctime(), m.ctime_nsec()),
+        })
+    }
+    pub fn matches(&self, path: &Path) -> bool {
+        Self::read(path).is_ok_and(|m| m == *self)
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Entry {
     relative: Vec<u8>,
@@ -131,30 +158,133 @@ impl Manifest {
             m == *self
         })
     }
-    pub fn matches_remaining(&self, path: &Path) -> bool {
-        Self::capture(path, &|| Ok(())).is_ok_and(|current| {
-            current.entries.iter().all(|entry| {
-                self.entries
-                    .iter()
-                    .find(|original| original.relative == entry.relative)
-                    .is_some_and(|original| {
-                        let mut candidate = entry.clone();
-                        if candidate.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
-                            candidate.mtime = original.mtime;
-                            candidate.ctime = original.ctime;
-                        }
-                        if candidate.relative.is_empty() {
-                            candidate.ctime = original.ctime;
-                        }
-                        candidate == *original
-                    })
-            })
+    pub fn remaining_agrees(&self, current: &Self) -> bool {
+        current.entries.iter().all(|entry| {
+            self.entries
+                .iter()
+                .find(|original| original.relative == entry.relative)
+                .is_some_and(|original| {
+                    let mut candidate = entry.clone();
+                    if candidate.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
+                        candidate.mtime = original.mtime;
+                        candidate.ctime = original.ctime;
+                    }
+                    if candidate.relative.is_empty() {
+                        candidate.ctime = original.ctime;
+                    }
+                    candidate == *original
+                })
         })
     }
     pub fn same_captured_manifest(&self, other: &Self) -> bool {
         let mut other = other.clone();
         other.entries[0].ctime = self.entries[0].ctime;
         other == *self
+    }
+    /// Apply only proven subtree changes and their ancestor directory timestamps.
+    /// Every other entry (including content, ACLs, and unrelated timestamps) must match.
+    pub fn amended(
+        &self,
+        root: &Path,
+        removals: &[(std::path::PathBuf, Manifest)],
+        additions: &[(std::path::PathBuf, Manifest)],
+        touches: &[std::path::PathBuf],
+        actual: &Self,
+    ) -> Option<Self> {
+        fn within(entry: &[u8], prefix: &[u8]) -> bool {
+            entry == prefix || (entry.starts_with(prefix) && entry.get(prefix.len()) == Some(&b'/'))
+        }
+        fn subtree(entries: &[Entry], prefix: &[u8]) -> Manifest {
+            Manifest {
+                entries: entries
+                    .iter()
+                    .filter(|e| within(&e.relative, prefix))
+                    .cloned()
+                    .map(|mut e| {
+                        e.relative = if e.relative.len() == prefix.len() {
+                            vec![]
+                        } else {
+                            e.relative[prefix.len() + 1..].to_vec()
+                        };
+                        e
+                    })
+                    .collect(),
+            }
+        }
+        let mut candidate = self.clone();
+        let mut affected = touches.to_vec();
+        for (path, guard) in removals {
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let prefix = relative.as_os_str().as_bytes();
+            if prefix.is_empty() {
+                return None;
+            }
+            let removed = subtree(&candidate.entries, prefix);
+            if removed.entries.is_empty() || !guard.same_captured_manifest(&removed) {
+                return None;
+            }
+            candidate.entries.retain(|e| !within(&e.relative, prefix));
+            affected.push(path.clone());
+        }
+        for (path, guard) in additions {
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let prefix = relative.as_os_str().as_bytes();
+            if prefix.is_empty() {
+                return None;
+            }
+            if candidate
+                .entries
+                .iter()
+                .any(|e| within(&e.relative, prefix))
+            {
+                return None;
+            }
+            let added = subtree(&actual.entries, prefix);
+            if added.entries.is_empty() || !guard.same_captured_manifest(&added) {
+                return None;
+            }
+            for mut entry in added.entries {
+                entry.relative = if entry.relative.is_empty() {
+                    prefix.to_vec()
+                } else {
+                    [prefix, b"/", &entry.relative].concat()
+                };
+                candidate.entries.push(entry);
+            }
+            affected.push(path.clone());
+        }
+        for path in affected {
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            for parent in relative.ancestors().skip(1) {
+                let name = parent.as_os_str().as_bytes();
+                let Some(expected) = candidate.entries.iter_mut().find(|e| e.relative == name)
+                else {
+                    continue;
+                };
+                let observed = actual.entries.iter().find(|e| e.relative == name)?;
+                if expected.mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32 {
+                    return None;
+                }
+                expected.mtime = observed.mtime;
+                expected.ctime = observed.ctime;
+            }
+        }
+        candidate
+            .entries
+            .sort_by(|a, b| a.relative.cmp(&b.relative));
+        let mut compared = actual.clone();
+        compared.entries.sort_by(|a, b| a.relative.cmp(&b.relative));
+        if candidate == compared {
+            Some(actual.clone())
+        } else {
+            None
+        }
     }
     pub fn same_contents(&self, other: &Self) -> bool {
         self.entries.len() == other.entries.len()

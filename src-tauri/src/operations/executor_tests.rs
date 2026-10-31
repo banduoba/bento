@@ -1311,3 +1311,1058 @@ fn deep_directory_copy_uses_bounded_worker_stack() {
         b"deep contents"
     );
 }
+
+#[test]
+fn review_retained_backup_must_be_undoable() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    fs::write(d.join("dest/source"), b"original").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|p, _, _| {
+        if p == Point::AfterBackupCapture {
+            Err(io::Error::other("stop after backup"))
+        } else {
+            Ok(())
+        }
+    });
+    let c = OperationContext::detached_with_decisions("replace", vec![ConflictDecision::Replace]);
+    let r = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Partial);
+    assert!(!d.join("dest/source").exists());
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    let c = OperationContext::detached("undo");
+    let r = e.execute(
+        &Work::Undo {
+            undo_id: r.undo_id.unwrap(),
+        },
+        &c,
+    );
+    assert!(
+        r.undo_complete,
+        "backup-only undo failed: {:?}",
+        c.recorded_outcomes()
+    );
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"original");
+}
+#[test]
+fn review_restore_backup_must_settle_existing_undo_owner() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    fs::write(d.join("dest/source"), b"original").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let r = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached_with_decisions("replace", vec![ConflictDecision::Replace]),
+    );
+    let id = e.recoveries().unwrap()[0].recovery_id.clone();
+    let c = OperationContext::detached("restore");
+    e.execute(
+        &Work::Recovery {
+            recovery_id: id,
+            action: RecoveryAction::RestoreBackup,
+        },
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Succeeded);
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"original");
+    assert!(e.recoveries().unwrap().is_empty());
+    let c = OperationContext::detached("undo");
+    let r = e.execute(
+        &Work::Undo {
+            undo_id: r.undo_id.unwrap(),
+        },
+        &c,
+    );
+    assert!(
+        r.undo_complete,
+        "recovered effect leaves stale undo owner: {:?}",
+        c.recorded_outcomes()
+    );
+}
+#[test]
+fn review_captured_source_restore_racer_needs_undo_barrier() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"original").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let source = d.join("source");
+    e.hook = Arc::new(move |p, _, _| {
+        if p == Point::RenameTarget {
+            fs::write(&source, b"racer")?;
+            return Err(io::Error::from_raw_os_error(libc::EACCES));
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("move");
+    let r = e.execute(
+        &Work::Operation(request(
+            OperationKind::Move,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Partial);
+    assert_eq!(fs::read(d.join("source")).unwrap(), b"racer");
+    assert_eq!(e.recoveries().unwrap().len(), 1);
+    assert!(
+        r.undo_id.is_some(),
+        "retained original has no undo barrier: {:?}",
+        c.recorded_outcomes()
+    );
+}
+
+#[test]
+fn review_child_inverse_must_restore_ancestor_undo_guard() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/child"), b"content").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let copy = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    let mut rename = request(
+        OperationKind::Rename,
+        &d.join("dest/source/child"),
+        &d.join("dest/source"),
+    );
+    rename.items[0].target_name = Some("renamed".into());
+    let rename = e.execute(
+        &Work::Operation(rename),
+        &OperationContext::detached("rename"),
+    );
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: rename.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo-rename")
+        )
+        .undo_complete
+    );
+    let c = OperationContext::detached("undo-copy");
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: copy.undo_id.unwrap()
+            },
+            &c
+        )
+        .undo_complete,
+        "authorized child inverse invalidated ancestor: {:?}",
+        c.recorded_outcomes()
+    );
+}
+#[test]
+fn review_unreadable_conflict_can_still_keep_both() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"content").unwrap();
+    fs::create_dir(d.join("dest/source")).unwrap();
+    fs::write(d.join("dest/source/child"), b"private").unwrap();
+    fs::set_permissions(
+        d.join("dest/source/child"),
+        fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let c = OperationContext::detached_with_decisions("copy", vec![ConflictDecision::KeepBoth]);
+    e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    let outcomes = c.recorded_outcomes();
+    fs::set_permissions(
+        d.join("dest/source/child"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(
+        outcomes[0].status,
+        OutcomeStatus::Succeeded,
+        "directory conflict should not read its children: {outcomes:?}"
+    );
+}
+
+#[test]
+fn fix1_captured_source_owner_restores_exact_bytes_after_racer_is_removed() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"original").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let source = d.join("source");
+    e.hook = Arc::new(move |point, _, _| {
+        if point == Point::RenameTarget {
+            fs::write(&source, b"racer")?;
+            return Err(io::Error::from_raw_os_error(libc::EACCES));
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("move");
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Move,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    let out = c.recorded_outcomes()[0].clone();
+    assert_eq!(out.source_disposition, SourceDisposition::Removed);
+    assert!(out.effect_id.is_some());
+    assert_eq!(
+        fs::read(out.actual_destination.unwrap()).unwrap(),
+        b"original"
+    );
+    let undo = result.undo_id.unwrap();
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: undo.clone()
+            },
+            &OperationContext::detached("blocked")
+        )
+        .undo_complete
+    );
+    assert_eq!(fs::read(d.join("source")).unwrap(), b"racer");
+    fs::remove_file(d.join("source")).unwrap();
+    let recovery = e.recoveries().unwrap()[0].recovery_id.clone();
+    let result = e.execute(
+        &Work::Recovery {
+            recovery_id: recovery,
+            action: RecoveryAction::RestoreBackup,
+        },
+        &OperationContext::detached("recover"),
+    );
+    assert_eq!(result.undo_id.as_deref(), Some(undo.as_str()));
+    assert_eq!(fs::read(d.join("source")).unwrap(), b"original");
+    assert!(
+        e.execute(
+            &Work::Undo { undo_id: undo },
+            &OperationContext::detached("settle")
+        )
+        .undo_complete
+    );
+}
+#[test]
+fn fix1_backup_only_undo_retries_after_publication_racer_is_removed() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    fs::write(d.join("dest/source"), b"original").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let target = d.join("dest/source");
+    e.hook = Arc::new(move |p, _, _| {
+        if p == Point::AfterBackupCapture {
+            fs::write(&target, b"racer")?;
+        }
+        Ok(())
+    });
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached_with_decisions("replace", vec![ConflictDecision::Replace]),
+    );
+    let undo = result.undo_id.unwrap();
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: undo.clone()
+            },
+            &OperationContext::detached("blocked")
+        )
+        .undo_complete
+    );
+    fs::remove_file(d.join("dest/source")).unwrap();
+    assert!(
+        e.execute(
+            &Work::Undo { undo_id: undo },
+            &OperationContext::detached("retry")
+        )
+        .undo_complete
+    );
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"original");
+}
+#[test]
+fn fix1_recovery_settles_only_its_item_and_retains_other_inverse_steps() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("a"), b"incoming").unwrap();
+    fs::write(d.join("b"), b"other").unwrap();
+    fs::write(d.join("dest/a"), b"original").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let mut r = request(OperationKind::Copy, &d.join("a"), &d.join("dest"));
+    r.items.push(OperationItem {
+        item_id: "other".into(),
+        source: Some(display(&d.join("b"))),
+        target_name: None,
+        create_kind: None,
+    });
+    let result = e.execute(
+        &Work::Operation(r),
+        &OperationContext::detached_with_decisions("copy", vec![ConflictDecision::Replace]),
+    );
+    let undo = result.undo_id.unwrap();
+    let recovery = e.recoveries().unwrap()[0].recovery_id.clone();
+    let recovered = e.execute(
+        &Work::Recovery {
+            recovery_id: recovery,
+            action: RecoveryAction::RestoreBackup,
+        },
+        &OperationContext::detached("restore"),
+    );
+    assert_eq!(recovered.undo_id.as_deref(), Some(undo.as_str()));
+    assert_eq!(fs::read(d.join("dest/a")).unwrap(), b"original");
+    assert!(d.join("dest/b").exists());
+    let c = OperationContext::detached("undo-other");
+    assert!(e.execute(&Work::Undo { undo_id: undo }, &c).undo_complete);
+    assert_eq!(c.recorded_outcomes().len(), 1);
+    assert_eq!(c.recorded_outcomes()[0].item_id, "other");
+    assert!(!d.join("dest/b").exists());
+    assert_eq!(fs::read(d.join("dest/a")).unwrap(), b"original");
+}
+#[test]
+fn fix1_published_receipt_scan_errors_keep_truthful_owned_effects() {
+    for kind in [OperationKind::Copy, OperationKind::Move, OperationKind::Zip] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("dest")).unwrap();
+        fs::write(d.join("source"), b"content").unwrap();
+        let mut e = FileExecutor::new(d.join("app")).unwrap();
+        e.hook = Arc::new(|p, _, _| {
+            if p == Point::PublishedVerify {
+                Err(io::Error::other("receipt scan unavailable"))
+            } else {
+                Ok(())
+            }
+        });
+        let c = OperationContext::detached("operation");
+        let result = e.execute(
+            &Work::Operation(request(kind, &d.join("source"), &d.join("dest"))),
+            &c,
+        );
+        let out = c.recorded_outcomes()[0].clone();
+        assert_eq!(out.status, OutcomeStatus::Partial);
+        assert!(out.published);
+        assert!(out.effect_id.is_some());
+        assert!(result.undo_id.is_some());
+        assert!(Path::new(out.actual_destination.as_ref().unwrap()).exists());
+        if kind == OperationKind::Move {
+            assert_eq!(out.source_disposition, SourceDisposition::Removed);
+            assert!(!d.join("source").exists());
+        } else {
+            assert_eq!(out.source_disposition, SourceDisposition::Unchanged);
+        }
+        e.hook = Arc::new(|_, _, _| Ok(()));
+        assert!(
+            e.execute(
+                &Work::Undo {
+                    undo_id: result.undo_id.unwrap()
+                },
+                &OperationContext::detached("undo")
+            )
+            .undo_complete
+        );
+        assert_eq!(fs::read(d.join("source")).unwrap(), b"content");
+        assert!(e.recoveries().unwrap().is_empty());
+    }
+}
+#[test]
+fn fix1_ancestor_receipts_do_not_adopt_unrelated_user_edits() {
+    for edit_during in [false, true] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("dest")).unwrap();
+        fs::create_dir(d.join("source")).unwrap();
+        fs::write(d.join("source/child"), b"child").unwrap();
+        fs::write(d.join("source/other"), b"original").unwrap();
+        let mut e = FileExecutor::new(d.join("app")).unwrap();
+        let copy = e.execute(
+            &Work::Operation(request(
+                OperationKind::Copy,
+                &d.join("source"),
+                &d.join("dest"),
+            )),
+            &OperationContext::detached("copy"),
+        );
+        if edit_during {
+            let path = d.join("dest/source/other");
+            e.hook = Arc::new(move |p, _, _| {
+                if p == Point::BeforePublish {
+                    fs::write(&path, b"user edit")?;
+                }
+                Ok(())
+            });
+        }
+        let mut rename = request(
+            OperationKind::Rename,
+            &d.join("dest/source/child"),
+            &d.join("dest/source"),
+        );
+        rename.items[0].target_name = Some("renamed".into());
+        let moved = e.execute(
+            &Work::Operation(rename),
+            &OperationContext::detached("rename"),
+        );
+        e.hook = Arc::new(|_, _, _| Ok(()));
+        if !edit_during {
+            fs::write(d.join("dest/source/other"), b"user edit").unwrap();
+        }
+        assert!(
+            e.execute(
+                &Work::Undo {
+                    undo_id: moved.undo_id.unwrap()
+                },
+                &OperationContext::detached("undo-child")
+            )
+            .undo_complete
+        );
+        assert!(
+            !e.execute(
+                &Work::Undo {
+                    undo_id: copy.undo_id.unwrap()
+                },
+                &OperationContext::detached("undo-directory")
+            )
+            .undo_complete
+        );
+        assert_eq!(fs::read(d.join("dest/source/other")).unwrap(), b"user edit");
+    }
+}
+#[test]
+fn fix1_two_authorized_sibling_inverses_repair_the_ancestor_in_order() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/a"), b"A").unwrap();
+    fs::write(d.join("source/b"), b"B").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let copy = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    let mut undo = vec![];
+    for name in ["a", "b"] {
+        let mut rename = request(
+            OperationKind::Rename,
+            &d.join(&format!("dest/source/{name}")),
+            &d.join("dest/source"),
+        );
+        rename.items[0].target_name = Some(format!("renamed-{name}"));
+        undo.push(
+            e.execute(&Work::Operation(rename), &OperationContext::detached(name))
+                .undo_id
+                .unwrap(),
+        );
+    }
+    for id in undo.into_iter().rev() {
+        assert!(
+            e.execute(
+                &Work::Undo { undo_id: id },
+                &OperationContext::detached("undo-child")
+            )
+            .undo_complete
+        );
+    }
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: copy.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo-directory")
+        )
+        .undo_complete
+    );
+}
+#[test]
+fn fix1_verification_scans_observe_cancellation_before_publication() {
+    for (kind, point) in [
+        (OperationKind::Copy, Point::PreparedVerify),
+        (OperationKind::Copy, Point::SourceVerify),
+        (OperationKind::Zip, Point::SourceVerify),
+    ] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("dest")).unwrap();
+        fs::write(d.join("source"), vec![7u8; 1024 * 1024 * 4]).unwrap();
+        let mut e = FileExecutor::new(d.join("app")).unwrap();
+        let count = Arc::new(AtomicU64::new(0));
+        let seen = count.clone();
+        e.hook = Arc::new(move |p, _, c| {
+            if p == point && seen.fetch_add(1, Ordering::Relaxed) == 2 {
+                c.request_cancel();
+            }
+            Ok(())
+        });
+        let c = OperationContext::detached("cancel");
+        let result = e.execute(
+            &Work::Operation(request(kind, &d.join("source"), &d.join("dest"))),
+            &c,
+        );
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+        assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Cancelled);
+        assert!(result.undo_id.is_none());
+        assert_eq!(fs::read_dir(d.join("dest")).unwrap().count(), 0);
+        assert!(d.join("source").exists());
+    }
+}
+#[test]
+fn fix1_undo_verification_cancel_does_not_capture_the_object() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), vec![7u8; 1024 * 1024 * 4]).unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    let count = Arc::new(AtomicU64::new(0));
+    let seen = count.clone();
+    e.hook = Arc::new(move |p, _, c| {
+        if p == Point::UndoVerify && seen.fetch_add(1, Ordering::Relaxed) == 2 {
+            c.request_cancel();
+        }
+        assert_ne!(p, Point::UndoCapture);
+        Ok(())
+    });
+    let c = OperationContext::detached("undo-cancel");
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: result.undo_id.unwrap()
+            },
+            &c
+        )
+        .undo_complete
+    );
+    assert_eq!(count.load(Ordering::Relaxed), 3);
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Cancelled);
+    assert!(d.join("dest/source").exists());
+    assert_eq!(fs::read_dir(d.join("dest")).unwrap().count(), 1);
+    assert!(e.recoveries().unwrap().is_empty());
+}
+#[test]
+fn fix1_replace_verification_cancel_leaves_both_original_objects() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    fs::write(d.join("dest/source"), vec![1u8; 1024 * 1024 * 4]).unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let count = Arc::new(AtomicU64::new(0));
+    let seen = count.clone();
+    e.hook = Arc::new(move |p, _, c| {
+        if p == Point::ConflictVerify && seen.fetch_add(1, Ordering::Relaxed) == 2 {
+            c.request_cancel();
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached_with_decisions("replace", vec![ConflictDecision::Replace]);
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(count.load(Ordering::Relaxed), 3);
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Cancelled);
+    assert!(result.undo_id.is_none());
+    assert_eq!(fs::read(d.join("source")).unwrap(), b"incoming");
+    assert_eq!(
+        fs::read(d.join("dest/source")).unwrap(),
+        vec![1u8; 1024 * 1024 * 4]
+    );
+}
+
+#[test]
+fn fix1_incomplete_replace_recovery_restores_original_and_settles_owner() {
+    for captured in [false, true] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("dest")).unwrap();
+        fs::write(d.join("source"), b"incoming").unwrap();
+        fs::write(d.join("dest/source"), b"original").unwrap();
+        let mut e = FileExecutor::new(d.join("app")).unwrap();
+        e.hook = Arc::new(move |p, _, _| {
+            if p == if captured {
+                Point::CapturedSource
+            } else {
+                Point::BeforeSourceCleanup
+            } {
+                return Err(io::Error::other("cleanup unavailable"));
+            }
+            Ok(())
+        });
+        let result = e.execute(
+            &Work::Operation(request(
+                OperationKind::Move,
+                &d.join("source"),
+                &d.join("dest"),
+            )),
+            &OperationContext::detached_with_decisions("move", vec![ConflictDecision::Replace]),
+        );
+        let undo = result.undo_id.unwrap();
+        e.hook = Arc::new(|_, _, _| Ok(()));
+        let recovery = e.recoveries().unwrap()[0].recovery_id.clone();
+        let c = OperationContext::detached("restore");
+        let recovered = e.execute(
+            &Work::Recovery {
+                recovery_id: recovery,
+                action: RecoveryAction::RestoreBackup,
+            },
+            &c,
+        );
+        assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Succeeded);
+        assert_eq!(recovered.undo_id.as_deref(), Some(undo.as_str()));
+        assert_eq!(fs::read(d.join("source")).unwrap(), b"incoming");
+        assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"original");
+        assert!(e.recoveries().unwrap().is_empty());
+        assert!(
+            e.execute(
+                &Work::Undo { undo_id: undo },
+                &OperationContext::detached("settle")
+            )
+            .undo_complete
+        );
+    }
+}
+#[test]
+fn fix1_recovery_of_replaced_child_preserves_ancestor_undo() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/child"), b"original").unwrap();
+    fs::write(d.join("child"), b"incoming").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let copy = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    let replace = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("child"),
+            &d.join("dest/source"),
+        )),
+        &OperationContext::detached_with_decisions("replace", vec![ConflictDecision::Replace]),
+    );
+    let recovery = e.recoveries().unwrap()[0].recovery_id.clone();
+    e.execute(
+        &Work::Recovery {
+            recovery_id: recovery,
+            action: RecoveryAction::RestoreBackup,
+        },
+        &OperationContext::detached("recover"),
+    );
+    assert_eq!(fs::read(d.join("dest/source/child")).unwrap(), b"original");
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: replace.undo_id.unwrap()
+            },
+            &OperationContext::detached("settle")
+        )
+        .undo_complete
+    );
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: copy.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo-directory")
+        )
+        .undo_complete
+    );
+}
+#[test]
+fn fix1_uncertain_publication_never_adopts_external_edits() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|p, _, _| {
+        if p == Point::PublishedVerify {
+            Err(io::Error::other("receipt unavailable"))
+        } else {
+            Ok(())
+        }
+    });
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    fs::write(d.join("dest/source"), b"external").unwrap();
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: result.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo")
+        )
+        .undo_complete
+    );
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"external");
+}
+#[test]
+fn fix1_cancellation_at_undo_capture_removes_only_empty_preparation() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    e.hook = Arc::new(|p, _, c| {
+        if p == Point::UndoCapture {
+            c.request_cancel();
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("cancel");
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: result.undo_id.unwrap()
+            },
+            &c
+        )
+        .undo_complete
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Cancelled);
+    assert_eq!(fs::read_dir(d.join("dest")).unwrap().count(), 1);
+    assert!(e.recoveries().unwrap().is_empty());
+}
+#[test]
+fn fix1_cancellation_after_protected_capture_finishes_publication() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    fs::write(d.join("dest/source"), b"original").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|p, _, c| {
+        if p == Point::AfterBackupCapture {
+            c.request_cancel();
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached_with_decisions("replace", vec![ConflictDecision::Replace]);
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Succeeded);
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"incoming");
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: result.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo")
+        )
+        .undo_complete
+    );
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"original");
+}
+
+#[test]
+fn fix1_ancestor_preflight_cancellation_does_not_start_child_mutation() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/child"), vec![3u8; 1024 * 1024]).unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let copy = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    let count = Arc::new(AtomicU64::new(0));
+    let seen = count.clone();
+    e.hook = Arc::new(move |p, _, c| {
+        if p == Point::AncestorVerify && seen.fetch_add(1, Ordering::Relaxed) == 2 {
+            c.request_cancel();
+        }
+        assert_ne!(p, Point::BeforePublish);
+        Ok(())
+    });
+    let mut rename = request(
+        OperationKind::Rename,
+        &d.join("dest/source/child"),
+        &d.join("dest/source"),
+    );
+    rename.items[0].target_name = Some("renamed".into());
+    let c = OperationContext::detached("cancel");
+    let result = e.execute(&Work::Operation(rename), &c);
+    assert!(result.undo_id.is_none());
+    assert_eq!(count.load(Ordering::Relaxed), 3);
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Cancelled);
+    assert!(d.join("dest/source/child").exists());
+    assert!(!d.join("dest/source/renamed").exists());
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: copy.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo-directory")
+        )
+        .undo_complete
+    );
+}
+#[test]
+fn fix1_archive_child_inverse_preserves_ancestor_undo() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/child"), b"original").unwrap();
+    fs::write(d.join("archive-source"), b"archive").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let copy = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    let zip = e.execute(
+        &Work::Operation(request(
+            OperationKind::Zip,
+            &d.join("archive-source"),
+            &d.join("dest/source"),
+        )),
+        &OperationContext::detached("zip"),
+    );
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: zip.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo-zip")
+        )
+        .undo_complete
+    );
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: copy.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo-directory")
+        )
+        .undo_complete
+    );
+}
+#[test]
+fn fix1_unreadable_conflict_skip_never_hashes_target_children() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    fs::create_dir(d.join("dest/source")).unwrap();
+    fs::write(d.join("dest/source/private"), b"original").unwrap();
+    fs::set_permissions(
+        d.join("dest/source/private"),
+        fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|p, _, _| {
+        assert_ne!(p, Point::ConflictVerify);
+        Ok(())
+    });
+    let c = OperationContext::detached_with_decisions("skip", vec![ConflictDecision::Skip]);
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Skipped);
+    assert!(result.undo_id.is_none());
+    fs::set_permissions(
+        d.join("dest/source/private"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(d.join("dest/source/private")).unwrap(),
+        b"original"
+    );
+}
+
+#[test]
+fn fix1_cleanup_recovery_cancel_before_capture_can_retry_without_phantom_source() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|p, _, _| {
+        if p == Point::RenameTarget {
+            return Err(io::Error::from_raw_os_error(libc::EXDEV));
+        }
+        if p == Point::BeforeSourceCleanup {
+            return Err(io::Error::other("cleanup unavailable"));
+        }
+        Ok(())
+    });
+    let result = e.execute(
+        &Work::Operation(request(
+            OperationKind::Move,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("move"),
+    );
+    let recovery = e.recoveries().unwrap()[0].recovery_id.clone();
+    e.hook = Arc::new(|p, _, c| {
+        if p == Point::Journal {
+            c.request_cancel();
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("cancel");
+    e.execute(
+        &Work::Recovery {
+            recovery_id: recovery.clone(),
+            action: RecoveryAction::FinishSourceCleanup,
+        },
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Cancelled);
+    assert_eq!(fs::read(d.join("source")).unwrap(), b"incoming");
+    assert!(e.journal.get(&recovery).unwrap().protected.is_empty());
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    let c = OperationContext::detached("retry");
+    let recovered = e.execute(
+        &Work::Recovery {
+            recovery_id: recovery,
+            action: RecoveryAction::FinishSourceCleanup,
+        },
+        &c,
+    );
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Succeeded);
+    assert_eq!(recovered.undo_id, result.undo_id);
+    assert!(!d.join("source").exists());
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: result.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo")
+        )
+        .undo_complete
+    );
+}
+
+#[test]
+fn fix1_recovery_of_interrupted_inverse_capture_keeps_forward_undo_actionable() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::write(d.join("source"), b"incoming").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let copied = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    let undo = copied.undo_id.unwrap();
+    let destination = d.join("dest/source");
+    e.hook = Arc::new(move |p, _, _| {
+        if p == Point::UndoRename {
+            fs::write(&destination, b"racer")?;
+            return Err(io::Error::from_raw_os_error(libc::EACCES));
+        }
+        Ok(())
+    });
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: undo.clone()
+            },
+            &OperationContext::detached("undo")
+        )
+        .undo_complete
+    );
+    fs::remove_file(d.join("dest/source")).unwrap();
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    let recovery = e.recoveries().unwrap()[0].recovery_id.clone();
+    let restored = e.execute(
+        &Work::Recovery {
+            recovery_id: recovery,
+            action: RecoveryAction::RestoreBackup,
+        },
+        &OperationContext::detached("restore-capture"),
+    );
+    assert_eq!(restored.undo_id.as_deref(), Some(undo.as_str()));
+    assert_eq!(fs::read(d.join("dest/source")).unwrap(), b"incoming");
+    assert!(
+        e.execute(
+            &Work::Undo { undo_id: undo },
+            &OperationContext::detached("retry-undo")
+        )
+        .undo_complete
+    );
+    assert!(
+        !d.join("dest/source").exists(),
+        "restoring an interrupted inverse must not mark the forward copy undone"
+    );
+}
