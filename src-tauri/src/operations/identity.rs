@@ -130,6 +130,11 @@ impl Manifest {
             m == *self
         })
     }
+    pub fn same_captured_manifest(&self, other: &Self) -> bool {
+        let mut other = other.clone();
+        other.entries[0].ctime = self.entries[0].ctime;
+        other == *self
+    }
     pub fn same_contents(&self, other: &Self) -> bool {
         self.entries.len() == other.entries.len()
             && self.entries.iter().zip(&other.entries).all(|(a, b)| {

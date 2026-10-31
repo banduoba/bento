@@ -27,6 +27,8 @@ pub(crate) enum Point {
     Journal,
     UndoCapture,
     UndoMoved,
+    RenameTarget,
+    ArchiveSpawned,
 }
 type Hook = Arc<dyn Fn(Point, &Path, &OperationContext) -> io::Result<()> + Send + Sync>;
 pub struct FileExecutor {
@@ -175,7 +177,7 @@ impl FileExecutor {
             }
             ensure_outside(src, &parent)?;
         }
-        let source_manifest = source
+        let mut source_manifest = source
             .map(|s| Manifest::capture(s, &|| checkpoint(c)))
             .transpose()?;
         let auto = r.options.keep_both || r.kind == OperationKind::Trash || creating;
@@ -203,7 +205,16 @@ impl FileExecutor {
                 out,
             ) {
                 Ok(Some(effect)) => return Ok(Some(effect)),
-                Ok(None) => {}
+                Ok(None) => {
+                    if !source_manifest
+                        .as_ref()
+                        .unwrap()
+                        .matches_captured(source.unwrap())
+                    {
+                        return Err(identity::changed());
+                    }
+                    source_manifest = Some(Manifest::capture(source.unwrap(), &|| checkpoint(c))?);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -259,8 +270,7 @@ impl FileExecutor {
         }
         if let Some(old) = replacement.take() {
             if let Err(e) = self.capture_backup(&mut record, &old, c) {
-                self.abandon(&record);
-                return Err(e);
+                return self.retained_failure(&record, item, out, e);
             }
         }
         let mut published = false;
@@ -335,6 +345,7 @@ impl FileExecutor {
         record.phase = "published".into();
         record.cleanup_pending = moving;
         effect.backup = record.protected.first().cloned();
+        effect.source_manifest = record.source_manifest.clone();
         let settled = (|| {
             self.save(&record, c)?;
             self.at(Point::AfterPublish, &destination, c)?;
@@ -501,6 +512,7 @@ impl FileExecutor {
             }
             r.phase = "sourceHeld".into();
             self.save(&r, c)?;
+            self.at(Point::RenameTarget, dest, c)?;
             crate::rename_no_replace(&held, dest)
         })();
         match attempt {
@@ -510,7 +522,7 @@ impl FileExecutor {
                 out.source_disposition = SourceDisposition::Removed;
                 out.affected_directories = affected(Some(source), dest);
                 let moved = Manifest::capture(dest, &|| Ok(()))?;
-                let effect = Effect::new(
+                let mut effect = Effect::new(
                     out.item_id.clone(),
                     EffectKind::Move,
                     Some(source.to_path_buf()),
@@ -518,6 +530,7 @@ impl FileExecutor {
                     moved.clone(),
                     r.id.clone(),
                 );
+                effect.source_manifest = Some(manifest.clone());
                 r.destination_manifest = Some(moved);
                 r.protected.clear();
                 r.phase = "published".into();
@@ -668,8 +681,12 @@ impl FileExecutor {
     }
     pub(crate) fn abandon(&self, r: &Record) {
         // Captured originals/uncertain identities are never staging garbage.
-        if !r.protected.is_empty() || r.cleanup_pending {
-            let _ = self.journal.save(r);
+        let mut reconciled = r.clone();
+        reconciled
+            .protected
+            .retain(|p| fs::symlink_metadata(&p.path).is_ok());
+        if !reconciled.protected.is_empty() || r.cleanup_pending {
+            let _ = self.journal.save(&reconciled);
             return;
         }
         if r.roots.iter().all(|root| root.cleanup().is_ok()) {
@@ -685,14 +702,37 @@ impl FileExecutor {
             let _ = self.journal.save(r);
         }
     }
-    fn execute_zip(&self, _r: &OperationRequest, _c: &OperationContext) -> ExecutionResult {
-        ExecutionResult {
-            error: Some(OperationError {
-                code: "archiveUnavailable".into(),
-                message: "压缩执行器尚未就绪".into(),
-                phase: Phase::Archiving,
-            }),
-            ..Default::default()
+    fn retained_failure(
+        &self,
+        record: &Record,
+        item: &OperationItem,
+        out: &mut ItemOutcome,
+        err: io::Error,
+    ) -> io::Result<Option<Effect>> {
+        let protected = record
+            .protected
+            .iter()
+            .find(|p| fs::symlink_metadata(&p.path).is_ok())
+            .cloned();
+        self.abandon(record);
+        if let Some(backup) = protected {
+            out.status = OutcomeStatus::Partial;
+            out.retry = RetryKind::ManualRecovery;
+            out.error = Some(error(&err, Phase::Publishing));
+            out.affected_directories = affected(record.source.as_deref(), &record.destination);
+            let mut effect = Effect::new(
+                item.item_id.clone(),
+                EffectKind::Created,
+                record.source.clone(),
+                record.destination.clone(),
+                backup.manifest.clone(),
+                record.id.clone(),
+            );
+            effect.inverse_done = true;
+            effect.backup = Some(backup);
+            Ok(Some(effect))
+        } else {
+            Err(err)
         }
     }
 }
@@ -792,3 +832,6 @@ fn ensure_outside(source: &Path, parent: &Path) -> io::Result<()> {
 #[cfg(test)]
 #[path = "executor_tests.rs"]
 mod tests;
+
+#[path = "archive.rs"]
+mod archive;

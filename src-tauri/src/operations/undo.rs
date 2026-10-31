@@ -21,6 +21,7 @@ pub(crate) struct Effect {
     pub source: Option<PathBuf>,
     pub destination: PathBuf,
     pub manifest: Manifest,
+    pub source_manifest: Option<Manifest>,
     pub journal_id: String,
     pub backup: Option<Protected>,
     pub inverse_done: bool,
@@ -44,6 +45,7 @@ impl Effect {
             source,
             destination,
             manifest,
+            source_manifest: None,
             journal_id,
             backup: None,
             inverse_done: false,
@@ -55,19 +57,20 @@ impl Effect {
 }
 impl FileExecutor {
     pub(crate) fn execute_undo(&self, id: &str, c: &OperationContext) -> ExecutionResult {
-        let effects = self
+        let count = self
             .undo
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
-            .cloned();
-        let Some(mut effects) = effects else {
+            .map(Vec::len);
+        let Some(count) = count else {
             return ExecutionResult {
                 error: Some(error(&invalid("撤销记录不存在"), Phase::Undoing)),
                 ..Default::default()
             };
         };
-        for effect in effects.iter_mut().rev() {
+        for index in (0..count).rev() {
+            let mut effect = self.undo.lock().unwrap_or_else(|e| e.into_inner())[id][index].clone();
             if effect.complete {
                 continue;
             }
@@ -77,49 +80,65 @@ impl FileExecutor {
             c.set_phase(Phase::Undoing, Cancelability::Finishing);
             let mut out = ItemOutcome::new(&effect.item_id, OutcomeStatus::Failed);
             out.source = Some(display(&effect.destination));
-            match self.undo_effect(effect, c) {
-                Ok(()) => {
-                    out.status = OutcomeStatus::Succeeded;
-                    out.published = true;
-                    out.effect_id = Some(effect.id.clone());
-                    out.source_disposition = SourceDisposition::Removed;
-                    out.actual_destination = effect.inverse_destination.as_deref().map(display);
-                    out.affected_directories = affected(
-                        Some(&effect.destination),
-                        effect
-                            .inverse_destination
-                            .as_deref()
-                            .unwrap_or(&effect.destination),
-                    );
-                }
+            let inverse_before = effect.inverse_done;
+            let backup_before = effect.backup.is_some();
+            let result = self.undo_effect(&mut effect, c);
+            let moved = !inverse_before && effect.inverse_done;
+            let restored = backup_before && effect.backup.is_none();
+            match result {
+                Ok(()) => out.status = OutcomeStatus::Succeeded,
                 Err(e) => {
                     out.error = Some(error(&e, Phase::Undoing));
                     out.retry = RetryKind::RetryItem;
-                    if effect.inverse_done {
+                    if moved || restored {
                         out.status = OutcomeStatus::Partial;
-                        out.published = true;
-                        out.effect_id = Some(effect.id.clone());
-                        out.actual_destination = effect.inverse_destination.as_deref().map(display);
-                        out.affected_directories = affected(
-                            Some(&effect.destination),
-                            effect
-                                .inverse_destination
-                                .as_deref()
-                                .unwrap_or(&effect.destination),
-                        );
                     }
                 }
             }
+            if moved || restored {
+                out.published = true;
+                out.effect_id = Some(format!(
+                    "{}-inverse-{}",
+                    effect.id,
+                    if moved { "move" } else { "restore" }
+                ));
+                out.source_disposition = SourceDisposition::Removed;
+                out.actual_destination = if restored {
+                    Some(display(&effect.destination))
+                } else {
+                    effect.inverse_destination.as_deref().map(display)
+                };
+                out.affected_directories = affected(
+                    Some(&effect.destination),
+                    effect
+                        .inverse_destination
+                        .as_deref()
+                        .unwrap_or(&effect.destination),
+                );
+            }
+            self.undo
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_mut(id)
+                .unwrap()[index] = effect;
             c.record_outcome(out);
         }
-        let complete = effects.iter().all(|e| e.complete);
-        self.undo
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id.into(), effects);
+        let complete = self.undo.lock().unwrap_or_else(|e| e.into_inner())[id]
+            .iter()
+            .all(|e| e.complete);
         ExecutionResult {
             undo_complete: complete,
             ..Default::default()
+        }
+    }
+    fn refresh_previous_guards(&self, path: &std::path::Path, previous: &Manifest, new: &Manifest) {
+        let mut map = self.undo.lock().unwrap_or_else(|e| e.into_inner());
+        for effects in map.values_mut() {
+            for effect in effects {
+                if effect.destination == path && effect.manifest.same_captured_manifest(previous) {
+                    effect.manifest = new.clone();
+                }
+            }
         }
     }
     fn undo_effect(&self, e: &mut Effect, c: &OperationContext) -> io::Result<()> {
@@ -194,6 +213,15 @@ impl FileExecutor {
                     return Err(err);
                 }
             }
+            if e.kind == EffectKind::Move {
+                if let Some(previous) = &e.source_manifest {
+                    let restored = Manifest::capture(&target, &|| Ok(()))?;
+                    if !held.manifest.same_contents(&restored) {
+                        return Err(identity::changed());
+                    }
+                    self.refresh_previous_guards(&target, previous, &restored);
+                }
+            }
             e.inverse_done = true;
             e.held = None;
             record.protected.retain(|p| p.path != held.path);
@@ -211,6 +239,8 @@ impl FileExecutor {
             record.phase = "restoringBackup".into();
             self.save(&record, c)?;
             crate::rename_no_replace(&backup.path, &backup.original)?;
+            let restored = Manifest::capture(&backup.original, &|| Ok(()))?;
+            self.refresh_previous_guards(&backup.original, &backup.manifest, &restored);
             record.protected.retain(|p| p.path != backup.path);
             e.backup = None;
             self.save(&record, c)?;
@@ -235,6 +265,7 @@ impl FileExecutor {
         out.source = record.source.as_deref().map(display);
         out.requested_destination = Some(display(&record.destination));
         c.set_phase(Phase::Recovering, Cancelability::Finishing);
+        let mut recovered_undo = None;
         let result = (|| {
             if !record.recovery().actions.contains(&action) {
                 return Err(invalid("此恢复操作不可用"));
@@ -243,15 +274,16 @@ impl FileExecutor {
                 RecoveryAction::FinishSourceCleanup => {
                     self.finish_source(&mut record, c)?;
                     // Convert the existing incomplete effect; never copy a second destination.
-                    for effects in self
+                    for (undo_id, effects) in self
                         .undo
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
-                        .values_mut()
+                        .iter_mut()
                     {
                         for e in effects {
                             if e.journal_id == id && e.kind == EffectKind::IncompleteMove {
                                 e.kind = EffectKind::Move;
+                                recovered_undo = Some(undo_id.clone());
                             }
                         }
                     }
@@ -309,6 +341,9 @@ impl FileExecutor {
             }
         }
         c.record_outcome(out);
-        ExecutionResult::default()
+        ExecutionResult {
+            undo_id: recovered_undo,
+            ..Default::default()
+        }
     }
 }
