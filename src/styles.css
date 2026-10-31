@@ -799,7 +799,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   position: absolute;
   left: 0;
   right: 0;
-  height: 30px;
+  height: var(--list-row-height, 30px);
   cursor: default;
   isolation: isolate;
   background: transparent;
@@ -969,9 +969,13 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   letter-spacing: 0;
 }
 
+/* Clip feedback and its shadow to its owner without clipping pane menus. */
+.pane-feedback { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 70; }
 /* 复制成功提示条（含复制内容） */
 .copy-toast {
-  position: fixed;
+  position: absolute;
+  box-sizing: border-box;
+  overflow: hidden;
   transform: translateY(-50%);
   z-index: 70;
   display: flex;
