@@ -11,12 +11,42 @@ use tauri::State;
 use types::*;
 pub type OperationState = Arc<OperationManager>;
 
+// Only a returned manager Err is proof that this call admitted no new job.
+// Transport failures or panics after admission must not use this classification.
+fn admission_rejected(message: impl Into<String>) -> OperationError {
+    OperationError {
+        code: "admissionRejected".into(),
+        message: message.into(),
+        phase: Phase::Preparing,
+    }
+}
+fn classify_admission(result: Result<JobSnapshot, String>) -> Result<JobSnapshot, OperationError> {
+    result.map_err(admission_rejected)
+}
+fn admission_unknown() -> OperationError {
+    OperationError {
+        code: "admissionUnknown".into(),
+        message: "Could not confirm operation admission; synchronize before retrying".into(),
+        phase: Phase::Preparing,
+    }
+}
+fn enqueue_admission(
+    manager: &OperationManager,
+    request: serde_json::Value,
+) -> Result<JobSnapshot, OperationError> {
+    // Decode here instead of in Tauri's argument conversion so malformed DTOs
+    // receive the same definitive rejection. Never echo serde errors or payloads.
+    let request: OperationRequest = serde_json::from_value(request)
+        .map_err(|_| admission_rejected("invalid operation request"))?;
+    classify_admission(manager.enqueue(request))
+}
+
 #[tauri::command]
 pub fn enqueue_operation(
     state: State<'_, OperationState>,
-    request: OperationRequest,
-) -> Result<JobSnapshot, String> {
-    state.enqueue(request)
+    request: serde_json::Value,
+) -> Result<JobSnapshot, OperationError> {
+    enqueue_admission(state.inner(), request)
 }
 #[tauri::command]
 pub fn list_operation_jobs(state: State<'_, OperationState>) -> QueueSnapshot {
@@ -67,8 +97,8 @@ pub fn undo_operation(
     state: State<'_, OperationState>,
     undo_id: String,
     request_id: String,
-) -> Result<JobSnapshot, String> {
-    state.undo(undo_id, request_id)
+) -> Result<JobSnapshot, OperationError> {
+    classify_admission(state.undo(undo_id, request_id))
 }
 #[tauri::command]
 pub async fn list_operation_recoveries(
@@ -85,11 +115,14 @@ pub async fn recover_operation(
     recovery_id: String,
     action: RecoveryAction,
     request_id: String,
-) -> Result<JobSnapshot, String> {
+) -> Result<JobSnapshot, OperationError> {
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.recover(recovery_id, action, request_id))
-        .await
-        .map_err(|_| "recovery admission failed".to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        classify_admission(manager.recover(recovery_id, action, request_id))
+    })
+    .await
+    // Joining can fail after the worker admitted a job. Keep it uncertain.
+    .map_err(|_| admission_unknown())?
 }
 #[tauri::command]
 pub async fn prepare_operation_exit(
@@ -115,3 +148,7 @@ pub fn ack_operation_outcomes(
 ) -> Result<(), String> {
     state.acknowledge(&job_id, revision, outcome_count)
 }
+
+#[cfg(test)]
+#[path = "admission_tests.rs"]
+mod admission_tests;
