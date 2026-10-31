@@ -682,3 +682,74 @@ fn real_executor_fifo_and_latest_undo_preserve_disk_results() {
     }
     crate::cleanup_staging(&root);
 }
+struct Recoverable;
+impl OperationExecutor for Recoverable {
+    fn execute(&self, work: &Work, ctx: &OperationContext) -> ExecutionResult {
+        let mut o = ItemOutcome::new("i-1", OutcomeStatus::Succeeded);
+        o.published = true;
+        ctx.record_outcome(o);
+        match work {
+            Work::Operation(r) => ExecutionResult {
+                undo_id: Some(format!("undo-{}", r.request_id)),
+                ..Default::default()
+            },
+            Work::Recovery { .. } => ExecutionResult {
+                undo_id: Some("undo-first".into()),
+                ..Default::default()
+            },
+            Work::Undo { .. } => ExecutionResult {
+                undo_complete: true,
+                ..Default::default()
+            },
+        }
+    }
+    fn recoveries(&self) -> Result<Vec<RecoveryRecord>, String> {
+        Ok(vec![RecoveryRecord {
+            recovery_id: "recovery-first".into(),
+            description: "cleanup".into(),
+            source: None,
+            destination: None,
+            actions: vec![RecoveryAction::FinishSourceCleanup],
+        }])
+    }
+}
+#[test]
+fn recovery_promotes_existing_undo_without_duplicating_its_stack_entry() {
+    let q = OperationManager::new(Arc::new(Recoverable), Arc::new(|_| {}));
+    q.enqueue(request("first")).unwrap();
+    q.wait_idle();
+    q.enqueue(request("second")).unwrap();
+    q.wait_idle();
+    assert!(q
+        .recover(
+            "unknown".into(),
+            RecoveryAction::FinishSourceCleanup,
+            "invalid".into()
+        )
+        .is_err());
+    let recovered = q
+        .recover(
+            "recovery-first".into(),
+            RecoveryAction::FinishSourceCleanup,
+            "recover".into(),
+        )
+        .unwrap();
+    q.wait_idle();
+    assert_eq!(
+        q.recover(
+            "recovery-first".into(),
+            RecoveryAction::FinishSourceCleanup,
+            "recover".into()
+        )
+        .unwrap()
+        .job_id,
+        recovered.job_id
+    );
+    assert_eq!(q.list().latest_undo_id.as_deref(), Some("undo-first"));
+    q.undo("undo-first".into(), "u1".into()).unwrap();
+    q.wait_idle();
+    assert_eq!(q.list().latest_undo_id.as_deref(), Some("undo-second"));
+    q.undo("undo-second".into(), "u2".into()).unwrap();
+    q.wait_idle();
+    assert!(q.list().latest_undo_id.is_none());
+}

@@ -874,10 +874,23 @@ fn worker(shared: Arc<Shared>, executor: Arc<dyn OperationExecutor>) {
                 {
                     state.undo.pop();
                 }
-            } else if effects {
+            } else if effects
+                && !matches!(
+                    &work,
+                    Work::Recovery {
+                        action: RecoveryAction::DiscardStaging,
+                        ..
+                    }
+                )
+            {
                 // An effect without a safe inverse is a barrier, not permission
                 // to silently undo an older unrelated operation.
                 if state.undo.last() != Some(&undo_id) {
+                    // Recovery may make an earlier effect undoable again. Promote
+                    // its existing ID instead of leaving a duplicate stack entry.
+                    if let Some(id) = &undo_id {
+                        state.undo.retain(|entry| entry.as_ref() != Some(id));
+                    }
                     state.undo.push(undo_id);
                 }
             }
