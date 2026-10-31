@@ -67,6 +67,8 @@ pub(crate) fn on_exit_requested(app: &AppHandle, code: Option<i32>, api: tauri::
         };
         gate.request(has_windows, code.is_some())
     };
+    #[cfg(debug_assertions)]
+    eprintln!("[session-exit] runtime request code={code:?} windows={has_windows} decision={decision:?}");
     match decision {
         ExitDecision::Allow => {}
         ExitDecision::Prevent => api.prevent_exit(),
@@ -117,6 +119,8 @@ pub(crate) fn install_native_quit(app: &tauri::App) -> Result<(), String> {
         _sender: *mut AnyObject,
     ) -> usize {
         if let Some(app) = APP.get() {
+            #[cfg(debug_assertions)]
+            eprintln!("[session-exit] native terminate redirected");
             app.exit(0);
         }
         0 // NSTerminateCancel, an NSUInteger (not BOOL).
