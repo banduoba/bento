@@ -32,3 +32,50 @@ test('an old exit event cannot replace the newest pending request', async () => 
   gate.resolve();await pending
   assert.deepEqual(replies,[[9,true]])
 })
+test('a new quit during an unsettled cancellation reply gets its own final flush and reply', async () => {
+  const replyGate = deferred(), replyStarted = deferred()
+  const replies = []
+  let flushes = 0
+  const coordinator = createSessionClose({
+    flush: async () => { if (++flushes === 1) throw Error('disk full') },
+    close: async () => assert.fail('app quit must not close just the window'),
+    reply: async (id, allow) => {
+      replies.push([id, allow])
+      if (id === 1) { replyStarted.resolve(); await replyGate.promise }
+    },
+    confirmDiscard: async () => false,
+  })
+  const first = coordinator.requestExit(1)
+  await replyStarted.promise
+  const second = coordinator.requestExit(2)
+  assert.equal(flushes, 1)
+  assert.deepEqual(replies, [[1, false]])
+  replyGate.resolve()
+  await Promise.all([first, second])
+  assert.equal(flushes, 2)
+  assert.deepEqual(replies, [[1, false], [2, true]])
+})
+test('a quit queued at reply settlement is not cleared by pending cleanup', async () => {
+  const replyGate = deferred(), replyStarted = deferred()
+  const replies = []
+  let flushes = 0, second
+  let coordinator
+  replyGate.promise.then(() => queueMicrotask(() => { second = coordinator.requestExit(2) }))
+  coordinator = createSessionClose({
+    flush: async () => { if (++flushes === 1) throw Error('disk full') },
+    close: async () => assert.fail('app quit must not close just the window'),
+    reply: (id, allow) => {
+      replies.push([id, allow])
+      if (id === 1) { replyStarted.resolve(); return replyGate.promise }
+      return Promise.resolve()
+    },
+    confirmDiscard: async () => false,
+  })
+  const first = coordinator.requestExit(1)
+  await replyStarted.promise
+  replyGate.resolve()
+  await first
+  await second
+  assert.equal(flushes, 2)
+  assert.deepEqual(replies, [[1, false], [2, true]])
+})
