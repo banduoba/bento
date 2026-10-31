@@ -129,6 +129,10 @@ test('status label shows the live fraction and a quiet refresh', () => {
   assert.equal(listCountLabel({ count: 10000, listing: true, listingLive: false }), `${n(10000)} 个项目 · 正在读取`)
 })
 
+test('a partial failure cannot label its count as a complete directory', () => {
+  assert.equal(listCountLabel({ count: 1, incomplete: true }), '1 个项目 · 读取未完成')
+})
+
 test('a sort correction restarts only an in-flight load', () => {
   assert.equal(shouldRestartLoad({ folderChanged: true, tickChanged: false, hasEntries: true, inFlight: false }), true)
   assert.equal(shouldRestartLoad({ folderChanged: false, tickChanged: true, hasEntries: true, inFlight: false }), true)

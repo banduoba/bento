@@ -15,10 +15,9 @@ export const DEFAULT_SORT = { key: 'mtime', dir: 'desc' }
 
 export function canonicalPathKey(path) {
   if (typeof path !== 'string') return null
-  const trimmed = path.trim()
-  if (!trimmed.startsWith('/')) return null
+  if (!path.startsWith('/')) return null
   const parts = []
-  for (const seg of trimmed.split('/')) {
+  for (const seg of path.split('/')) {
     if (!seg || seg === '.') continue
     if (seg === '..') {
       parts.pop()
@@ -273,7 +272,9 @@ export async function resolveViewKey(path, resolvePath) {
   if (!lexical) return null
   if (typeof resolvePath !== 'function') return lexical
   try {
-    const resolved = await resolvePath(path)
+    // resolvePath also accepts address-bar input and trims outer whitespace.
+    // A final separator keeps real terminal component spaces inside the path.
+    const resolved = await resolvePath(path.endsWith('/') ? path : `${path}/`)
     return canonicalPathKey(typeof resolved === 'string' ? resolved : '') || lexical
   } catch {
     return lexical

@@ -103,6 +103,7 @@ export function listCountLabel(stats) {
   const count = stats?.count ?? 0
   const countText = count.toLocaleString('zh-CN')
   const total = stats?.total
+  if (stats?.incomplete) return `${countText} 个项目 · 读取未完成`
   if (stats?.listing && stats.listingLive && count === 0 && (typeof total !== 'number' || total === 0)) {
     return '正在读取…'
   }

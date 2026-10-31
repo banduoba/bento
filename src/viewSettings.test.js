@@ -1,5 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtemp, mkdir, realpath, rm, stat, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { normalizeCols, normalizeVis } from './columns.js'
 import {
   VIEW_SETTINGS_VERSION,
@@ -20,6 +23,42 @@ import {
 
 const downloads = '/Users/me/Downloads'
 const documents = '/Users/me/Documents'
+
+test('real folders with terminal spaces retain separate overrides after save and canonical resolution', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'bento-view-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const paths = [join(root, 'report'), join(root, 'report '), join(root, '资料 é ')]
+  await Promise.all(paths.map((path) => mkdir(path)))
+  assert.notEqual((await stat(paths[0])).ino, (await stat(paths[1])).ino)
+  const plain = await resolveViewKey(paths[0], realpath)
+  const spaced = await resolveViewKey(paths[1], realpath)
+  const unicode = await resolveViewKey(paths[2], realpath)
+  assert.notEqual(spaced, plain)
+  assert.ok(spaced.endsWith('/report '))
+  assert.ok(unicode.endsWith('/资料 é '))
+  // The shared address-input resolver trims outer whitespace before realpath.
+  assert.equal(await resolveViewKey(paths[1], (path) => realpath(path.trim())), spaced)
+  let store = withFolderPatch(emptyViewSettings(), plain, { sort: { key: 'name', dir: 'asc' } })
+  store = withFolderPatch(store, spaced, { sort: { key: 'size', dir: 'asc' } })
+  store = withFolderPatch(store, unicode, { sort: { key: 'kind', dir: 'desc' } })
+  const saved = normalizeViewSettings(JSON.parse(JSON.stringify(store)))
+  assert.equal(viewForPath(saved, plain).sort.key, 'name')
+  assert.equal(viewForPath(saved, spaced).sort.key, 'size')
+  assert.equal(viewForPath(saved, unicode).sort.key, 'kind')
+  const alias = join(root, 'alias')
+  await symlink(paths[1], alias)
+  assert.equal(await resolveViewKey(alias, realpath), spaced)
+  const moved = rekeyOverride(withFolderPatch(saved, alias, { iconSize: 24 }), alias, spaced)
+  assert.equal(viewForPath(moved, spaced).iconSize, 24)
+  assert.equal(viewForPath(moved, plain).sort.key, 'name')
+})
+
+test('canonical keys preserve component spaces and reject whitespace before an absolute path', () => {
+  assert.equal(canonicalPathKey('/report '), '/report ')
+  assert.equal(canonicalPathKey('/parent / report /'), '/parent / report ')
+  assert.equal(canonicalPathKey('/é/资料 '), '/é/资料 ')
+  assert.equal(canonicalPathKey(' /report'), null)
+})
 
 test('canonical path keys collapse dots, parent segments and trailing slashes', () => {
   assert.equal(canonicalPathKey('/Users/me/Downloads/'), downloads)
