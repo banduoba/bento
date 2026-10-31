@@ -6,6 +6,7 @@ export const api = hasTauri
   ? {
       listDir: (path, showHidden) => invoke('list_dir', { path, showHidden }),
       transfer: (sources, dest, mode) => invoke('transfer', { sources, dest, mode }),
+      moveItems: (sources, dest) => invoke('move_items', { sources, dest }),
       trash: (paths) => invoke('trash', { paths }),
       makeDir: (path) => invoke('make_dir', { path }),
       rename: (oldPath, newName) => invoke('rename', { oldPath, newName }),
@@ -93,12 +94,61 @@ function mockApi() {
     return Promise.reject(`路径不存在: ${canonical}`)
   }
   const fillPath = (dir, entries) => entries.map((e) => ({ ...e, path: `${dir}/${e.name}` }))
+  const rekeyMockTree = (oldPath, newPath) => {
+    const prefix = `${oldPath}/`
+    const moves = []
+    for (const key of Object.keys(TREE)) {
+      if (key === oldPath || key.startsWith(prefix)) moves.push(key)
+    }
+    for (const key of moves) {
+      const next = newPath + key.slice(oldPath.length)
+      TREE[next] = TREE[key]
+      delete TREE[key]
+    }
+  }
+  const mockMoveItems = (sources, dest) => {
+    if (!TREE[dest]) return Promise.reject(`目标不是文件夹: ${dest}`)
+    const results = []
+    for (const p of sources) {
+      const slash = p.lastIndexOf('/')
+      const parent = slash <= 0 ? '/' : p.slice(0, slash)
+      const name = p.slice(slash + 1)
+      const list = TREE[parent]
+      const entry = list?.find((e) => e.name === name)
+      if (!entry) {
+        results.push({ source: p, dest: '', ok: false, error: '源不存在' })
+        continue
+      }
+      if (parent === dest) {
+        results.push({ source: p, dest: p, ok: true, error: null })
+        continue
+      }
+      if (dest === p || dest.startsWith(`${p}/`)) {
+        results.push({ source: p, dest: '', ok: false, error: '不能将文件夹移动到其自身内部' })
+        continue
+      }
+      const dot = name.lastIndexOf('.')
+      const stem = dot > 0 ? name.slice(0, dot) : name
+      const ext = dot > 0 ? name.slice(dot) : ''
+      let n = name
+      let i = 1
+      const taken = () => (TREE[dest] || []).some((e) => e.name === n)
+      if (taken()) n = `${stem} copy${ext}`
+      while (taken()) n = `${stem} copy ${i++}${ext}`
+      TREE[parent] = list.filter((e) => e.name !== name)
+      ;(TREE[dest] = TREE[dest] || []).push({ ...entry, name: n })
+      if (entry.is_dir) rekeyMockTree(p, `${dest}/${n}`)
+      results.push({ source: p, dest: `${dest}/${n}`, ok: true, error: null })
+    }
+    return Promise.resolve(results)
+  }
   return {
     listDir: (path) => {
       const entries = TREE[path]
       if (!entries) return Promise.reject(new Error(`无法读取目录 ${path}`))
       return Promise.resolve({ entries: fillPath(path, entries) })
     },
+    moveItems: (sources, dest) => mockMoveItems(sources, dest),
     transfer: (sources, dest, mode) => {
       for (const p of sources) {
         const parent = p.slice(0, p.lastIndexOf('/'))
@@ -169,6 +219,7 @@ function mockApi() {
       }
       return Promise.resolve({ kind: 'text', text: lines.join('\n'), truncated: false, matchLines: [3, 10, 17, 24] })
     },
+    copyFilesToClipboard: () => Promise.resolve(),
     openPath: () => Promise.resolve(),
     reveal: () => Promise.resolve(),
     openTerminal: () => Promise.resolve(),

@@ -227,19 +227,126 @@ fn clonefile(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
-fn do_transfer(sp: &Path, dp: &Path, mode: &str) -> io::Result<()> {
-    if mode == "move" {
-        if fs::rename(sp, dp).is_ok() {
-            return Ok(());
+fn is_exdev(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EXDEV) || err.kind() == io::ErrorKind::CrossesDevices
+}
+
+/// 跨卷复制用：保留符号链接本身，不跟随链接去复制（或删除）目标。
+fn copy_for_move(src: &Path, dst: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        let target = fs::read_link(src)?;
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
         }
-        // 跨卷移动：拷贝后删除源
-        copy_recursive(sp, dp)?;
-        if sp.is_dir() {
-            fs::remove_dir_all(sp)?;
-        } else {
-            fs::remove_file(sp)?;
+        std::os::unix::fs::symlink(target, dst)?;
+        return Ok(());
+    }
+    if meta.is_dir() {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            copy_for_move(&entry.path(), &dst.join(entry.file_name()))?;
         }
         Ok(())
+    } else {
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(src, dst).map(|_| ())
+    }
+}
+
+fn remove_path(path: &Path) -> io::Result<()> {
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err),
+    };
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        fs::remove_file(path)
+    } else {
+        fs::remove_dir_all(path)
+    }
+}
+
+fn temp_move_path(dir: &Path) -> PathBuf {
+    let pid = std::process::id();
+    for i in 0..1000u32 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let candidate = dir.join(format!(".bento-move-{pid}-{nanos}-{i}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    dir.join(format!(".bento-move-{pid}-fallback"))
+}
+
+/// 跨卷移动：先把内容复制到目标卷的临时名，改名成功后才删除源。
+/// 复制或改名失败时删掉临时文件，源保持原样。
+fn copy_then_remove(src: &Path, dst: &Path) -> io::Result<()> {
+    copy_then_remove_with(src, dst, copy_for_move, remove_path)
+}
+
+fn copy_then_remove_with(
+    src: &Path,
+    dst: &Path,
+    copy: impl FnOnce(&Path, &Path) -> io::Result<()>,
+    remove_src: impl FnOnce(&Path) -> io::Result<()>,
+) -> io::Result<()> {
+    let parent = dst
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "目标路径无效"))?;
+    let tmp = temp_move_path(parent);
+    if let Err(err) = copy(src, &tmp) {
+        let _ = remove_path(&tmp);
+        return Err(io::Error::new(
+            err.kind(),
+            format!("复制未完成，源文件保持原样: {err}"),
+        ));
+    }
+    if let Err(err) = fs::rename(&tmp, dst) {
+        let _ = remove_path(&tmp);
+        return Err(io::Error::new(
+            err.kind(),
+            format!("复制未完成，源文件保持原样: {err}"),
+        ));
+    }
+    if let Err(err) = remove_src(src) {
+        return Err(io::Error::new(
+            err.kind(),
+            format!(
+                "已复制到「{}」，但无法删除源（请检查源是否残留）: {err}",
+                dst.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// 同卷 rename；仅当内核返回 EXDEV 时才复制后删除。
+fn relocate(src: &Path, dst: &Path) -> io::Result<()> {
+    relocate_with(src, dst, |s, d| fs::rename(s, d))
+}
+
+fn relocate_with(
+    src: &Path,
+    dst: &Path,
+    rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+    match rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(err) if is_exdev(&err) => copy_then_remove(src, dst),
+        Err(err) => Err(io::Error::new(err.kind(), format!("移动失败: {err}"))),
+    }
+}
+
+fn do_transfer(sp: &Path, dp: &Path, mode: &str) -> io::Result<()> {
+    if mode == "move" {
+        relocate(sp, dp)
     } else {
         #[cfg(target_os = "macos")]
         {
@@ -251,7 +358,64 @@ fn do_transfer(sp: &Path, dp: &Path, mode: &str) -> io::Result<()> {
     }
 }
 
-#[derive(Serialize, Clone)]
+fn move_one_item(source: &str, dest_dir: &Path) -> TransferItem {
+    let fail = |error: String| TransferItem {
+        source: source.to_string(),
+        dest: String::new(),
+        ok: false,
+        error: Some(error),
+    };
+    let sp = PathBuf::from(source);
+    if fs::symlink_metadata(&sp).is_err() {
+        return fail("源不存在".into());
+    }
+    // 已经在目标目录：剪切后粘贴到原处，不动文件。
+    if sp.parent().is_some_and(|parent| parent == dest_dir) {
+        return TransferItem {
+            source: source.to_string(),
+            dest: source.to_string(),
+            ok: true,
+            error: None,
+        };
+    }
+    let name = sp
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "untitled".into());
+    let dp = copy_name_path(dest_dir, &name);
+    if dp.starts_with(&sp) {
+        return fail("不能将文件夹移动到其自身内部".into());
+    }
+    match relocate(&sp, &dp) {
+        Ok(()) => TransferItem {
+            source: source.to_string(),
+            dest: dp.to_string_lossy().into_owned(),
+            ok: true,
+            error: None,
+        },
+        Err(err) => fail(err.to_string()),
+    }
+}
+
+fn move_into(
+    sources: &[String],
+    dest: &str,
+    mut on_each: impl FnMut(usize, usize),
+) -> Result<Vec<TransferItem>, String> {
+    let dest_dir = PathBuf::from(dest);
+    if !dest_dir.is_dir() {
+        return Err(format!("目标不是文件夹: {dest}"));
+    }
+    let total = sources.len();
+    let mut out = Vec::with_capacity(total);
+    for (i, source) in sources.iter().enumerate() {
+        out.push(move_one_item(source, &dest_dir));
+        on_each(i + 1, total);
+    }
+    Ok(out)
+}
+
+#[derive(Serialize, Clone, Debug)]
 struct TransferItem {
     source: String,
     dest: String,
@@ -326,6 +490,25 @@ async fn transfer(
             );
         }
         Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// ⌘X / ⌘V：把条目移动到目标文件夹。同卷 rename；仅 EXDEV 时复制成功后再删除源。
+#[tauri::command]
+async fn move_items(
+    app: AppHandle,
+    sources: Vec<String>,
+    dest: String,
+) -> Result<Vec<TransferItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        move_into(&sources, &dest, |done, total| {
+            let _ = app.emit(
+                "transfer-progress",
+                serde_json::json!({ "done": done, "total": total }),
+            );
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1370,6 +1553,220 @@ mod copy_name_tests {
 }
 
 #[cfg(test)]
+mod move_items_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bento-move-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src/dir/nested")).unwrap();
+        fs::create_dir_all(root.join("dst")).unwrap();
+        fs::write(root.join("src/note.txt"), "hello").unwrap();
+        fs::write(root.join("src/dir/nested/f.txt"), "nested").unwrap();
+        root
+    }
+
+    fn no_progress(_: usize, _: usize) {}
+
+    #[test]
+    fn exdev_is_cross_device_only() {
+        assert!(is_exdev(&io::Error::from_raw_os_error(libc::EXDEV)));
+        assert!(is_exdev(&io::Error::new(
+            io::ErrorKind::CrossesDevices,
+            "cross"
+        )));
+        assert!(!is_exdev(&io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "busy"
+        )));
+    }
+
+    #[test]
+    fn same_volume_renames_file_and_directory() {
+        let root = scratch("rename");
+        let sources = vec![
+            root.join("src/note.txt").to_string_lossy().into_owned(),
+            root.join("src/dir").to_string_lossy().into_owned(),
+        ];
+        let items = move_into(&sources, root.join("dst").to_str().unwrap(), no_progress).unwrap();
+        assert!(items.iter().all(|item| item.ok), "{items:?}");
+        assert!(!root.join("src/note.txt").exists());
+        assert!(!root.join("src/dir").exists());
+        assert_eq!(fs::read(root.join("dst/note.txt")).unwrap(), b"hello");
+        assert_eq!(
+            fs::read(root.join("dst/dir/nested/f.txt")).unwrap(),
+            b"nested"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn name_collision_keeps_both() {
+        let root = scratch("collision");
+        fs::write(root.join("dst/note.txt"), "old").unwrap();
+        let sources = vec![root.join("src/note.txt").to_string_lossy().into_owned()];
+        let items = move_into(&sources, root.join("dst").to_str().unwrap(), no_progress).unwrap();
+        assert!(items[0].ok, "{items:?}");
+        assert!(
+            items[0].dest.ends_with("note copy.txt"),
+            "{}",
+            items[0].dest
+        );
+        assert_eq!(fs::read(root.join("dst/note.txt")).unwrap(), b"old");
+        assert_eq!(fs::read(root.join("dst/note copy.txt")).unwrap(), b"hello");
+        assert!(!root.join("src/note.txt").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn refuses_to_move_folder_into_itself() {
+        let root = scratch("into-self");
+        let src = root.join("src/dir");
+        let nested = src.join("nested");
+        let sources = vec![src.to_string_lossy().into_owned()];
+        let items = move_into(&sources, nested.to_str().unwrap(), no_progress).unwrap();
+        assert!(!items[0].ok);
+        assert!(items[0].error.as_deref().unwrap().contains("自身"));
+        assert_eq!(fs::read(src.join("nested/f.txt")).unwrap(), b"nested");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_source_and_bad_dest_do_not_touch_files() {
+        let root = scratch("missing");
+        let sources = vec![root.join("src/nope.txt").to_string_lossy().into_owned()];
+        let items = move_into(&sources, root.join("dst").to_str().unwrap(), no_progress).unwrap();
+        assert_eq!(items[0].error.as_deref(), Some("源不存在"));
+
+        let file = root.join("src/note.txt");
+        let err = move_into(
+            &[file.to_string_lossy().into_owned()],
+            file.to_str().unwrap(),
+            no_progress,
+        )
+        .unwrap_err();
+        assert!(err.contains("目标不是文件夹"), "{err}");
+        assert_eq!(fs::read(&file).unwrap(), b"hello");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn non_exdev_rename_failure_leaves_source() {
+        let root = scratch("no-exdev");
+        let src = root.join("src/note.txt");
+        let dst = root.join("dst/note.txt");
+        let err = relocate_with(&src, &dst, |_, _| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "busy"))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("移动失败"));
+        assert!(!err.to_string().contains("保持原样"));
+        assert_eq!(fs::read(&src).unwrap(), b"hello");
+        assert!(!dst.exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exdev_copies_then_deletes_source() {
+        let root = scratch("exdev");
+        let src = root.join("src/dir");
+        let dst = root.join("dst/dir");
+        relocate_with(&src, &dst, |_, _| {
+            Err(io::Error::from_raw_os_error(libc::EXDEV))
+        })
+        .unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::read(dst.join("nested/f.txt")).unwrap(), b"nested");
+        let leftovers: Vec<_> = fs::read_dir(root.join("dst"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".bento-move-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exdev_copy_failure_keeps_source_and_drops_partial_dest() {
+        let root = scratch("exdev-fail");
+        let src = root.join("src/note.txt");
+        let dst = root.join("dst/note.txt");
+        fs::write(root.join("dst/keep.txt"), "keep").unwrap();
+        let mut removed_source = false;
+        let err = copy_then_remove_with(
+            &src,
+            &dst,
+            |_, tmp| {
+                fs::write(tmp, b"partial").unwrap();
+                Err(io::Error::other("disk full"))
+            },
+            |_| {
+                removed_source = true;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(!removed_source);
+        assert!(err.to_string().contains("源文件保持原样"), "{err}");
+        assert_eq!(fs::read(&src).unwrap(), b"hello");
+        assert!(!dst.exists());
+        assert_eq!(fs::read(root.join("dst/keep.txt")).unwrap(), b"keep");
+        let leftovers: Vec<_> = fs::read_dir(root.join("dst"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".bento-move-"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exdev_delete_failure_keeps_source_and_reports() {
+        let root = scratch("exdev-delete");
+        let src = root.join("src/note.txt");
+        let dst = root.join("dst/note.txt");
+        let err = copy_then_remove_with(&src, &dst, copy_for_move, |_| {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, "busy"))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("无法删除源"), "{err}");
+        assert_eq!(fs::read(&src).unwrap(), b"hello");
+        assert_eq!(fs::read(&dst).unwrap(), b"hello");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn exdev_moves_symlink_without_following_it() {
+        let root = scratch("symlink");
+        let link = root.join("src/link");
+        symlink("missing-target", &link).unwrap();
+        let dst = root.join("dst/link");
+        relocate_with(&link, &dst, |_, _| {
+            Err(io::Error::from_raw_os_error(libc::EXDEV))
+        })
+        .unwrap();
+        assert!(
+            fs::symlink_metadata(&link).is_err(),
+            "source symlink must be removed"
+        );
+        assert_eq!(
+            fs::read_link(&dst).unwrap(),
+            PathBuf::from("missing-target")
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
 mod zip_tests {
     use super::*;
 
@@ -1766,6 +2163,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_dir,
             transfer,
+            move_items,
             trash,
             make_dir,
             rename,
