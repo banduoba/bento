@@ -3,6 +3,8 @@ import { Channel } from '@tauri-apps/api/core'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
 import { api, hasTauri } from '../api'
+import { LIST_ROW_HEIGHT } from '../shortcuts'
+import { changedDirectories, marqueePaths, paneToastPosition } from '../paneFeedback'
 import { setWatch, clearWatch, onFsChange } from '../fsWatch'
 import { applyDirDelta, normalizeFsChanges } from '../fsApply'
 import { applyOverlay, nextLoadRequestId, noteDelta, reduceLoadBatches, shouldRestartLoad } from '../dirLoad'
@@ -38,6 +40,9 @@ export default function Pane({
   filter,
   renaming,
   tick,
+  directoryVersions = {},
+  directoryKeyFor,
+  operationToast,
   cutSet,
   editPathSignal,
   flash,
@@ -103,15 +108,10 @@ export default function Pane({
   }
   const showCopyToast = (path, btnRect) => {
     setCopiedPath(path)
-    // 提示条出现在按钮旁边：默认右侧垂直居中，右侧空间不足则翻到左侧
-    const spaceRight = window.innerWidth - btnRect.right - 12
-    const placeLeft = spaceRight < 300
-    setCopyToast({
-      path,
-      x: placeLeft ? btnRect.left - 8 : btnRect.right + 8,
-      y: btnRect.top + btnRect.height / 2,
-      placeLeft,
-    })
+    const paneRect = paneElRef.current?.getBoundingClientRect()
+    if (!paneRect) return
+    const pos = paneToastPosition(paneRect, btnRect)
+    setCopyToast({ path, x: pos.x - paneRect.left, y: pos.y - paneRect.top, maxWidth: pos.maxWidth })
     clearTimeout(copyTimer.current)
     copyTimer.current = setTimeout(() => setCopiedPath(null), 1200)
     clearTimeout(toastTimer.current)
@@ -263,11 +263,8 @@ export default function Pane({
     if (!list.length) return
     const yA = Math.min(m.y0, m.y1)
     const yB = Math.max(m.y0, m.y1)
-    const i0 = Math.max(0, Math.floor(yA / 28))
-    const i1 = Math.min(list.length - 1, Math.floor((yB - 0.01) / 28))
-    const next = new Set()
-    for (let k = i0; k <= i1; k++) next.add(list[k].path)
-    anchorRef.current = i1
+    const next = new Set(marqueePaths(list, yA, yB))
+    anchorRef.current = Math.min(list.length - 1, Math.ceil(yB / LIST_ROW_HEIGHT) - 1)
     onSelect(tab.id, next)
   }
 
@@ -569,6 +566,17 @@ export default function Pane({
     }
   }, [entries, tick, loadProgress])
 
+  const [operationToastPosition, setOperationToastPosition] = useState(null)
+  useLayoutEffect(() => {
+    if (!operationToast || !paneElRef.current) { setOperationToastPosition(null); return }
+    const pane = paneElRef.current
+    const candidates = [...pane.querySelectorAll('.row[data-path]')]
+    const row = operationToast.paths?.map(path => candidates.find(el => el.dataset.path === path)).find(Boolean)
+    const rect = pane.getBoundingClientRect()
+    const pos = paneToastPosition(rect, row?.getBoundingClientRect())
+    setOperationToastPosition({ left: pos.x - rect.left, top: pos.y - rect.top, maxWidth: pos.maxWidth })
+  }, [operationToast, rows, paneW])
+
   // 搜索定位：行就绪后选中目标并滚动到可见处
   useEffect(() => {
     if (!reveal || entries === null) return
@@ -645,9 +653,17 @@ export default function Pane({
   }
   const reloadKidsRef = useRef(reloadKids)
   reloadKidsRef.current = reloadKids
+  // Global manual refresh still reloads all cached children. Root-local invalidations must not.
+  const manualTick = String(tick).split(':')[0]
   useEffect(() => {
-    reloadKids()
-  }, [tick])
+    reloadKidsRef.current()
+  }, [manualTick])
+  const seenDirectoryVersions = useRef(directoryVersions)
+  useEffect(() => {
+    const paths = changedDirectories(seenDirectoryVersions.current, directoryVersions, Object.keys(kidsRef.current), directoryKeyFor)
+    seenDirectoryVersions.current = directoryVersions
+    if (paths.length) reloadKidsRef.current(new Set(paths))
+  }, [directoryVersions])
 
   // 文件系统监听：当前目录 + 展开的子目录有文件新增/修改/删除时自动刷新，无需 ⌘R
   // 设置里「自动刷新目录」关闭时不登记监听（后端随之释放全部 FSEvents 流）
@@ -954,7 +970,7 @@ export default function Pane({
   const virt = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 30,
+    estimateSize: () => LIST_ROW_HEIGHT,
     overscan: 14,
     // 路径做键：FSEvents 增删改只动对应行，虚拟列表不会按索引把可见行整表换掉。
     getItemKey: (index) => rows[index]?.path ?? index,
@@ -1086,7 +1102,8 @@ export default function Pane({
   return (
     <section
       ref={paneElRef}
-      style={{ gridArea: area }}
+      style={{ gridArea: area, '--list-row-height': `${LIST_ROW_HEIGHT}px` }}
+      data-tab-id={tab.id}
       className={`pane${focused ? ' focused' : ''}${flash ? ' flash' : ''}${dropTarget === 'bg' ? ' drop-hover' : ''}`}
       onMouseDown={() => onFocus(index)}
       onContextMenu={(e) => {
@@ -1528,13 +1545,19 @@ export default function Pane({
         </div>
       )}
       {copyToast && (
-        <div
-          className={`copy-toast${copyToast.placeLeft ? ' place-left' : ''}`}
-          style={{ left: copyToast.x, top: copyToast.y }}
-          title={copyToast.path}
-        >
-          <IconCheck size={13} />
-          <span className="copy-toast-text">已复制：{copyToast.path}</span>
+        <div className="pane-feedback">
+          <div className="copy-toast" style={{ left: copyToast.x, top: copyToast.y, maxWidth: copyToast.maxWidth }} title={copyToast.path}>
+            <IconCheck size={13} />
+            <span className="copy-toast-text">已复制：{copyToast.path}</span>
+          </div>
+        </div>
+      )}
+      {operationToast && operationToastPosition && (
+        <div className="pane-feedback">
+          <div className="copy-toast row-toast" style={operationToastPosition}>
+            <IconCheck size={13} />
+            <span className="copy-toast-text">{operationToast.text}</span>
+          </div>
         </div>
       )}
       {marqueeRect && (

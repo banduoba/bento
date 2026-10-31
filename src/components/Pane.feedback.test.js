@@ -1,0 +1,56 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { mountPane, entry } from '../test/PaneHarness.js'
+import { rootRefreshKey } from '../paneFeedback.js'
+
+test('mounted Pane does not scan or replace cached rows for unrelated invalidation, including expanded nodes', async t => {
+  const h = await mountPane(t)
+  await h.batch(h.requests[0], [entry('child', { is_dir: true }), entry('other', { is_dir: true })], true, 2)
+  await h.flushFrames()
+  await h.resolve(h.requests[0])
+  await h.expand('/d/child')
+  await h.resolveKids(h.childRequests[0], [entry('old', { path: '/d/child/old' })])
+  await h.expand('/d/other')
+  await h.resolveKids(h.childRequests[1], [])
+  const rows = h.rows
+  await h.update({ tick: rootRefreshKey(0, { '/elsewhere': 1 }, '/d'), directoryVersions: { '/elsewhere': 1 } })
+  // First root tick changes from numeric 0 in the generic harness to the app's string key.
+  const rootReads = h.requests.length
+  const childReads = h.childRequests.length
+  await h.update({ tick: rootRefreshKey(0, { '/elsewhere': 2 }, '/d'), directoryVersions: { '/elsewhere': 2 } })
+  assert.equal(h.requests.length, rootReads)
+  assert.equal(h.childRequests.length, childReads)
+  assert.equal(h.rows, rows)
+  await h.update({ directoryVersions: { '/elsewhere': 2, '/d/child': 1 } })
+  assert.equal(h.requests.length, rootReads)
+  assert.deepEqual(h.childRequests.slice(childReads).map(r => r.path), ['/d/child'])
+})
+
+test('mounted Pane rescans the affected root with automatic refresh disabled', async t => {
+  const h = await mountPane(t)
+  await h.update({ cfg: { showHidden: false, autoRefresh: false }, tick: '0:0' })
+  const baseline = h.requests.length
+  await h.update({ tick: rootRefreshKey(0, { '/d': 1 }, '/d'), directoryVersions: { '/d': 1 } })
+  assert.equal(h.requests.length, baseline + 1)
+  assert.equal(h.requests.at(-1).path, '/d')
+})
+
+test('mounted Pane anchors operation feedback using only its own row, with a pane-local fallback', async t => {
+  const previous = globalThis.ResizeObserver
+  globalThis.ResizeObserver = class { observe() {} disconnect() {} }
+  t.after(() => { if (previous === undefined) delete globalThis.ResizeObserver; else globalThis.ResizeObserver = previous })
+  const pane = { left: 1000, right: 1200, top: 80, bottom: 400, width: 200, height: 320 }
+  let visibleRows = [{ dataset: { path: '/d/same' }, getBoundingClientRect: () => ({ left: 1010, right: 1190, top: 150, height: 30 }) }]
+  const node = { style: { setProperty() {} }, getBoundingClientRect: () => pane, querySelectorAll: () => visibleRows }
+  const h = await mountPane(t, { createNodeMock: element => element.type === 'section' ? node : null })
+  await h.update({ operationToast: { tabId: 'a', paths: ['/d/same'], text: 'copied' } })
+  let toast = h.root.findByProps({ className: 'copy-toast row-toast' })
+  assert.equal(toast.props.style.top, 85)
+  assert.ok(toast.props.style.left >= 0)
+  assert.ok(toast.props.style.left + toast.props.style.maxWidth <= 200)
+  visibleRows = []
+  await h.update({ operationToast: { tabId: 'a', paths: ['/d/not-visible'], text: 'copied' } })
+  toast = h.root.findByProps({ className: 'copy-toast row-toast' })
+  assert.equal(toast.props.style.top, 48)
+  assert.ok(toast.props.style.left + toast.props.style.maxWidth <= 200)
+})

@@ -852,14 +852,35 @@ async fn quick_look(
     app: AppHandle,
     path: String,
     paths: Option<Vec<String>>,
+    session: Option<String>,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        return quick_look::present(app, path, paths).await;
+        return quick_look::present(app, path, paths, session).await;
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, path, paths);
+        let _ = (app, path, paths, session);
+        Err("Quick Look 仅支持 macOS".into())
+    }
+}
+
+/// Replace the visible item without toggling the panel; stale sessions/revisions are ignored.
+#[tauri::command]
+async fn update_quick_look(
+    app: AppHandle,
+    path: String,
+    paths: Option<Vec<String>>,
+    session: String,
+    revision: u64,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return quick_look::update(app, path, paths, session, revision).await;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, path, paths, session, revision);
         Err("Quick Look 仅支持 macOS".into())
     }
 }
@@ -2942,6 +2963,7 @@ pub fn run() {
             open_terminal,
             zip_paths,
             quick_look,
+            update_quick_look,
             make_file,
             create_file,
             list_templates,

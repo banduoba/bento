@@ -1,17 +1,19 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { parentPath } from './format.js'
+import { directoryKey } from './paneFeedback.js'
 
 // Execute the App's actual operation callbacks against the IPC boundary.
 // This catches a wiring regression even if a standalone undo helper stays correct.
 function harness(api) {
   const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
   const callbacks = source.slice(source.indexOf('  const reportErrors ='), source.indexOf('  // 描述一组条目'))
-  const stack = { current: [] }, toasts = [], alerts = []
+  const stack = { current: [] }, toasts = [], alerts = [], invalidated = []
   const noop = () => {}
-  const build = new Function('api', 'undoStackRef', 'setUndoToast', 'alert', 'refresh', 'basename', 'setTimeout', 'clearTimeout', 'window', 'CustomEvent', 'modeRef', 'setSel', 'getClip', 'setClip', 'retainCut', 'toastTimer', 'rowToastTimer', 'setRowToast', `${callbacks}; return { moveInto, transferInto, undoLast, doTrash }`)
-  const actions = build(api, stack, t => toasts.push(t), e => alerts.push(e), noop, p => p.slice(p.lastIndexOf('/') + 1), noop, noop, { dispatchEvent: noop }, class {}, { current: null }, noop, () => null, noop, noop, {}, {}, noop)
-  return { ...actions, stack, toasts, alerts }
+  const build = new Function('api', 'undoStackRef', 'setUndoToast', 'alert', 'refresh', 'basename', 'setTimeout', 'clearTimeout', 'window', 'CustomEvent', 'modeRef', 'setSel', 'getClip', 'setClip', 'retainCut', 'toastTimer', 'rowToastTimer', 'setRowToast', 'cfgRef', 'visibleCount', 'activeTabOf', 'focusIdx', 'directoryKeyFor', 'parentPath', 'refreshDirectories', `${callbacks}; return { moveInto, transferInto, undoLast, doTrash }`)
+  const actions = build(api, stack, t => toasts.push(t), e => alerts.push(e), noop, p => p.slice(p.lastIndexOf('/') + 1), noop, noop, { dispatchEvent: noop }, class {}, { current: null }, noop, () => null, noop, noop, {}, {}, noop, { current: { panes: [] } }, 2, noop, 0, directoryKey, parentPath, paths => invalidated.push(...paths))
+  return { ...actions, stack, toasts, alerts, invalidated }
 }
 
 test('App undo restores complete original pathname after collision, in reverse order', async () => {
@@ -20,6 +22,7 @@ test('App undo restores complete original pathname after collision, in reverse o
   const api = { moveItems: async (sources, dest) => { calls.push({ sources, dest }); return moved }, restoreMoves: async moves => { calls.push(moves); return moves.map(m => ({ ...m, ok: true })) } }
   const app = harness(api)
   await app.moveInto('/dest', ['/note.txt', '/src/b'])
+  assert.deepEqual(app.alerts, [])
   await app.undoLast()
   assert.deepEqual(calls[1], [{ source: '/dest/b', dest: '/src/b' }, { source: '/dest/note copy.txt', dest: '/note.txt' }])
   assert.equal(app.stack.current.length, 0)
@@ -36,6 +39,8 @@ test('App partial undo retains only failed items for retry and never shows full 
   assert.equal(app.stack.current.length, 1)
   assert.notEqual(app.toasts.at(-1)?.undone, true)
   assert.equal(app.alerts.length, 1)
+  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
+  assert.deepEqual(app.stack.current[0].directories, ['/src', '/dst'])
   await app.undoLast()
   assert.deepEqual(calls[1], [{ source: '/dst/a', dest: '/src/a' }])
   assert.equal(app.stack.current.length, 0)
