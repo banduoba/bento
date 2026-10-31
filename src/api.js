@@ -13,7 +13,8 @@ export const api = hasTauri
       reveal: (path) => invoke('reveal_in_finder', { path }),
       openTerminal: (path) => invoke('open_terminal', { path }),
       zipPaths: (sources, destDir, options) => invoke('zip_paths', { sources, destDir, options: options || null }),
-      quickLook: (path) => invoke('quick_look', { path }),
+      quickLook: (path, paths) =>
+        invoke('quick_look', { path, paths: paths && paths.length ? paths : null }),
       makeFile: (path) => invoke('make_file', { path }),
       search: (query, scope, root, showHidden, roots, mode) =>
         invoke('search', { query, scope, root: root || null, showHidden, roots: roots || [], mode: mode || 'name' }),
