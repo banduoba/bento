@@ -51,7 +51,7 @@ export const entry = (name, extra = {}) => ({
   path: `/d/${name}`, name, is_dir: false, size: 1, mtime_ms: 1, btime_ms: 1, ext: '', ...extra,
 })
 
-export async function mountPane(t) {
+export async function mountPane(t, rendererOptions) {
   const previous = Object.fromEntries(['window', 'requestAnimationFrame', 'cancelAnimationFrame', 'IS_REACT_ACT_ENVIRONMENT', bridgeKey].map((key) => [key, globalThis[key]]))
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
   globalThis.window = new EventTarget()
@@ -92,7 +92,7 @@ export async function mountPane(t) {
     console.error = (...args) => {
       if (!String(args[0]).startsWith('react-test-renderer is deprecated.')) error(...args)
     }
-    await act(async () => { renderer = create(React.createElement(Pane, props)) })
+    await act(async () => { renderer = create(React.createElement(Pane, props), rendererOptions) })
   } finally { console.error = error }
   const unmount = async () => {
     if (!mounted) return

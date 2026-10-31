@@ -27,8 +27,10 @@ export const api = hasTauri
       reveal: (path) => invoke('reveal_in_finder', { path }),
       openTerminal: (path) => invoke('open_terminal', { path }),
       zipPaths: (sources, destDir, options) => invoke('zip_paths', { sources, destDir, options: options || null }),
-      quickLook: (path, paths) =>
-        invoke('quick_look', { path, paths: paths && paths.length ? paths : null }),
+      quickLook: (path, paths, session = null) =>
+        invoke('quick_look', { path, paths: paths && paths.length ? paths : null, session }),
+      updateQuickLook: (path, paths, session, revision) =>
+        invoke('update_quick_look', { path, paths, session, revision }),
       makeFile: (path) => invoke('make_file', { path }),
       createFile: (dir, kind) => invoke('create_file', { dir, kind }),
       listTemplates: () => invoke('list_templates'),
@@ -436,6 +438,7 @@ function mockApi() {
     openTerminal: () => Promise.resolve(),
     zipPaths: () => Promise.resolve([]),
     quickLook: () => Promise.resolve(),
+    updateQuickLook: () => Promise.resolve(),
     search: (q, scope, root, showHidden, roots, mode) => {
       if (mode === 'content') {
         // 模拟内容命中：返回带行号与文本的结果（供两栏内容框验收）
