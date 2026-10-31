@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { open } from '@tauri-apps/plugin-dialog'
 import { api, hasTauri } from '../api'
+import AboutSection from './AboutSection'
 
 /**
  * 设置面板：搜索范围与通用偏好
@@ -53,7 +54,7 @@ export default function SettingsDialog({
         <div className="modal-title" id="settings-title">设置</div>
         <div className="settings-body">
           <nav className="settings-nav" aria-label="设置分组">
-            {[['search', '搜索'], ['general', '通用'], ['permission', '权限']].map(([id, label]) => (
+            {[['search', '搜索'], ['general', '通用'], ['permission', '权限'], ['about', '关于']].map(([id, label]) => (
               <button key={id} className={`settings-nav-item${section === id ? ' on' : ''}`}
                 aria-current={section === id ? 'page' : undefined} aria-controls={`settings-${id}`}
                 onClick={() => setSection(id)}>
@@ -62,6 +63,7 @@ export default function SettingsDialog({
             ))}
           </nav>
           <div className="settings-content">
+            {section === 'about' && <AboutSection />}
             {section === 'search' && <section id="settings-search" className="settings-group" aria-labelledby="settings-search-title">
               <h2 id="settings-search-title">搜索</h2>
               <div className="settings-card">
