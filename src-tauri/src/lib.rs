@@ -2965,6 +2965,14 @@ pub fn run() {
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let operation_executor = operations::executor::FileExecutor::new(app.path().app_data_dir()?)?;
+            let operation_events = app.handle().clone();
+            app.manage(std::sync::Arc::new(operations::queue::OperationManager::new(
+                std::sync::Arc::new(operation_executor),
+                std::sync::Arc::new(move |snapshot| {
+                    let _ = operation_events.emit("operation-changed", snapshot);
+                }),
+            )));
             #[cfg(target_os = "macos")]
             session_exit::install_native_quit(app)?;
             #[cfg(target_os = "macos")]
