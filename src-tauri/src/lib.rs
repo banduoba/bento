@@ -108,7 +108,7 @@ async fn list_dir(path: String, show_hidden: bool) -> Result<ListResult, String>
 /// 生成不冲突的目标路径：name 已存在时用 "name 2"、"name 3"…
 fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
-    if !candidate.exists() {
+    if entry_available(&candidate) {
         return candidate;
     }
     let (stem, ext) = match name.rfind('.') {
@@ -117,7 +117,7 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
     };
     for i in 2..10000u32 {
         let c = dir.join(format!("{} {}{}", stem, i, ext));
-        if !c.exists() {
+        if entry_available(&c) {
             return c;
         }
     }
@@ -145,7 +145,7 @@ fn strip_copy_suffix(stem: &str) -> &str {
 
 fn copy_name_path(dir: &Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
-    if !candidate.exists() {
+    if entry_available(&candidate) {
         return candidate;
     }
     let (stem, ext) = match name.rfind('.') {
@@ -154,45 +154,144 @@ fn copy_name_path(dir: &Path, name: &str) -> PathBuf {
     };
     let base = strip_copy_suffix(stem);
     let first = dir.join(format!("{} copy{}", base, ext));
-    if !first.exists() {
+    if entry_available(&first) {
         return first;
     }
     for i in 1..10000u32 {
         let c = dir.join(format!("{} copy {}{}", base, i, ext));
-        if !c.exists() {
+        if entry_available(&c) {
             return c;
         }
     }
     dir.join(format!("{}-{}", name, std::process::id()))
 }
 
-fn copy_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    if src.is_dir() {
-        fs::create_dir_all(dst)?;
-        for e in fs::read_dir(src)? {
-            let e = e?;
-            copy_recursive(&e.path(), &dst.join(e.file_name()))?;
-        }
-        Ok(())
-    } else {
-        if let Some(p) = dst.parent() {
-            fs::create_dir_all(p)?;
-        }
-        fs::copy(src, dst).map(|_| ())
-    }
+fn entry_available(path: &Path) -> bool {
+    matches!(fs::symlink_metadata(path), Err(err) if err.kind() == io::ErrorKind::NotFound)
 }
 
-/// APFS clonefile：同卷拷贝瞬间完成（零拷贝），失败则回退普通拷贝
-#[cfg(target_os = "macos")]
-fn clonefile(src: &Path, dst: &Path) -> io::Result<()> {
+/// The kernel checks absence and renames in one operation, including dangling links.
+fn rename_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
-    let c = CString::new(src.as_os_str().as_bytes()).map_err(|_| io::Error::from_raw_os_error(22))?;
-    let d = CString::new(dst.as_os_str().as_bytes()).map_err(|_| io::Error::from_raw_os_error(22))?;
-    let rc = unsafe { libc::clonefile(c.as_ptr(), d.as_ptr(), 0) };
+    let src = CString::new(src.as_os_str().as_bytes())?;
+    let dst = CString::new(dst.as_os_str().as_bytes())?;
+    #[cfg(target_os = "macos")]
+    let rc = unsafe { libc::renamex_np(src.as_ptr(), dst.as_ptr(), libc::RENAME_EXCL) };
+    #[cfg(target_os = "linux")]
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            src.as_ptr(),
+            libc::AT_FDCWD,
+            dst.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    return Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "此平台不支持非覆盖移动",
+    ));
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     if rc == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
+    }
+}
+
+fn create_private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(path)?;
+    #[cfg(target_os = "macos")]
+    {
+        // POSIX mode alone does not revoke ACLs inherited from the destination.
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+            fn acl_set_file(
+                path: *const libc::c_char,
+                kind: libc::c_int,
+                acl: *mut libc::c_void,
+            ) -> libc::c_int;
+            fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+        }
+        let name = CString::new(path.as_os_str().as_bytes())?;
+        let acl = unsafe { acl_init(0) };
+        let result = if acl.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            let rc = unsafe {
+                acl_set_file(name.as_ptr(), 0x100 /* ACL_TYPE_EXTENDED */, acl)
+            };
+            let error = if rc == 0 {
+                None
+            } else {
+                Some(io::Error::last_os_error())
+            };
+            unsafe {
+                acl_free(acl);
+            }
+            error.map_or(Ok(()), Err)
+        };
+        if let Err(error) = result {
+            let _ = fs::remove_dir(path);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+// Keep APFS clone-on-write copies; the private staging parent protects cloned ACLs.
+fn copy_regular_file(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source = CString::new(src.as_os_str().as_bytes())?;
+        let dest = CString::new(dst.as_os_str().as_bytes())?;
+        if unsafe { libc::clonefile(source.as_ptr(), dest.as_ptr(), 0) } == 0 {
+            return Ok(());
+        }
+    }
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut input = fs::File::open(src)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dst)?;
+    io::copy(&mut input, &mut output)?;
+    Ok(())
+}
+
+/// macOS metadata includes mode, ACLs, extended attributes, and timestamps.
+/// Any unsupported/failed metadata operation aborts publication and source deletion.
+fn preserve_move_metadata(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let src = CString::new(src.as_os_str().as_bytes())?;
+        let dst = CString::new(dst.as_os_str().as_bytes())?;
+        let rc = unsafe {
+            libc::copyfile(
+                src.as_ptr(),
+                dst.as_ptr(),
+                std::ptr::null_mut(),
+                libc::COPYFILE_METADATA | libc::COPYFILE_NOFOLLOW,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let meta = fs::symlink_metadata(src)?;
+        if !meta.file_type().is_symlink() {
+            fs::set_permissions(dst, meta.permissions())?;
+        }
+        Ok(())
     }
 }
 
@@ -202,28 +301,46 @@ fn is_exdev(err: &io::Error) -> bool {
 
 /// 跨卷复制用：保留符号链接本身，不跟随链接去复制（或删除）目标。
 fn copy_for_move(src: &Path, dst: &Path) -> io::Result<()> {
+    copy_for_move_with(src, dst, &preserve_move_metadata)
+}
+
+fn copy_for_move_with(
+    src: &Path,
+    dst: &Path,
+    metadata: &impl Fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let meta = fs::symlink_metadata(src)?;
     if meta.file_type().is_symlink() {
-        let target = fs::read_link(src)?;
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        std::os::unix::fs::symlink(target, dst)?;
-        return Ok(());
-    }
-    if meta.is_dir() {
-        fs::create_dir_all(dst)?;
+        std::os::unix::fs::symlink(fs::read_link(src)?, dst)?;
+    } else if meta.is_dir() {
+        // Private from its first instant, writable during population even for 0500 sources.
+        create_private_dir(dst)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
-            copy_for_move(&entry.path(), &dst.join(entry.file_name()))?;
+            copy_for_move_with(&entry.path(), &dst.join(entry.file_name()), metadata)?;
         }
-        Ok(())
+    } else if meta.is_file() {
+        copy_regular_file(src, dst)?;
     } else {
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(src, dst).map(|_| ())
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "不支持移动此类文件",
+        ));
     }
+    metadata(src, dst)
+        .map_err(|err| io::Error::new(err.kind(), format!("无法保留文件元数据: {err}")))?;
+    if !meta.file_type().is_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::symlink_metadata(dst)?.permissions().mode() & 0o7777
+            != meta.permissions().mode() & 0o7777
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "目标卷无法保留文件权限，源文件保持原样",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn remove_path(path: &Path) -> io::Result<()> {
@@ -239,19 +356,39 @@ fn remove_path(path: &Path) -> io::Result<()> {
     }
 }
 
-fn temp_move_path(dir: &Path) -> PathBuf {
-    let pid = std::process::id();
-    for i in 0..1000u32 {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let candidate = dir.join(format!(".bento-move-{pid}-{nanos}-{i}"));
-        if !candidate.exists() {
-            return candidate;
+fn temp_move_dir(dir: &Path) -> io::Result<PathBuf> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for _ in 0..1000 {
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let candidate = dir.join(format!(".bento-move-{}-{seq}", std::process::id()));
+        match create_private_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err),
         }
     }
-    dir.join(format!(".bento-move-{pid}-fallback"))
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "无法创建安全临时目录",
+    ))
+}
+
+// Only called on our exclusively created private staging tree.
+fn cleanup_staging(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    cleanup_staging(&entry.path());
+                }
+            }
+            let _ = fs::remove_dir(path);
+        } else {
+            let _ = fs::remove_file(path);
+        }
+    }
 }
 
 /// 跨卷移动：先把内容复制到目标卷的临时名，改名成功后才删除源。
@@ -269,21 +406,23 @@ fn copy_then_remove_with(
     let parent = dst
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "目标路径无效"))?;
-    let tmp = temp_move_path(parent);
+    let staging = temp_move_dir(parent)?;
+    let tmp = staging.join("item");
     if let Err(err) = copy(src, &tmp) {
-        let _ = remove_path(&tmp);
+        cleanup_staging(&staging);
         return Err(io::Error::new(
             err.kind(),
             format!("复制未完成，源文件保持原样: {err}"),
         ));
     }
-    if let Err(err) = fs::rename(&tmp, dst) {
-        let _ = remove_path(&tmp);
+    if let Err(err) = rename_no_replace(&tmp, dst) {
+        cleanup_staging(&staging);
         return Err(io::Error::new(
             err.kind(),
             format!("复制未完成，源文件保持原样: {err}"),
         ));
     }
+    cleanup_staging(&staging);
     if let Err(err) = remove_src(src) {
         return Err(io::Error::new(
             err.kind(),
@@ -298,7 +437,7 @@ fn copy_then_remove_with(
 
 /// 同卷 rename；仅当内核返回 EXDEV 时才复制后删除。
 fn relocate(src: &Path, dst: &Path) -> io::Result<()> {
-    relocate_with(src, dst, |s, d| fs::rename(s, d))
+    relocate_with(src, dst, rename_no_replace)
 }
 
 fn relocate_with(
@@ -317,17 +456,11 @@ fn do_transfer(sp: &Path, dp: &Path, mode: &str) -> io::Result<()> {
     if mode == "move" {
         relocate(sp, dp)
     } else {
-        #[cfg(target_os = "macos")]
-        {
-            if clonefile(sp, dp).is_ok() {
-                return Ok(());
-            }
-        }
-        copy_recursive(sp, dp)
+        copy_then_remove_with(sp, dp, copy_for_move, |_| Ok(()))
     }
 }
 
-fn move_one_item(source: &str, dest_dir: &Path) -> TransferItem {
+fn transfer_one_item(source: &str, dest_dir: &Path, mode: &str) -> TransferItem {
     let fail = |error: String| TransferItem {
         source: source.to_string(),
         dest: String::new(),
@@ -339,7 +472,7 @@ fn move_one_item(source: &str, dest_dir: &Path) -> TransferItem {
         return fail("源不存在".into());
     }
     // 已经在目标目录：剪切后粘贴到原处，不动文件。
-    if sp.parent().is_some_and(|parent| parent == dest_dir) {
+    if mode == "move" && sp.parent().is_some_and(|parent| parent == dest_dir) {
         return TransferItem {
             source: source.to_string(),
             dest: source.to_string(),
@@ -351,19 +484,29 @@ fn move_one_item(source: &str, dest_dir: &Path) -> TransferItem {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "untitled".into());
-    let dp = copy_name_path(dest_dir, &name);
-    if dp.starts_with(&sp) {
-        return fail("不能将文件夹移动到其自身内部".into());
+    for _ in 0..10000 {
+        let dp = copy_name_path(dest_dir, &name);
+        if dp.starts_with(&sp) {
+            return fail("不能将文件夹移动到其自身内部".into());
+        }
+        match do_transfer(&sp, &dp, mode) {
+            Ok(()) => {
+                return TransferItem {
+                    source: source.to_string(),
+                    dest: dp.to_string_lossy().into_owned(),
+                    ok: true,
+                    error: None,
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return fail(err.to_string()),
+        }
     }
-    match relocate(&sp, &dp) {
-        Ok(()) => TransferItem {
-            source: source.to_string(),
-            dest: dp.to_string_lossy().into_owned(),
-            ok: true,
-            error: None,
-        },
-        Err(err) => fail(err.to_string()),
-    }
+    fail("目标重名冲突过多，请重试".into())
+}
+
+fn move_one_item(source: &str, dest_dir: &Path) -> TransferItem {
+    transfer_one_item(source, dest_dir, "move")
 }
 
 fn move_into(
@@ -408,50 +551,7 @@ async fn transfer(
         let total = sources.len();
         let mut out = Vec::with_capacity(total);
         for (i, s) in sources.iter().enumerate() {
-            let sp = PathBuf::from(s);
-            let name = sp
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "untitled".into());
-            let item = if !sp.exists() {
-                TransferItem {
-                    source: s.clone(),
-                    dest: String::new(),
-                    ok: false,
-                    error: Some("源不存在".into()),
-                }
-            } else if mode == "move" && sp.parent().map(|p| p == dest_dir).unwrap_or(false) {
-                TransferItem {
-                    source: s.clone(),
-                    dest: s.clone(),
-                    ok: true,
-                    error: None,
-                }
-            } else {
-                let dp = copy_name_path(&dest_dir, &name);
-                let res = if dp.starts_with(&sp) {
-                    Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "不能将文件夹移动/拷贝到其自身内部".to_string(),
-                    ))
-                } else {
-                    do_transfer(&sp, &dp, &mode)
-                };
-                match res {
-                    Ok(()) => TransferItem {
-                        source: s.clone(),
-                        dest: dp.to_string_lossy().into_owned(),
-                        ok: true,
-                        error: None,
-                    },
-                    Err(e) => TransferItem {
-                        source: s.clone(),
-                        dest: String::new(),
-                        ok: false,
-                        error: Some(e.to_string()),
-                    },
-                }
-            };
+            let item = transfer_one_item(s, &dest_dir, &mode);
             out.push(item);
             let _ = app.emit(
                 "transfer-progress",
@@ -462,6 +562,55 @@ async fn transfer(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(serde::Deserialize)]
+struct RestoreMove {
+    source: String,
+    dest: String,
+}
+
+fn restore_into(moves: &[RestoreMove]) -> Vec<TransferItem> {
+    moves
+        .iter()
+        .map(|m| {
+            let src = Path::new(&m.source);
+            let dst = Path::new(&m.dest);
+            let result = (|| {
+                if !src.is_absolute() || !dst.is_absolute() || dst.file_name().is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "恢复需要完整文件路径",
+                    ));
+                }
+                fs::symlink_metadata(src)?;
+                if src == dst {
+                    return Ok(());
+                }
+                if dst.starts_with(src) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "不能恢复到自身内部",
+                    ));
+                }
+                // Exact restoration never invents a new basename or recreates missing parents.
+                relocate(src, dst)
+            })();
+            TransferItem {
+                source: m.source.clone(),
+                dest: m.dest.clone(),
+                ok: result.is_ok(),
+                error: result.err().map(|e| e.to_string()),
+            }
+        })
+        .collect()
+}
+
+#[tauri::command]
+async fn restore_moves(moves: Vec<RestoreMove>) -> Result<Vec<TransferItem>, String> {
+    tauri::async_runtime::spawn_blocking(move || restore_into(&moves))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// ⌘X / ⌘V：把条目移动到目标文件夹。同卷 rename；仅 EXDEV 时复制成功后再删除源。
@@ -550,10 +699,10 @@ async fn rename(old_path: String, new_name: String) -> Result<String, String> {
         Some(p) => p.join(name),
         None => return Err("路径错误".into()),
     };
-    if dest.exists() && dest != old {
+    if !entry_available(&dest) && dest != old {
         return Err(format!("「{}」已存在", name));
     }
-    fs::rename(&old, &dest).map_err(|e| format!("重命名失败: {}", e))?;
+    if dest != old { rename_no_replace(&old, &dest).map_err(|e| format!("重命名失败: {}", e))?; }
     Ok(dest.to_string_lossy().into_owned())
 }
 
@@ -2115,6 +2264,314 @@ mod move_items_tests {
 }
 
 #[cfg(test)]
+mod file_safety_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "bento-safety-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(path.join("src")).unwrap();
+            fs::create_dir_all(path.join("dst")).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) { cleanup_staging(&self.0); }
+    }
+
+    #[test]
+    fn exact_restore_recovers_original_name_and_rejects_conflicts_per_item() {
+        let root = Scratch::new();
+        let source = root.0.join("src/note.txt");
+        fs::write(&source, "incoming").unwrap();
+        fs::write(root.0.join("dst/note.txt"), "existing").unwrap();
+        let forward = move_into(
+            &[source.to_string_lossy().into_owned()],
+            root.0.join("dst").to_str().unwrap(),
+            |_, _| {},
+        )
+        .unwrap();
+        let moves = vec![RestoreMove {
+            source: forward[0].dest.clone(),
+            dest: source.to_string_lossy().into_owned(),
+        }];
+        fs::write(&source, "conflict").unwrap();
+        let blocked = restore_into(&moves);
+        assert_eq!(blocked.len(), 1);
+        assert!(!blocked[0].ok);
+        assert_eq!(fs::read(&source).unwrap(), b"conflict");
+        fs::remove_file(&source).unwrap();
+        let restored = restore_into(&moves);
+        assert!(restored[0].ok, "{restored:?}");
+        assert_eq!(restored[0].dest, source.to_string_lossy());
+        assert_eq!(fs::read(&source).unwrap(), b"incoming");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn cross_volume_keeps_xattrs_acl_and_modified_time() {
+        let root = Scratch::new();
+        let src = root.0.join("src/private");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("file"), "secret").unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(std::process::Command::new("chmod")
+            .args(["+a", "everyone allow readattr,readextattr,readsecurity"])
+            .arg(&src)
+            .status()
+            .unwrap()
+            .success());
+        assert!(std::process::Command::new("xattr")
+            .args(["-w", "com.bento.fixture", "secret"])
+            .arg(&src)
+            .status()
+            .unwrap()
+            .success());
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        fs::File::open(&src)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let dst = root.0.join("dst/private");
+        copy_then_remove(&src, &dst).unwrap();
+        assert!(!src.exists());
+        assert_eq!(fs::metadata(&dst).unwrap().modified().unwrap(), modified);
+        let value = std::process::Command::new("xattr")
+            .args(["-p", "com.bento.fixture"])
+            .arg(&dst)
+            .output()
+            .unwrap();
+        assert!(value.status.success());
+        assert_eq!(String::from_utf8_lossy(&value.stdout).trim(), "secret");
+        let acl = std::process::Command::new("ls")
+            .arg("-lde")
+            .arg(&dst)
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&acl.stdout)
+            .contains("everyone allow readattr,readextattr,readsecurity"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn staging_does_not_inherit_destination_read_acl() {
+        let root = Scratch::new();
+        let dst_dir = root.0.join("dst");
+        assert!(std::process::Command::new("chmod").args(["+a", "everyone allow list,search,readattr,readextattr,readsecurity,file_inherit,directory_inherit"]).arg(&dst_dir).status().unwrap().success());
+        let src = root.0.join("src/file");
+        fs::write(&src, "secret").unwrap();
+        copy_then_remove_with(
+            &src,
+            &dst_dir.join("file"),
+            |s, tmp| {
+                let acl = std::process::Command::new("ls")
+                    .arg("-lde")
+                    .arg(tmp.parent().unwrap())
+                    .output()?;
+                let acl = String::from_utf8_lossy(&acl.stdout);
+                assert!(
+                    !acl.contains("everyone"),
+                    "staging must not grant inherited read access: {acl}"
+                );
+                copy_for_move(s, tmp)
+            },
+            remove_path,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn private_staging_and_metadata_failure_keep_source() {
+        use std::cell::Cell;
+        let root = Scratch::new();
+        let src = root.0.join("src/private");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("file"), "secret").unwrap();
+        fs::set_permissions(&src, fs::Permissions::from_mode(0o700)).unwrap();
+        let saw_child = Cell::new(false);
+        let dst = root.0.join("dst/private");
+        let err = copy_then_remove_with(
+            &src,
+            &dst,
+            |s, tmp| {
+                assert_eq!(
+                    fs::metadata(tmp.parent().unwrap())?.permissions().mode() & 0o777,
+                    0o700
+                );
+                copy_for_move_with(s, tmp, &|s, d| {
+                    if s.file_name().unwrap() == "file" {
+                        saw_child.set(true);
+                        assert_eq!(
+                            fs::metadata(d.parent().unwrap())?.permissions().mode() & 0o777,
+                            0o700
+                        );
+                    }
+                    if s.is_dir() {
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "metadata denied",
+                        ));
+                    }
+                    preserve_move_metadata(s, d)
+                })
+            },
+            |_| panic!("metadata failure must never delete the source"),
+        )
+        .unwrap_err();
+        assert!(saw_child.get());
+        assert!(err.to_string().contains("元数据"));
+        assert_eq!(fs::read(src.join("file")).unwrap(), b"secret");
+        assert!(!dst.exists());
+        assert_eq!(fs::read_dir(root.0.join("dst")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn concurrent_same_name_moves_preserve_every_content() {
+        let root = Scratch::new();
+        let mut workers = Vec::new();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        for i in 0..8 {
+            let src = root.0.join(format!("src/{i}"));
+            fs::create_dir(&src).unwrap();
+            let src = src.join("note.txt");
+            fs::write(&src, i.to_string()).unwrap();
+            let dest = root.0.join("dst");
+            let barrier = barrier.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                move_one_item(src.to_str().unwrap(), &dest)
+            }));
+        }
+        let items: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert!(items.iter().all(|i| i.ok), "{items:?}");
+        let mut contents: Vec<_> = items
+            .iter()
+            .map(|i| fs::read_to_string(&i.dest).unwrap())
+            .collect();
+        contents.sort();
+        assert_eq!(contents, ["0", "1", "2", "3", "4", "5", "6", "7"]);
+    }
+
+    #[test]
+    fn shared_transfer_copy_keeps_dangling_dest_and_copies_source_link() {
+        let root = Scratch::new();
+        let src = root.0.join("src/link");
+        symlink("source-target", &src).unwrap();
+        let dst = root.0.join("dst/link");
+        symlink("dest-target", &dst).unwrap();
+        let result = transfer_one_item(src.to_str().unwrap(), &root.0.join("dst"), "copy");
+        assert!(result.ok, "{result:?}");
+        assert_eq!(fs::read_link(&dst).unwrap(), PathBuf::from("dest-target"));
+        assert_eq!(
+            fs::read_link(&result.dest).unwrap(),
+            PathBuf::from("source-target")
+        );
+        assert!(fs::symlink_metadata(src).is_ok());
+    }
+
+    #[test]
+    fn cross_volume_nested_directory_modes_survive() {
+        let root = Scratch::new();
+        let src = root.0.join("src/private");
+        fs::create_dir_all(src.join("shared/readonly")).unwrap();
+        fs::write(src.join("shared/readonly/file"), "private").unwrap();
+        for (path, mode) in [
+            (&src, 0o700),
+            (&src.join("shared"), 0o750),
+            (&src.join("shared/readonly"), 0o500),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        // Exercise the actual EXDEV fallback without needing a second mounted disk.
+        let dst = root.0.join("dst/private");
+        copy_for_move(&src, &dst).unwrap();
+        for (path, mode) in [
+            (&dst, 0o700),
+            (&dst.join("shared"), 0o750),
+            (&dst.join("shared/readonly"), 0o500),
+        ] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+        fs::set_permissions(
+            src.join("shared/readonly"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        fs::set_permissions(
+            dst.join("shared/readonly"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn move_preserves_existing_dangling_symlink() {
+        let root = Scratch::new();
+        let src = root.0.join("src/note.txt");
+        fs::write(&src, "incoming").unwrap();
+        let dst = root.0.join("dst/note.txt");
+        symlink("missing", &dst).unwrap();
+        let result = move_into(
+            &[src.to_string_lossy().into_owned()],
+            root.0.join("dst").to_str().unwrap(),
+            |_, _| {},
+        )
+        .unwrap();
+        assert!(result[0].ok);
+        assert_eq!(fs::read_link(&dst).unwrap(), PathBuf::from("missing"));
+        assert_eq!(
+            fs::read(root.0.join("dst/note copy.txt")).unwrap(),
+            b"incoming"
+        );
+    }
+
+    #[test]
+    fn relocate_refuses_existing_destination_atomically() {
+        let root = Scratch::new();
+        let src = root.0.join("src/file");
+        fs::write(&src, "incoming").unwrap();
+        let dst = root.0.join("dst/file");
+        fs::write(&dst, "existing").unwrap();
+        assert_eq!(
+            relocate(&src, &dst).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&src).unwrap(), b"incoming");
+        assert_eq!(fs::read(&dst).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn cross_volume_publish_refuses_a_racing_destination() {
+        let root = Scratch::new();
+        let src = root.0.join("src/file");
+        fs::write(&src, "incoming").unwrap();
+        let dst = root.0.join("dst/file");
+        let result = copy_then_remove_with(
+            &src,
+            &dst,
+            |s, tmp| {
+                copy_for_move(s, tmp)?;
+                fs::write(&dst, "racer")?;
+                Ok(())
+            },
+            remove_path,
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&src).unwrap(), b"incoming");
+        assert_eq!(fs::read(&dst).unwrap(), b"racer");
+    }
+}
+
+#[cfg(test)]
 mod zip_tests {
     use super::*;
 
@@ -2476,6 +2933,7 @@ pub fn run() {
             list_stream::cancel_list_dir,
             transfer,
             move_items,
+            restore_moves,
             trash,
             make_dir,
             rename,

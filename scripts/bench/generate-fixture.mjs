@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // 生成 Bento 性能夹具：一个目录里放 N 个 32 字节小文件。
-import { existsSync, mkdirSync, readdirSync, rmSync, statfsSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmdirSync, unlinkSync, statfsSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 import {
@@ -23,6 +23,7 @@ import {
   readMarker,
   rejectUnknown,
   roundMs,
+  verifiedFixtureEntries,
 } from './lib.mjs'
 
 const usage = `用法:
@@ -159,12 +160,7 @@ async function main() {
 
   mkdirSync(dirname(out), { recursive: true })
   const marker = readMarker(out)
-  if (existsSync(out)) {
-    const entries = readdirSync(out)
-    if (entries.length && !isOurMarker(marker)) {
-      fail(`目录非空，且不是本工具生成的夹具，拒绝写入: ${out}`)
-    }
-  }
+  if (existsSync(out)) verifiedFixtureEntries(out, marker)
 
   if (isOurMarker(marker) && marker.status === 'complete' && !args.force) {
     const same =
@@ -204,7 +200,12 @@ async function main() {
 
   if (large && !args.yes) sleepMs(3000)
 
-  if (existsSync(out)) rmSync(out, { recursive: true, force: true })
+  if (existsSync(out)) {
+    // Revalidate immediately before cleanup; never recursively delete unknown entries.
+    const entries = verifiedFixtureEntries(out, readMarker(out))
+    for (const name of entries) unlinkSync(join(out, name))
+    rmdirSync(out)
+  }
   mkdirSync(out, { recursive: true })
 
   const startedAt = new Date().toISOString()

@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { readdir, lstat, stat } from 'node:fs/promises'
 import { cpus, homedir, platform, arch, release, tmpdir, totalmem } from 'node:os'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
@@ -156,12 +156,37 @@ export function readMarker(dir) {
     if (!data || typeof data !== 'object') return { generator: null, corrupt: true }
     return data
   } catch {
-    return { generator: 'bento-bench', status: 'partial', corrupt: true }
+    return { generator: null, corrupt: true }
   }
 }
 
 export function isOurMarker(marker) {
-  return !!marker && marker.generator === 'bento-bench'
+  return !!marker && !marker.corrupt && marker.generator === 'bento-bench'
+    && marker.schema === 1 && ['partial', 'complete'].includes(marker.status)
+    && Number.isInteger(marker.count) && marker.count >= 1 && marker.count <= MAX_COUNT
+    && marker.file_bytes === FILE_BYTES && marker.name_width === NAME_WIDTH
+    && typeof marker.started_at === 'string' && Number.isFinite(Date.parse(marker.started_at))
+}
+
+// A marker alone is not ownership proof: every entry must be generator data.
+// Partial fixtures may contain any subset of the requested files, with intact payloads.
+export function verifiedFixtureEntries(dir, marker) {
+  if (!lstatSync(dir).isDirectory()) throw new Error(`夹具路径不是实际目录: ${dir}`)
+  const entries = readdirSync(dir)
+  if (!entries.length) return entries
+  if (!isOurMarker(marker) || !lstatSync(markerPath(dir)).isFile()) {
+    throw new Error(`目录非空，夹具标记不可验证，拒绝清理: ${dir}`)
+  }
+  for (const name of entries) {
+    if (name === MARKER_NAME) continue
+    const match = /^f(\d{6})\.txt$/.exec(name)
+    const path = join(dir, name)
+    if (!match || Number(match[1]) >= marker.count || !lstatSync(path).isFile()
+      || !readFileSync(path).equals(PAYLOAD)) {
+      throw new Error(`目录含非夹具内容，拒绝清理: ${path}`)
+    }
+  }
+  return entries
 }
 
 export function assertSafeFixturePath(dir) {

@@ -937,6 +937,35 @@ export default function App() {
     })
   }
 
+  // Retain only unfinished reverse moves, including exact original names.
+  const restoreUndo = (moves) => {
+    let pending = [...moves].reverse().filter((m) => m.dest !== m.source)
+      .map((m) => ({ source: m.dest, dest: m.source }))
+    return async () => {
+      const results = await api.restoreMoves(pending)
+      pending = pending.filter((m) => !results?.some((r) => r.ok && r.source === m.source && r.dest === m.dest))
+      if (pending.length) {
+        const errors = (results || []).filter((r) => !r.ok).map((r) => `${basename(r.source)}: ${r.error}`)
+        throw new Error(`${pending.length} 个项目未恢复，已保留以便重试${errors.length ? '\n' + errors.join('\n') : ''}`)
+      }
+      return results
+    }
+  }
+
+  const trashUndo = (paths) => {
+    let pending = [...paths].reverse()
+    return async () => {
+      const failed = []
+      for (const path of [...pending]) {
+        try {
+          await api.trash([path])
+          pending = pending.filter((p) => p !== path)
+        } catch (error) { failed.push(`${basename(path)}: ${error}`) }
+      }
+      if (failed.length) throw new Error(failed.join('\n'))
+    }
+  }
+
   const transferInto = async (dest, paths, mode, onSuccess) => {
     if (!paths?.length) return
     modeRef.current = mode
@@ -944,26 +973,20 @@ export default function App() {
       const results = await api.transfer(paths, dest, mode)
       reportErrors(results)
       // 记录成功的操作供 ⌘Z 撤销
-      const ok = (results || []).filter((r) => r.ok)
+      const ok = (results || []).filter((r) => r.ok && r.dest)
       if (ok.length === paths.length) onSuccess?.()
-      if (mode === 'move' && ok.length) {
-        const moves = ok
+      const moves = ok.filter((r) => r.dest !== r.source)
+      if (mode === 'move' && moves.length) {
         pushUndo(
           moves.length === 1 ? `移动：${basename(moves[0].dest)}` : `移动 ${moves.length} 个项目`,
-          async () => {
-            for (const m of moves) {
-              await api.transfer([m.dest], m.source.slice(0, m.source.lastIndexOf('/')), 'move')
-            }
-          }
+          restoreUndo(moves)
         )
       }
       if (mode === 'copy' && ok.length) {
         const copies = ok.map((r) => r.dest)
         pushUndo(
           copies.length === 1 ? `拷贝：${basename(copies[0])}` : `拷贝 ${copies.length} 个项目`,
-          async () => {
-            await api.trash(copies)
-          },
+          trashUndo(copies),
           { silent: true }
         )
         // 提示贴在刚拷贝出来的文件旁边（列表刷新后才出现该行，showRowToast 会等待）
@@ -988,11 +1011,7 @@ export default function App() {
       if (ok.length) {
         pushUndo(
           ok.length === 1 ? `移动：${basename(ok[0].dest)}` : `移动 ${ok.length} 个项目`,
-          async () => {
-            for (const m of ok) {
-              await api.moveItems([m.dest], m.source.slice(0, m.source.lastIndexOf('/')))
-            }
-          }
+          restoreUndo(ok)
         )
         const gone = new Set(ok.map((r) => r.source))
         setSel((s) => {
@@ -1012,8 +1031,8 @@ export default function App() {
         && current.paths.length === movedFrom.length
         && current.paths.every((p, i) => p === movedFrom[i])
       if (sameCut) {
-        const failed = new Set((results || []).filter((r) => !r.ok).map((r) => r.source))
-        retainCut(movedFrom.filter((p) => failed.has(p)))
+        const completed = new Set((results || []).filter((r) => r.ok).map((r) => r.source))
+        retainCut(movedFrom.filter((p) => !completed.has(p)))
       }
     } catch (e) {
       alert(`移动失败: ${e}`)
@@ -1033,16 +1052,23 @@ export default function App() {
 
   // ⌘Z：撤销最近一次移动
   const undoLast = async () => {
-    const op = undoStackRef.current.pop()
-    if (!op) return
+    const op = undoStackRef.current.at(-1)
+    if (!op || undoStackRef.current.some((item) => item.busy)) return
+    op.busy = true
     try {
       await op.undo()
+      const index = undoStackRef.current.indexOf(op)
+      if (index >= 0) undoStackRef.current.splice(index, 1)
+      clearTimeout(toastTimer.current)
       setUndoToast({ label: op.label, undone: true })
       setTimeout(() => setUndoToast(null), 2500)
       refresh()
     } catch (e) {
+      setUndoToast({ label: op.label })
       alert(`撤销失败: ${e}`)
       refresh()
+    } finally {
+      op.busy = false
     }
   }
 
@@ -1057,11 +1083,7 @@ export default function App() {
             entries.length === 1
               ? `废纸篓：${basename(entries[0].original)}`
               : `废纸篓 ${entries.length} 个项目`,
-            async () => {
-              for (const e of entries) {
-                await api.transfer([e.trashed], e.original.slice(0, e.original.lastIndexOf('/')), 'move')
-              }
-            }
+            restoreUndo(entries.map((e) => ({ source: e.original, dest: e.trashed })))
           )
         }
       })
@@ -1139,9 +1161,7 @@ export default function App() {
         }
         pushUndo(
           created.length === 1 ? `压缩：${basename(created[0])}` : `压缩 ${created.length} 个`,
-          async () => {
-            await api.trash(created)
-          },
+          trashUndo(created),
           { silent: true }
         )
         showRowToast(created, created.length === 1 ? `已压缩：${basename(created[0])}` : `已压缩为 ${created.length} 个文件`)
@@ -1185,9 +1205,7 @@ export default function App() {
         refresh()
         setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
         setRenaming({ tabId, path: created, value: basename(created), selectAll: true })
-        pushUndo(`新建文件夹：${basename(created)}`, async () => {
-          await api.trash([created])
-        })
+        pushUndo(`新建文件夹：${basename(created)}`, trashUndo([created]))
       })
       .catch((e) => alert(String(e)))
   }
@@ -1197,9 +1215,7 @@ export default function App() {
     setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
     // 与普通重命名一样只选中主文件名，扩展名留着（模板 .docx 不会被一次输入冲掉）
     setRenaming({ tabId, path: created, value: basename(created) })
-    pushUndo(`新建文件：${basename(created)}`, async () => {
-      await api.trash([created])
-    })
+    pushUndo(`新建文件：${basename(created)}`, trashUndo([created]))
   }
 
   const newFile = (tabId, kind) => {
