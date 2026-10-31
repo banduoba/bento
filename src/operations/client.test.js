@@ -146,3 +146,45 @@ test('retry waits for a settled terminal job and includes only safe retryItem ou
   assert.deepEqual(submitted.at(-1).items,[{itemId:'i2',source:'/src/2'}])
   h.client.dispose()
 })
+test('definitive admission rejection retires enqueue, undo and recovery descriptors without poisoning idle state',async()=>{
+  for(const kind of ['copy','undo','recovery']){
+    const rejection={code:'admissionRejected',message:`invalid ${kind}`,phase:'preparing'}
+    const h=harness({listOperationJobs:async()=>queue([],{latestUndoId:'u1'}),enqueueOperation:async()=>{throw rejection},undoOperation:async()=>{throw rejection},recoverOperation:async()=>{throw rejection}})
+    await h.client.start()
+    const submitting=kind==='copy'?h.client.enqueue(request):kind==='undo'?h.client.undo():h.client.recover('safe1','restoreBackup')
+    await assert.rejects(submitting,error=>error.code==='admissionRejected'&&error.message===`invalid ${kind}`)
+    assert.deepEqual(h.client.getState().pendingSubmissions,[])
+    assert.equal(h.client.getState().busy,false)
+    assert.equal(h.client.getState().error,`invalid ${kind}`)
+    h.client.dispose()
+  }
+})
+test('an empty snapshot after unknown transport rejection preserves the same uncertain request for retry',async()=>{
+  const seen=[];let fail=true
+  const h=harness({enqueueOperation:async r=>{seen.push(r);if(fail)throw Error('transport unavailable');return job({requestId:r.requestId})}})
+  await h.client.start();await assert.rejects(h.client.enqueue(request),/transport/)
+  assert.equal(h.client.getState().busy,true)
+  assert.deepEqual(h.client.getState().pendingSubmissions,[{requestId:'r1',kind:'copy'}])
+  fail=false;await h.client.retrySubmission('r1')
+  assert.equal(seen[0],seen[1]);assert.equal(seen[1].requestId,'r1')
+  h.client.dispose()
+})
+test('a terminal event during an older queue-summary request schedules a trailing fresh summary',async()=>{
+  const gate=deferred();let lists=0
+  const h=harness({listOperationJobs:async()=>{
+    lists++
+    if(lists===1)return queue()
+    if(lists===2)return gate.promise
+    return queue([job({revision:3,state:'completed',phase:'finished',undoId:'u1'})],{revision:3,latestUndoId:'u1',accepting:false})
+  }})
+  await h.client.start();await h.client.enqueue(request)
+  const stale=h.client.resync()
+  await h.emit(job({revision:3,state:'completed',phase:'finished',undoId:'u1'}))
+  gate.resolve(queue([job({revision:2,state:'running'})],{revision:2,latestUndoId:null,accepting:true}))
+  await stale
+  assert.equal(lists,3)
+  assert.equal(h.client.getState().jobs[0].state,'completed')
+  assert.equal(h.client.getState().latestUndoId,'u1')
+  assert.equal(h.client.getState().accepting,false)
+  h.client.dispose()
+})

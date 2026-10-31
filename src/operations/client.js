@@ -1,11 +1,12 @@
 import { createOperationStore, operationId, terminal } from './store.js'
+import { getClip, releaseCut, reserveCutRetry } from '../clipboard.js'
 
 // Only snapshots enter the observable store. Requests (including passwords) stay private.
-export function createOperationClient({ api, listen, onOutcomes = () => {}, onSettled = () => {} }) {
-  const store = createOperationStore(), records = new Map(), requests = new Map(), unresolved = new Map(), retired = new Set()
-  let startup, unlisten, disposed = false, buffer = new Map(), syncing = null, submittingUndo = false
+export function createOperationClient({ api, listen, onOutcomes = () => {}, onSettled = () => {}, onAdmissionRejected = () => {} }) {
+  const store = createOperationStore(), records = new Map(), requests = new Map(), unresolved = new Map(), retired = new Set(), cutOrigins = new Map()
+  let startup, unlisten, disposed = false, buffer = new Map(), syncing = null, syncAgain = false, submittingUndo = false
   const safeMessage = value => {
-    let message = String(value)
+    let message = typeof value?.message === 'string' ? value.message : String(value)
     for (const request of requests.values()) if (request.options?.password) message = message.split(request.options.password).join('[已隐藏]')
     return message
   }
@@ -89,19 +90,28 @@ export function createOperationClient({ api, listen, onOutcomes = () => {}, onSe
     const retained = new Set(snapshot.jobs.map(job => job.jobId))
     for (const [id, record] of records) {
       if (canPrune && pruneCandidates.has(id) && !retained.has(id) && record.acked && !unresolved.has(record.job.requestId)) {
-        retired.add(id); records.delete(id); requests.delete(record.job.requestId)
+        retired.add(id); records.delete(id); requests.delete(record.job.requestId); cutOrigins.delete(record.job.requestId)
       }
     }
     publish()
     const waiting = [...buffer.values()]; buffer.clear()
     waiting.forEach(merge)
+    if (waiting.some(job => job.sessionId === snapshot.sessionId && terminal(job.state))) void resync(true).catch(error)
     // A previous page fetch may have failed even when its snapshot did not change.
     records.forEach(record => { if (record.error) void drain(record) })
   }
-  const resync = () => {
-    if (syncing) return syncing
+  const resync = (fresh = false) => {
+    if (syncing) {
+      if (fresh) syncAgain = true
+      return syncing
+    }
+    syncAgain = false
     const pruneCandidates = new Set([...records].filter(([, record]) => record.acked).map(([id]) => id))
-    syncing = api.listOperationJobs().then(snapshot => applyQueue(snapshot, pruneCandidates)).finally(() => { syncing = null })
+    syncing = api.listOperationJobs().then(snapshot => applyQueue(snapshot, pruneCandidates)).finally(() => {
+      syncing = null
+      // An event observed after the list request began needs a newer authoritative summary.
+      if (syncAgain && !disposed) return resync()
+    })
     return syncing
   }
   const refreshRecoveries = async () => {
@@ -119,7 +129,7 @@ export function createOperationClient({ api, listen, onOutcomes = () => {}, onSe
         }
         merge(event.payload)
         if (terminal(event.payload.state) && event.payload.sessionId === store.getState().sessionId) {
-          void resync().catch(error)
+          void resync(true).catch(error)
           void refreshRecoveries().catch(error)
         }
       })
@@ -140,6 +150,18 @@ export function createOperationClient({ api, listen, onOutcomes = () => {}, onSe
       store.update({ error: null })
       return records.get(job.jobId)?.job || job
     } catch (cause) {
+      if (cause?.code === 'admissionRejected') {
+        const message = safeMessage(cause)
+        const request = requests.get(requestId)
+        unresolved.delete(requestId)
+        if (request?.clipRevision) releaseCut(request.clipRevision)
+        requests.delete(requestId)
+        cutOrigins.delete(requestId)
+        pending()
+        store.update({ error: message })
+        onAdmissionRejected({ requestId, kind: descriptor.kind })
+        throw Object.assign(new Error(message), { code: cause.code, phase: cause.phase })
+      }
       try {
         await resync()
         const accepted = [...records.values()].find(r => r.job.requestId === requestId)
@@ -150,6 +172,8 @@ export function createOperationClient({ api, listen, onOutcomes = () => {}, onSe
     }
   }
   const enqueue = request => {
+    const current = getClip()
+    if (request.clipRevision && current?.mode === 'cut' && current.revision === request.clipRevision) cutOrigins.set(request.requestId, current.clipId)
     requests.set(request.requestId, request)
     return admit({ requestId: request.requestId, kind: request.kind, execute: () => api.enqueueOperation(request) })
   }
@@ -185,7 +209,9 @@ export function createOperationClient({ api, listen, onOutcomes = () => {}, onSe
       const record = records.get(jobId), original = record && requests.get(record.job.requestId)
       if (record && (!terminal(record.job.state) || !record.settled)) throw Error('任务结束并同步结果后可重试')
       if (!original || !record.retryItems.size || original.kind === 'zip') throw Error('此任务需要手动处理，请查看错误或恢复记录')
-      return enqueue({ ...original, requestId: operationId(), clipRevision: null, items: original.items.filter(item => record.retryItems.has(item.itemId)) })
+      const items = original.items.filter(item => record.retryItems.has(item.itemId))
+      const clipRevision = original.clipRevision ? reserveCutRetry(cutOrigins.get(original.requestId), items.map(item => item.source)) : null
+      return enqueue({ ...original, requestId: operationId(), clipRevision, items })
     },
     canRetry(jobId) { const r = records.get(jobId); return !!(r?.settled && terminal(r.job.state) && r.retryItems.size && requests.has(r.job.requestId)) },
     retryInfo(jobId) {
@@ -201,6 +227,6 @@ export function createOperationClient({ api, listen, onOutcomes = () => {}, onSe
       await this.idle()
       return snapshot
     },
-    dispose() { disposed = true; unlisten?.(); records.clear(); requests.clear(); unresolved.clear(); retired.clear(); buffer.clear() },
+    dispose() { disposed = true; unlisten?.(); records.clear(); requests.clear(); unresolved.clear(); retired.clear(); cutOrigins.clear(); buffer.clear() },
   }
 }

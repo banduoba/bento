@@ -206,3 +206,111 @@ test('retrying an encrypted ZIP requires fresh password entry and never silently
   await h.run(()=>button(h,'压缩').props.onClick())
   assert.equal(b.requests.length,2);assert.equal(b.requests[1].options.password,'new-secret')
 })
+test('retry of a retained partial cut reserves its current revision and completion clears it',async t=>{
+  const b=operationBoundary(),h=await mountApp(t,b.api)
+  await h.run(()=>h.clipboard.setClip({mode:'cut',paths:['/src/a','/src/b']}))
+  await key(h,'v',{metaKey:true})
+  await b.emit(h,'j1',{state:'partial',phase:'finished'},[
+    outcome({itemId:'i0',source:'/src/a',sourceDisposition:'removed'}),
+    outcome({itemId:'i1',source:'/src/b',status:'failed',effectId:null,published:false,actualDestination:null,retry:'retryItem',affectedDirectories:[]}),
+  ])
+  const retained=h.clipboard.getClip()
+  assert.deepEqual(retained.paths,['/src/b'])
+  await h.run(()=>button(h,'重试未完成项目').props.onClick())
+  await key(h,'v',{metaKey:true})
+  assert.equal(b.requests.length,2)
+  assert.equal(b.requests[1].clipRevision,retained.revision)
+  await b.emit(h,'j2',{state:'completed',phase:'finished'},[outcome({itemId:'i1',source:'/src/b',sourceDisposition:'removed',effectId:'retry-b'})])
+  assert.equal(h.clipboard.getClip(),null)
+})
+test('retrying an older partial cut does not associate or clear a newer cut with identical paths',async t=>{
+  const b=operationBoundary(),h=await mountApp(t,b.api)
+  await h.run(()=>h.clipboard.setClip({mode:'cut',paths:['/src/a','/src/b']}))
+  await key(h,'v',{metaKey:true})
+  await b.emit(h,'j1',{state:'partial',phase:'finished'},[
+    outcome({itemId:'i0',source:'/src/a',sourceDisposition:'removed'}),
+    outcome({itemId:'i1',source:'/src/b',status:'failed',effectId:null,published:false,actualDestination:null,retry:'retryItem',affectedDirectories:[]}),
+  ])
+  await h.run(()=>h.clipboard.setClip({mode:'cut',paths:['/src/b']}))
+  const newer=h.clipboard.getClip()
+  await h.run(()=>button(h,'重试未完成项目').props.onClick())
+  assert.equal(b.requests[1].clipRevision,null)
+  await b.emit(h,'j2',{state:'completed',phase:'finished'},[outcome({itemId:'i1',source:'/src/b',sourceDisposition:'removed',effectId:'retry-b'})])
+  assert.equal(h.clipboard.getClip(),newer)
+})
+test('definitively rejected cut paste releases its reservation even when another submission stays uncertain',async t=>{
+  const b=operationBoundary();let rejectCut=false
+  const h=await mountApp(t,{...b.api,enqueueOperation:async request=>{
+    if(request.clipRevision&&rejectCut)throw{code:'admissionRejected',message:'invalid destination',phase:'preparing'}
+    if(!request.clipRevision)throw Error('transport unavailable')
+    return b.api.enqueueOperation(request)
+  }})
+  await h.run(()=>h.panes[0].props.onDropTransfer('/dest',['/src/uncertain'],'copy'))
+  await h.run(()=>h.clipboard.setClip({mode:'cut',paths:['/src/a']}))
+  rejectCut=true;await key(h,'v',{metaKey:true})
+  const unchanged=h.clipboard.getClip()
+  rejectCut=false;await key(h,'v',{metaKey:true})
+  assert.equal(b.requests.length,1)
+  assert.equal(b.requests[0].clipRevision,unchanged.revision)
+})
+test('multi-page partial cut settlement preserves retry lineage and keeps clipId out of native requests',async t=>{
+  const b=operationBoundary(),h=await mountApp(t,b.api)
+  const sources=Array.from({length:201},(_,index)=>`/src/file-${index}`)
+  await h.run(()=>h.clipboard.setClip({mode:'cut',paths:sources}))
+  const initial=h.clipboard.getClip()
+  await key(h,'v',{metaKey:true})
+  const rows=sources.map((source,index)=>outcome({itemId:`i${index}`,source,actualDestination:`/dest/file-${index}`,sourceDisposition:'removed',effectId:`move-${index}`}))
+  rows[200]={...rows[200],status:'failed',effectId:null,published:false,actualDestination:null,sourceDisposition:'unchanged',retry:'retryItem',affectedDirectories:[]}
+  await b.emit(h,'j1',{state:'partial',phase:'finished'},rows)
+  const retained=h.clipboard.getClip()
+  assert.deepEqual(retained.paths,['/src/file-200'])
+  assert.equal(retained.clipId,initial.clipId)
+  assert.notEqual(retained.revision,initial.revision)
+  await h.run(()=>button(h,'重试未完成项目').props.onClick())
+  await key(h,'v',{metaKey:true})
+  assert.equal(b.requests.length,2)
+  assert.deepEqual(Object.keys(b.requests[1]).sort(),['clipRevision','destination','intent','items','kind','options','ownerTabId','requestId'])
+  assert.equal(Object.hasOwn(b.requests[1],'clipId'),false)
+  assert.equal(b.requests[1].clipRevision,retained.revision)
+  assert.deepEqual(b.requests[1].items,[{itemId:'i200',source:'/src/file-200'}])
+  await b.emit(h,'j2',{state:'completed',phase:'finished'},[outcome({itemId:'i200',source:'/src/file-200',sourceDisposition:'removed',effectId:'retry-200'})])
+  assert.equal(h.clipboard.getClip(),null)
+})
+test('a cut retry stays reserved across an unknown reply and releases only on definitive rejection',async t=>{
+  const b=operationBoundary(),h=await mountApp(t,b.api)
+  await h.run(()=>h.clipboard.setClip({mode:'cut',paths:['/src/a']}))
+  await key(h,'v',{metaKey:true})
+  await b.emit(h,'j1',{state:'failed',phase:'finished'},[outcome({status:'failed',effectId:null,published:false,actualDestination:null,retry:'retryItem',affectedDirectories:[]})])
+  const retained=h.clipboard.getClip(),attempts=[]
+  let definitive=false
+  h.api.enqueueOperation=async request=>{
+    attempts.push(request)
+    if(definitive)throw{code:'admissionRejected',message:'invalid destination',phase:'preparing'}
+    throw{code:'admissionUnknown',message:'reply unavailable',phase:'preparing'}
+  }
+  await h.run(()=>button(h,'重试未完成项目').props.onClick())
+  await key(h,'v',{metaKey:true})
+  assert.equal(attempts.length,1)
+  definitive=true
+  await h.run(()=>button(h,'同步并重试提交').props.onClick())
+  assert.equal(attempts.length,2)
+  assert.equal(attempts[0],attempts[1])
+  assert.equal(h.clipboard.getClip(),retained)
+  h.api.enqueueOperation=b.api.enqueueOperation
+  await key(h,'v',{metaKey:true})
+  assert.equal(b.requests.length,2)
+  assert.equal(b.requests[1].clipRevision,retained.revision)
+})
+test('definitively rejected rename stays visible as an error while idle close proceeds without an operations prompt',async t=>{
+  const b=operationBoundary(),h=await mountApp(t,{...b.api,enqueueOperation:async()=>{throw{code:'admissionRejected',message:'invalid target name',phase:'preparing'}}})
+  const id=paneId(h.panes[0]),entry={path:'/home/a',name:'a',is_dir:false}
+  await h.run(()=>h.panes[0].props.onMenu(id,entry,0,0))
+  await h.run(()=>button(h,'重新命名').props.onClick())
+  await h.run(()=>h.panes[0].props.onRenameChange('a/b'))
+  await h.run(()=>h.panes[0].props.onRenameCommit())
+  assert.equal(button(h,'同步并重试提交'),undefined)
+  assert.ok(h.root.findAll(n=>n.props.role==='alert').some(n=>n.children.filter(c=>typeof c==='string').join('').includes('invalid target name')))
+  let closing;await h.run(()=>{closing=h.close()});await h.run(()=>closing.pending)
+  assert.equal(h.destroyed,1)
+  assert.equal(button(h,'继续操作'),undefined)
+})

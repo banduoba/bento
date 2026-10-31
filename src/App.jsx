@@ -239,6 +239,7 @@ export default function App() {
   const operations = useRef(null)
   if (!operations.current) operations.current = createOperationClient({
     api, listen: hasTauri ? listen : async () => () => {},
+    onAdmissionRejected: ({ requestId }) => completionCallbacks.current.delete(requestId),
     onOutcomes: (job, rows) => operationEffects.current.outcomes(job, rows),
     onSettled: (job, summary) => {
       operationEffects.current.settled(job, summary)
