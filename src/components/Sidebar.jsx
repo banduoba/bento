@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { api } from '../api'
 import { labelOf } from '../format'
 import { IconDrive, IconFolder, IconHouse } from '../icons'
+import { getCachedIcon, requestSystemIcons, subscribeSystemIcons } from '../systemIcons'
 import homeIcon from '../assets/sidebar/Home.png'
 import desktopIcon from '../assets/sidebar/Desktop.png'
 import documentsIcon from '../assets/sidebar/Documents.png'
@@ -144,8 +145,7 @@ export default function Sidebar({
   const ref = useRef(null)
   const [vols, setVols] = useState([])
   const [dropKey, setDropKey] = useState(null)
-  const [nativeIcons, setNativeIcons] = useState({})
-  const iconCache = useRef({})
+  const [, setIconTick] = useState(0)
 
   useEffect(() => {
     let live = true
@@ -164,27 +164,16 @@ export default function Sidebar({
     if (home) paths.push(home)
     for (const f of favorites || []) if (f?.path) paths.push(f.path)
     for (const v of vols) if (v?.path) paths.push(v.path)
-    const missing = [...new Set(paths)].filter((p) => !Object.hasOwn(iconCache.current, p))
-    if (!missing.length) return
-    let live = true
-    api.fileIcons(missing).then((rows) => {
-      if (!live) return
-      const next = { ...iconCache.current }
-      const got = new Set()
-      for (const row of rows || []) {
-        if (!row?.path) continue
-        got.add(row.path)
-        next[row.path] = row
+    const want = new Set(paths)
+    requestSystemIcons(want)
+    return subscribeSystemIcons((updated) => {
+      for (const p of updated || []) {
+        if (want.has(p)) {
+          setIconTick((n) => n + 1)
+          return
+        }
       }
-      for (const p of missing) {
-        if (!got.has(p)) next[p] = { path: p, icon: null, template: false }
-      }
-      iconCache.current = next
-      setNativeIcons(next)
-    }).catch(() => {})
-    return () => {
-      live = false
-    }
+    })
   }, [home, favorites, vols])
 
   // 原生事件探针：确认 DOM 是否收到点击（与 React 合成事件无关）
@@ -200,8 +189,8 @@ export default function Sidebar({
     <div className="sidebar" ref={ref}>
       <div className="sb-title">个人收藏</div>
       <FavItem
-        icon={nativeIcons[home]?.icon
-          ? <SystemIcon src={nativeIcons[home].icon} template={!!nativeIcons[home].template} />
+        icon={getCachedIcon(home)?.icon
+          ? <SystemIcon src={getCachedIcon(home).icon} template={!!getCachedIcon(home).template} />
           : home
             ? <SystemIcon src={homeIcon} template />
             : <IconHouse size={15} />}
@@ -218,7 +207,7 @@ export default function Sidebar({
       {favorites.map((f) => (
         <FavItem
           key={f.path}
-          icon={<FavoriteIcon favorite={f} native={nativeIcons[f.path]} />}
+          icon={<FavoriteIcon favorite={f} native={getCachedIcon(f.path)} />}
           label={labelOf(f.path, home)}
           path={f.path}
           removable
@@ -237,8 +226,8 @@ export default function Sidebar({
           {vols.map((v) => (
             <FavItem
               key={v.path}
-              icon={nativeIcons[v.path]?.icon
-                ? <SystemIcon src={nativeIcons[v.path].icon} template={!!nativeIcons[v.path].template} />
+              icon={getCachedIcon(v.path)?.icon
+                ? <SystemIcon src={getCachedIcon(v.path).icon} template={!!getCachedIcon(v.path).template} />
                 : <IconDrive size={15} />}
               label={v.name}
               path={v.path}

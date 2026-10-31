@@ -690,7 +690,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   position: absolute;
   left: 0;
   right: 0;
-  height: 28px;
+  height: 30px;
   cursor: default;
 }
 .row.even { background: var(--row-stripe); }
@@ -795,33 +795,34 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .row-kind, .row-date { text-align: left; }
 
 .fileicon {
-  width: 26px;
-  height: 26px;
+  width: 16px;
+  height: 16px;
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
 }
+.fileicon .sb-system-icon { width: 16px; height: 16px; }
 .thumb {
-  width: 24px;
-  height: 24px;
+  width: 16px;
+  height: 16px;
   object-fit: cover;
-  border-radius: 5px;
+  border-radius: 3px;
   border: 0.5px solid var(--hairline);
   background: var(--icon-bg);
 }
 .exttile {
-  width: 24px;
-  height: 24px;
-  border-radius: 5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
   color: #fff;
-  font-size: 8px;
-  font-weight: 700;
+  font-size: 7px;
+  font-weight: 650;
   display: flex;
   align-items: center;
   justify-content: center;
   text-transform: uppercase;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
 }
 
 /* 复制成功提示条（含复制内容） */
@@ -1382,7 +1383,7 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .search-item {
   position: relative;
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr);
+  grid-template-columns: 16px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   min-height: 44px;
@@ -1394,8 +1395,8 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .search-item:nth-child(even) { background: var(--row-stripe); }
 .search-item:hover { background: var(--row-hover); }
 .search-item.on, .search-item.on:hover { background: var(--row-sel-focus); }
-.search-item .fileicon { width: 24px; height: 24px; margin: 0; }
-.search-item .thumb, .search-item .exttile { width: 24px; height: 24px; }
+.search-item .fileicon { width: 16px; height: 16px; margin: 0; }
+.search-item .thumb, .search-item .exttile { width: 16px; height: 16px; }
 .search-file { display: contents; }
 .search-actions {
   position: absolute;
