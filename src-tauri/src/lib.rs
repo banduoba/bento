@@ -862,12 +862,21 @@ async fn home_dir() -> Result<String, String> {
 /// 避免 canonicalize 落到进程工作目录。
 fn expand_user_path(raw: &str) -> Result<PathBuf, String> {
     let s = raw.trim();
+    if s == "~" || s.starts_with("~/") {
+        let home = std::env::var("HOME").map_err(|_| "无法获取主目录".to_string())?;
+        return expand_with_home(s, &home);
+    }
+    expand_with_home(s, "")
+}
+
+/// `home` 仅在 `~` / `~/` 时使用。绝对路径与非法 `~user` 不读主目录。
+fn expand_with_home(raw: &str, home: &str) -> Result<PathBuf, String> {
+    let s = raw.trim();
     if s.is_empty() {
         return Err("请输入路径".into());
     }
+    let home = home.trim_end_matches('/');
     if s == "~" || s.starts_with("~/") {
-        let home = std::env::var("HOME").map_err(|_| "无法获取主目录".to_string())?;
-        let home = home.trim_end_matches('/');
         if s == "~" {
             return Ok(PathBuf::from(home));
         }
@@ -904,6 +913,201 @@ async fn resolve_path(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || resolve_existing_dir(&path))
         .await
         .map_err(|e| e.to_string())?
+}
+
+const COMPLETE_PATH_LIMIT: usize = 50;
+
+#[derive(Serialize, Clone, Debug)]
+struct PathMatch {
+    name: String,
+    is_dir: bool,
+}
+
+#[derive(Serialize, Clone, Debug)]
+struct PathCompletion {
+    /// 写回地址栏的文本。保留用户输入的 `~`；唯一的目录会带上末尾 `/`。
+    text: String,
+    /// 未完成的那一段之前的部分（含末尾 `/`）。前端用它拼接候选。
+    base: String,
+    matches: Vec<PathMatch>,
+}
+
+/// 地址栏 Tab：只读一层目录，按前缀返回至多 50 个候选。
+#[tauri::command]
+async fn complete_path(path: String) -> Result<PathCompletion, String> {
+    tauri::async_runtime::spawn_blocking(move || complete_path_blocking(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn complete_path_blocking(raw: &str) -> Result<PathCompletion, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("请输入路径".into());
+    }
+    if s == "~" || s.starts_with("~/") {
+        let home = std::env::var("HOME").map_err(|_| "无法获取主目录".to_string())?;
+        return complete_with_home(s, &home);
+    }
+    complete_with_home(s, "")
+}
+
+fn complete_with_home(raw: &str, home: &str) -> Result<PathCompletion, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("请输入路径".into());
+    }
+    let base = completion_base(s);
+    let (dir, prefix) = completion_dir_and_prefix(s, home)?;
+    let matches = read_prefix_matches(&dir, &prefix)?;
+    let text = completion_text(&base, &prefix, &matches);
+    let matches = matches.into_iter().take(COMPLETE_PATH_LIMIT).collect();
+    Ok(PathCompletion {
+        text,
+        base,
+        matches,
+    })
+}
+
+/// 保留用户写下的 `~`，并保证 base 以 `/` 结尾，方便直接拼接名字。
+fn completion_base(s: &str) -> String {
+    if s == "~" || s == "~/" {
+        return "~/".to_string();
+    }
+    if s.ends_with('/') {
+        return s.to_string();
+    }
+    match s.rfind('/') {
+        Some(i) => s[..=i].to_string(),
+        None => String::new(),
+    }
+}
+
+fn completion_dir_and_prefix(s: &str, home: &str) -> Result<(PathBuf, String), String> {
+    let list_children = s == "~" || s.ends_with('/');
+    let expanded = expand_with_home(s, home)?;
+    if list_children {
+        return Ok((strip_trailing_slashes(expanded), String::new()));
+    }
+    let prefix = expanded
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let parent = expanded
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("/"));
+    Ok((parent, prefix))
+}
+
+fn strip_trailing_slashes(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    if s == "/" {
+        return PathBuf::from("/");
+    }
+    let trimmed = s.trim_end_matches('/');
+    if trimmed.is_empty() {
+        PathBuf::from("/")
+    } else {
+        PathBuf::from(trimmed)
+    }
+}
+
+fn read_prefix_matches(dir: &Path, prefix: &str) -> Result<Vec<PathMatch>, String> {
+    let shown = dir.display().to_string();
+    match fs::metadata(dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err(format!("不是文件夹: {shown}")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(format!("路径不存在: {shown}"));
+        }
+        Err(e) => return Err(format!("无法打开路径 {shown}: {e}")),
+    }
+    let rd = fs::read_dir(dir).map_err(|e| format!("无法读取目录 {shown}: {e}"))?;
+    // 与 shell 一样：前缀不是 `.` 时不补全隐藏项，避免空前缀被点文件占满 50 个名额。
+    let want_hidden = prefix.starts_with('.');
+    let prefix_lower = prefix.to_lowercase();
+    let mut matches = Vec::new();
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == "." || name == ".." {
+            continue;
+        }
+        if !want_hidden && name.starts_with('.') {
+            continue;
+        }
+        if !prefix_lower.is_empty() && !name.to_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        matches.push(PathMatch {
+            name,
+            is_dir: entry_is_dir(&entry),
+        });
+    }
+    matches.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| {
+            a.name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.name.cmp(&b.name))
+        })
+    });
+    Ok(matches)
+}
+
+fn entry_is_dir(entry: &fs::DirEntry) -> bool {
+    match entry.file_type() {
+        Ok(ft) if ft.is_dir() => true,
+        Ok(ft) if ft.is_symlink() => fs::metadata(entry.path())
+            .map(|m| m.is_dir())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn completion_text(base: &str, prefix: &str, matches: &[PathMatch]) -> String {
+    if matches.is_empty() {
+        return format!("{base}{prefix}");
+    }
+    if matches.len() == 1 {
+        let slash = if matches[0].is_dir { "/" } else { "" };
+        return format!("{base}{}{slash}", matches[0].name);
+    }
+    let common = common_prefix_ci(matches.iter().map(|m| m.name.as_str()));
+    if common.chars().count() >= prefix.chars().count() && common_ci_starts_with(&common, prefix) {
+        return format!("{base}{common}");
+    }
+    format!("{base}{prefix}")
+}
+
+fn common_ci_starts_with(text: &str, prefix: &str) -> bool {
+    text.to_lowercase().starts_with(&prefix.to_lowercase())
+}
+
+fn common_prefix_ci<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    let mut names = names;
+    let Some(first) = names.next() else {
+        return String::new();
+    };
+    let mut chars: Vec<char> = first.chars().collect();
+    for name in names {
+        let other: Vec<char> = name.chars().collect();
+        let n = chars.len().min(other.len());
+        let mut i = 0;
+        while i < n && chars_eq_ci(chars[i], other[i]) {
+            i += 1;
+        }
+        chars.truncate(i);
+        if chars.is_empty() {
+            break;
+        }
+    }
+    chars.into_iter().collect()
+}
+
+fn chars_eq_ci(a: char, b: char) -> bool {
+    a == b || a.to_lowercase().eq(b.to_lowercase())
 }
 
 /// 前端错误黑匣子：webview 的 JS 错误写入 dev 日志
@@ -1785,6 +1989,7 @@ pub fn run() {
             disk_space,
             home_dir,
             resolve_path,
+            complete_path,
             log_debug,
             append_trace_log,
             append_error_log,
@@ -1850,6 +2055,184 @@ mod resolve_path_tests {
         let err = resolve_existing_dir(file.to_str().unwrap()).unwrap_err();
         assert!(err.starts_with("不是文件夹:"), "{}", err);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod complete_path_tests {
+    use super::{
+        complete_path_blocking, complete_with_home, completion_base, completion_text, PathMatch,
+    };
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let p =
+            std::env::temp_dir().join(format!("bento-complete-{}-{n}-{seq}", std::process::id()));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    fn names(dir: &PathBuf, prefix: &str) -> Vec<String> {
+        let path = if prefix.is_empty() {
+            format!("{}/", dir.display())
+        } else {
+            format!("{}/{}", dir.display(), prefix)
+        };
+        complete_path_blocking(&path)
+            .unwrap()
+            .matches
+            .into_iter()
+            .map(|m| m.name)
+            .collect()
+    }
+
+    #[test]
+    fn base_keeps_tilde_and_trailing_slash() {
+        assert_eq!(completion_base("~"), "~/");
+        assert_eq!(completion_base("~/"), "~/");
+        assert_eq!(completion_base("~/Doc"), "~/");
+        assert_eq!(completion_base("~/Documents/"), "~/Documents/");
+        assert_eq!(completion_base("/usr/loc"), "/usr/");
+        assert_eq!(completion_base("/"), "/");
+    }
+
+    #[test]
+    fn text_adds_slash_only_for_a_unique_directory() {
+        let dir = PathMatch {
+            name: "Documents".into(),
+            is_dir: true,
+        };
+        let file = PathMatch {
+            name: "notes.txt".into(),
+            is_dir: false,
+        };
+        assert_eq!(completion_text("~/", "Doc", &[dir.clone()]), "~/Documents/");
+        assert_eq!(completion_text("~/", "note", &[file]), "~/notes.txt");
+        let many = [
+            PathMatch {
+                name: "Documents".into(),
+                is_dir: true,
+            },
+            PathMatch {
+                name: "Downloads".into(),
+                is_dir: true,
+            },
+        ];
+        // 两者共享的 `Do` 比已输入的 `D` 更长，补到分叉点。
+        assert_eq!(completion_text("~/", "D", &many), "~/Do");
+        assert_eq!(completion_text("~/", "Do", &many), "~/Do");
+    }
+
+    #[test]
+    fn tilde_completes_unique_directory_without_expanding_in_the_text() {
+        let home = scratch();
+        fs::create_dir(home.join("Documents")).unwrap();
+        fs::create_dir(home.join("Downloads")).unwrap();
+        let got = complete_with_home("~/Doc", home.to_str().unwrap()).unwrap();
+        assert_eq!(got.base, "~/");
+        assert_eq!(got.text, "~/Documents/");
+        assert_eq!(got.matches.len(), 1);
+        assert_eq!(got.matches[0].name, "Documents");
+        assert!(got.matches[0].is_dir);
+
+        let many = complete_with_home("~/D", home.to_str().unwrap()).unwrap();
+        assert_eq!(many.base, "~/");
+        assert_eq!(many.text, "~/Do");
+        assert_eq!(many.matches.len(), 2);
+        assert_eq!(many.matches[0].name, "Documents");
+        assert_eq!(many.matches[1].name, "Downloads");
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn case_insensitive_prefix_one_level_only() {
+        let dir = scratch();
+        fs::create_dir_all(dir.join("Documents/nested")).unwrap();
+        fs::write(dir.join("notes.txt"), b"hi").unwrap();
+        let got = complete_path_blocking(&format!("{}/doc", dir.display())).unwrap();
+        assert_eq!(got.matches.len(), 1);
+        assert!(got.text.ends_with("/Documents/"), "{}", got.text);
+        let listed = names(&dir, "");
+        assert!(listed.contains(&"Documents".to_string()));
+        assert!(listed.contains(&"notes.txt".to_string()));
+        assert!(!listed.iter().any(|n| n == "nested"));
+        let file = complete_path_blocking(&format!("{}/note", dir.display())).unwrap();
+        assert!(file.text.ends_with("/notes.txt"), "{}", file.text);
+        assert!(!file.text.ends_with('/'));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hidden_entries_only_match_a_dot_prefix() {
+        let dir = scratch();
+        fs::create_dir(dir.join(".secret")).unwrap();
+        fs::create_dir(dir.join("Visible")).unwrap();
+        let all = names(&dir, "");
+        assert!(all.contains(&"Visible".to_string()));
+        assert!(!all.contains(&".secret".to_string()));
+        let hid = complete_path_blocking(&format!("{}/.se", dir.display())).unwrap();
+        assert_eq!(hid.matches.len(), 1);
+        assert_eq!(hid.matches[0].name, ".secret");
+        assert!(hid.text.ends_with("/.secret/"), "{}", hid.text);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn caps_at_fifty_but_common_prefix_sees_every_match() {
+        let dir = scratch();
+        for i in 0..50 {
+            fs::create_dir(dir.join(format!("m-a{i:02}"))).unwrap();
+        }
+        fs::create_dir(dir.join("m-b")).unwrap();
+        let got = complete_path_blocking(&format!("{}/m", dir.display())).unwrap();
+        assert_eq!(got.matches.len(), 50);
+        assert!(got.matches.iter().all(|m| m.name != "m-b"));
+        // `m-b` is past the cap, but it still keeps the shared prefix from growing to `m-a`.
+        assert!(got.text.ends_with("/m-"), "{}", got.text);
+        assert!(!got.text.ends_with("/m-a"), "{}", got.text);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_missing_file_and_relative_paths() {
+        let dir = scratch();
+        fs::write(dir.join("file.txt"), b"x").unwrap();
+        let missing = complete_path_blocking(&format!("{}/nope/a", dir.display())).unwrap_err();
+        assert!(missing.starts_with("路径不存在:"), "{missing}");
+        let file = complete_path_blocking(&format!("{}/file.txt/a", dir.display())).unwrap_err();
+        assert!(file.starts_with("不是文件夹:"), "{file}");
+        assert!(complete_path_blocking("Doc")
+            .unwrap_err()
+            .contains("绝对路径"));
+        assert!(complete_path_blocking("~bob/Doc")
+            .unwrap_err()
+            .contains("仅支持"));
+        assert!(complete_path_blocking("   ")
+            .unwrap_err()
+            .contains("请输入路径"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_to_directory_completes_with_slash() {
+        let dir = scratch();
+        fs::create_dir(dir.join("Documents")).unwrap();
+        std::os::unix::fs::symlink(dir.join("Documents"), dir.join("DocsLink")).unwrap();
+        let got = complete_path_blocking(&format!("{}/DocsL", dir.display())).unwrap();
+        assert_eq!(got.matches.len(), 1);
+        assert!(got.matches[0].is_dir);
+        assert!(got.text.ends_with("/DocsLink/"), "{}", got.text);
         let _ = fs::remove_dir_all(&dir);
     }
 }

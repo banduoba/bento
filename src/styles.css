@@ -618,6 +618,7 @@ input, textarea {
 /* 可编辑路径输入框 */
 .path-edit {
   position: relative;
+  z-index: 7;
   flex: 1;
   min-width: 0;
   display: flex;
@@ -660,6 +661,46 @@ input, textarea {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.path-suggest {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  max-height: 240px;
+  overflow: auto;
+  background: var(--popover-bg);
+  backdrop-filter: blur(20px);
+  border: 0.5px solid var(--popover-border);
+  border-radius: 12px;
+  box-shadow: var(--popover-shadow);
+  padding: 4px;
+}
+.path-suggest button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--text);
+  padding: 5px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-family: inherit;
+  min-width: 0;
+}
+.path-suggest button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.path-suggest button svg { flex: none; }
+.path-suggest button:hover { background: var(--hover-bg); }
+.path-suggest button.on,
+.path-suggest button.on:hover { background: var(--accent); color: #fff; }
 .crumb {
   border: none;
   background: transparent;

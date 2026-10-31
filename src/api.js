@@ -27,6 +27,7 @@ export const api = hasTauri
       diskSpace: (path) => invoke('disk_space', { path }),
       homeDir: () => invoke('home_dir'),
       resolvePath: (path) => invoke('resolve_path', { path }),
+      completePath: (path) => invoke('complete_path', { path }),
       fileIcons: (paths) => invoke('file_icons', { paths }),
       loadConfig: () => invoke('load_config'),
       saveConfig: (config) => invoke('save_config', { config }),
@@ -91,6 +92,85 @@ function mockApi() {
     if (hit?.is_dir) return Promise.resolve(canonical)
     if (hit) return Promise.reject(`不是文件夹: ${canonical}`)
     return Promise.reject(`路径不存在: ${canonical}`)
+  }
+  const normalizeDir = (p) => {
+    const parts = []
+    for (const seg of String(p).split('/')) {
+      if (!seg || seg === '.') continue
+      if (seg === '..') parts.pop()
+      else parts.push(seg)
+    }
+    return `/${parts.join('/')}`
+  }
+  const charsEqCi = (a, b) => a === b || a.toLowerCase() === b.toLowerCase()
+  const commonPrefixCi = (names) => {
+    if (!names.length) return ''
+    let chars = [...names[0]]
+    for (const name of names.slice(1)) {
+      const other = [...name]
+      let i = 0
+      const n = Math.min(chars.length, other.length)
+      while (i < n && charsEqCi(chars[i], other[i])) i++
+      chars = chars.slice(0, i)
+      if (!chars.length) break
+    }
+    return chars.join('')
+  }
+  // 与 Rust complete_path 同一套规则：展开 ~、只读一层、前缀匹配、最多 50 条。
+  const mockCompletePath = (path) => {
+    const home = '/Users/demo'
+    const raw = (path || '').trim()
+    if (!raw) return Promise.reject('请输入路径')
+    if (raw.startsWith('~') && raw !== '~' && !raw.startsWith('~/')) {
+      return Promise.reject('仅支持 ~ 与 ~/ 开头的路径')
+    }
+    if (!raw.startsWith('~') && !raw.startsWith('/')) {
+      return Promise.reject('请输入绝对路径或以 ~ 开头的路径')
+    }
+    const listChildren = raw === '~' || raw.endsWith('/')
+    const base = raw === '~' || raw === '~/' ? '~/' : raw.endsWith('/') ? raw : raw.slice(0, raw.lastIndexOf('/') + 1)
+    let expanded
+    if (raw === '~') expanded = home
+    else if (raw.startsWith('~/')) expanded = home + raw.slice(1)
+    else expanded = raw
+    expanded = expanded.replace(/\/+$/, '') || '/'
+    let dir
+    let prefix
+    if (listChildren) {
+      dir = expanded
+      prefix = ''
+    } else {
+      const slash = expanded.lastIndexOf('/')
+      dir = slash <= 0 ? '/' : expanded.slice(0, slash)
+      prefix = expanded.slice(slash + 1)
+    }
+    dir = normalizeDir(dir)
+    const entries = TREE[dir]
+    if (!entries) return Promise.reject(`路径不存在: ${dir}`)
+    const wantHidden = prefix.startsWith('.')
+    const pfx = prefix.toLowerCase()
+    const matches = entries
+      .filter((e) => {
+        if (!wantHidden && e.name.startsWith('.')) return false
+        if (pfx && !e.name.toLowerCase().startsWith(pfx)) return false
+        return true
+      })
+      .map((e) => ({ name: e.name, is_dir: !!e.is_dir }))
+      .sort((a, b) => {
+        if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }) || a.name.localeCompare(b.name)
+      })
+    let text
+    if (!matches.length) text = base + prefix
+    else if (matches.length === 1) text = base + matches[0].name + (matches[0].is_dir ? '/' : '')
+    else {
+      const common = commonPrefixCi(matches.map((m) => m.name))
+      text =
+        [...common].length >= [...prefix].length && common.toLowerCase().startsWith(pfx)
+          ? base + common
+          : base + prefix
+    }
+    return Promise.resolve({ text, base, matches: matches.slice(0, 50) })
   }
   const fillPath = (dir, entries) => entries.map((e) => ({ ...e, path: `${dir}/${e.name}` }))
   return {
@@ -209,6 +289,7 @@ function mockApi() {
     diskSpace: () => Promise.resolve(500e9),
     homeDir: () => Promise.resolve('/Users/demo'),
     resolvePath: (path) => mockResolvePath(path),
+    completePath: (path) => mockCompletePath(path),
     fileIcons: (paths) =>
       Promise.resolve((paths || []).map((path) => ({ path, icon: null, template: false }))),
     // 浏览器测试视图也用 localStorage 记住工作区/布局，行为与真实 app 一致

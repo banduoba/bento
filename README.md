@@ -49,7 +49,7 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | **Batch rename** | Replace, add, format (with counters and dates) and change case, with a live before/after preview. |
 | **Flexible columns** | Name · Modified · Created · Size · Kind. Drag column borders to resize, right-click the header to choose columns — settings are **per pane**. Long names are shortened in the middle (`Product…admap.pptx`) and secondary columns hide automatically in narrow panes. |
 | **Live folders** | Panes refresh as files change on disk (FSEvents), including expanded sub-folders. Can be switched off in Settings. |
-| **Keyboard-first** | Editable address bar (<kbd>⌘L</kbd>), arrow-key navigation, inline folder expansion, Quick Look on <kbd>Space</kbd>, always-on-top pin (<kbd>⌥⌘T</kbd>). |
+| **Keyboard-first** | Editable address bar (<kbd>⌘L</kbd>, <kbd>Tab</kbd> to complete), copy paths (<kbd>⌥⌘C</kbd>), arrow-key navigation, inline folder expansion, Quick Look on <kbd>Space</kbd>, always-on-top pin (<kbd>⌥⌘T</kbd>). |
 | **Remembers everything** | Window frame, layout, tabs, paths, sort order, column widths and preferences are restored on launch. Follows the system light / dark appearance. |
 
 <table>
@@ -121,6 +121,8 @@ npm run dev        # Tauri dev mode with hot reload
 | <kbd>⌘T</kbd> · <kbd>⌘W</kbd> · <kbd>⌃Tab</kbd> | New tab · close tab · next tab |
 | <kbd>⌘K</kbd> or <kbd>⌥⌘F</kbd> | Open search |
 | <kbd>⌘L</kbd> or <kbd>⇧⌘G</kbd> | Edit the path |
+| <kbd>Tab</kbd> | Complete the address-bar path; list matches when several fit |
+| <kbd>⌥⌘C</kbd> | Copy the full path of the selection (one path per line) |
 | <kbd>⌘[</kbd> · <kbd>⌘]</kbd> | Back · forward |
 | <kbd>⌘C</kbd> · <kbd>⌘X</kbd> · <kbd>⌘V</kbd> · <kbd>⌘D</kbd> | Copy · cut · paste · duplicate |
 | <kbd>⌘⌫</kbd> · <kbd>⌘Z</kbd> | Move to Trash · undo |

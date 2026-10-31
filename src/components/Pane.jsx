@@ -69,8 +69,13 @@ export default function Pane({
   const [editingPath, setEditingPath] = useState(null) // 非空 = 地址栏编辑中
   const [pathError, setPathError] = useState(null) // 回车跳转失败时的行内错误，保留输入
   const [pathFocusNonce, setPathFocusNonce] = useState(0) // ⌘L / 铅笔：进入编辑后聚焦并全选
+  const [completions, setCompletions] = useState(null) // { base, matches, active } Tab 候选；active < 0 表示还没选定一条
+  const completionsRef = useRef(null) // 与 state 同步，连按 Tab 时不用等下一次渲染
   const editSeq = useRef(0) // 作废过期的 resolve（继续输入、Esc、再次 ⌘L）
+  const completeSeq = useRef(0) // 作废过期的补全
   const pathEditClosed = useRef(false)
+  const caretRef = useRef(null) // 补全写入后把光标放到末尾，避免沿用进入编辑时的全选
+  const suggestRef = useRef(null)
   const [collapsedCount, setCollapsedCount] = useState(0) // 面包屑溢出时折叠的前置层级数
   const [copiedPath, setCopiedPath] = useState(null) // 行内复制路径反馈
   const [copyToast, setCopyToast] = useState(null) // { path, x, y, placeLeft } 锚定按钮的提示条
@@ -80,6 +85,11 @@ export default function Pane({
   const kidsRef = useRef({}) // dirPath -> 子条目数组（null=载入中）
   const copyTimer = useRef(null)
   const toastTimer = useRef(null)
+  completionsRef.current = completions
+  const setCompletionList = (next) => {
+    completionsRef.current = next
+    setCompletions(next)
+  }
   const showCopyToast = (path, btnRect) => {
     setCopiedPath(path)
     // 提示条出现在按钮旁边：默认右侧垂直居中，右侧空间不足则翻到左侧
@@ -502,8 +512,11 @@ export default function Pane({
   // 地址栏进入编辑模式（点击路径空白/末尾区、铅笔、⌘L 或 ⌘⇧G 信号）
   const beginPathEdit = () => {
     editSeq.current += 1
+    completeSeq.current += 1
     pathEditClosed.current = false
     setPathError(null)
+    setCompletionList(null)
+    caretRef.current = null
     setEditingPath(tab.path)
     setPathFocusNonce((n) => n + 1)
   }
@@ -524,17 +537,51 @@ export default function Pane({
   // 导航后退出编辑模式
   useEffect(() => {
     editSeq.current += 1
+    completeSeq.current += 1
     pathEditClosed.current = true
     setPathError(null)
+    setCompletionList(null)
     setEditingPath(null)
   }, [tab.id, tab.path])
 
   const cancelPathEdit = () => {
     editSeq.current += 1
+    completeSeq.current += 1
     pathEditClosed.current = true
     setPathError(null)
+    setCompletionList(null)
+    caretRef.current = null
     setEditingPath(null)
   }
+
+  // 补全会替换整段文本。同步把光标放到末尾；值没变时 effect 不会跑，所以这里也直接拨一次。
+  const writePathText = (text) => {
+    caretRef.current = text.length
+    setEditingPath(text)
+    requestAnimationFrame(() => {
+      const el = pathInputRef.current
+      if (!el || el.value !== text) return
+      try {
+        el.setSelectionRange(text.length, text.length)
+      } catch {}
+    })
+  }
+
+  useEffect(() => {
+    if (caretRef.current == null || editingPath == null) return
+    const pos = caretRef.current
+    caretRef.current = null
+    const el = pathInputRef.current
+    if (!el) return
+    try {
+      el.setSelectionRange(pos, pos)
+    } catch {}
+  }, [editingPath])
+
+  useEffect(() => {
+    if (!completions || completions.active < 0) return
+    suggestRef.current?.querySelector('[data-active="true"]')?.scrollIntoView({ block: 'nearest' })
+  }, [completions])
 
   const pathErrorText = (e) => {
     if (typeof e === 'string' && e.trim()) return e
@@ -543,9 +590,13 @@ export default function Pane({
   }
 
   // Enter / 失焦提交。失败时留在编辑态，不清空已输入的文本。
-  const commitPathEdit = async () => {
+  // override 是字符串时用它（候选刚写入，受控输入的 DOM 值可能还是旧的）。
+  const commitPathEdit = async (override) => {
     if (pathEditClosed.current || editingPath == null) return
-    const v = (pathInputRef.current?.value ?? editingPath).trim()
+    completeSeq.current += 1
+    setCompletionList(null)
+    const raw = typeof override === 'string' ? override : (pathInputRef.current?.value ?? editingPath)
+    const v = raw.trim()
     if (!v) {
       setPathError('请输入路径')
       return
@@ -569,6 +620,99 @@ export default function Pane({
       if (seq !== editSeq.current || pathEditClosed.current) return
       setPathError(pathErrorText(err))
     }
+  }
+
+  const requestCompletion = async () => {
+    if (pathEditClosed.current || editingPath == null) return
+    const v = (pathInputRef.current?.value ?? editingPath).trim()
+    if (!v) return
+    const seq = ++completeSeq.current
+    try {
+      const res = await api.completePath(v)
+      if (seq !== completeSeq.current || pathEditClosed.current) return
+      const matches = Array.isArray(res?.matches) ? res.matches : []
+      if (!matches.length) return
+      const base = typeof res.base === 'string' ? res.base : ''
+      let text = typeof res.text === 'string' ? res.text : v
+      let active = -1
+      // 已经补到分叉点：Tab 再按一次才选定第一条。还没分叉（文本没变长）就直接选定第一条。
+      if (matches.length > 1 && text === v) {
+        active = 0
+        const m = matches[0]
+        text = `${base}${m.name}${m.is_dir ? '/' : ''}`
+      }
+      writePathText(text)
+      setPathError(null)
+      setCompletionList(matches.length > 1 ? { base, matches, active } : null)
+    } catch {
+      // 目录读不了或路径还不完整：保持原输入，不打断编辑
+    }
+  }
+
+  const stepCompletion = (dir) => {
+    const list = completionsRef.current
+    if (!list?.matches?.length) return
+    const n = list.matches.length
+    const cur = list.active
+    const i = cur < 0 ? (dir > 0 ? 0 : n - 1) : (cur + dir + n) % n
+    const m = list.matches[i]
+    writePathText(`${list.base}${m.name}${m.is_dir ? '/' : ''}`)
+    setCompletionList({ ...list, active: i })
+  }
+
+  // navigate：Enter / 点击确认后按现有回车逻辑跳转。方向键和 Tab 只预览，不跳转。
+  const acceptCompletion = (index, navigate) => {
+    const list = completionsRef.current
+    if (!list?.matches?.length) return
+    const i = Math.max(0, Math.min(index, list.matches.length - 1))
+    const m = list.matches[i]
+    const text = `${list.base}${m.name}${m.is_dir ? '/' : ''}`
+    writePathText(text)
+    if (navigate) commitPathEdit(text)
+    else setCompletionList({ ...list, active: i })
+  }
+
+  const onPathKeyDown = (e) => {
+    const composing = e.nativeEvent.isComposing || e.keyCode === 229
+    const list = completionsRef.current
+    if (e.key === 'Tab') {
+      // ⌃Tab 仍交给全局快捷键切换标签
+      if (e.ctrlKey) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (composing) return
+      if (list?.matches?.length > 1) stepCompletion(e.shiftKey ? -1 : 1)
+      else requestCompletion()
+      return
+    }
+    if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && list?.matches?.length > 1 && !composing) {
+      e.preventDefault()
+      e.stopPropagation()
+      stepCompletion(e.key === 'ArrowDown' ? 1 : -1)
+      return
+    }
+    if (e.key === 'Enter') {
+      if (composing) return
+      e.preventDefault()
+      e.stopPropagation()
+      // 已经高亮某一条时 Enter 按该候选跳转；否则仍是原来的「按输入框内容跳转」
+      if (list?.matches?.length > 1 && list.active >= 0) acceptCompletion(list.active, true)
+      else commitPathEdit()
+      return
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      if (list) {
+        completeSeq.current += 1
+        setCompletionList(null)
+        return
+      }
+      cancelPathEdit()
+      return
+    }
+    // 普通按键不外泄；⌘ 组合键（⌘C/⌘V/⌘A…）放行给全局文本快捷键
+    if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
   }
 
   // 重命名输入框聚焦并选中主名（不含扩展名）
@@ -763,39 +907,63 @@ export default function Pane({
               ref={pathInputRef}
               className="path-input"
               value={editingPath}
-              title={pathError || '输入路径后回车跳转，Esc 取消'}
+              title={pathError || '输入路径后回车跳转，Tab 补全，Esc 取消'}
               aria-invalid={pathError ? true : undefined}
               aria-errormessage={pathError ? `path-edit-error-${tab.id}` : undefined}
+              aria-autocomplete="list"
+              aria-expanded={completions?.matches?.length > 1 ? true : undefined}
+              aria-controls={completions?.matches?.length > 1 ? `path-suggest-${tab.id}` : undefined}
               onChange={(e) => {
-                // 继续输入时作废尚未返回的解析，避免旧结果把窗格带走
+                // 继续输入时作废尚未返回的解析和补全，避免旧结果把窗格带走
                 editSeq.current += 1
+                completeSeq.current += 1
+                setCompletionList(null)
                 setEditingPath(e.target.value)
                 if (pathError) setPathError(null)
               }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  if (e.nativeEvent.isComposing || e.keyCode === 229) return
-                  e.preventDefault()
-                  e.stopPropagation()
-                  commitPathEdit()
-                  return
-                }
-                if (e.key === 'Escape') {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  cancelPathEdit()
-                  return
-                }
-                // 普通按键不外泄；⌘ 组合键（⌘C/⌘V/⌘A…）放行给全局文本快捷键
-                if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
-              }}
+              onKeyDown={onPathKeyDown}
               onFocus={(e) => e.currentTarget.select()}
-              onBlur={commitPathEdit}
+              onBlur={(e) => {
+                if (suggestRef.current?.contains(e.relatedTarget)) return
+                commitPathEdit()
+              }}
               spellCheck={false}
               autoCapitalize="off"
               autoCorrect="off"
+              autoComplete="off"
             />
-            {pathError && (
+            {completions?.matches?.length > 1 && (
+              <div
+                className="path-suggest"
+                id={`path-suggest-${tab.id}`}
+                ref={suggestRef}
+                role="listbox"
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+              >
+                {completions.matches.map((m, i) => (
+                  <button
+                    type="button"
+                    key={m.name}
+                    role="option"
+                    data-active={i === completions.active ? 'true' : undefined}
+                    className={i === completions.active ? 'on' : undefined}
+                    aria-selected={i === completions.active}
+                    title={m.is_dir ? `${m.name}/` : m.name}
+                    onClick={() => acceptCompletion(i, true)}
+                  >
+                    {m.is_dir && <IconFolder size={13} />}
+                    <span>
+                      {m.name}
+                      {m.is_dir ? '/' : ''}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+            {pathError && !completions && (
               <div
                 className="path-error"
                 id={`path-edit-error-${tab.id}`}
