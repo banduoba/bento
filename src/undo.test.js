@@ -23,7 +23,9 @@ test('App undo restores complete original pathname after collision, in reverse o
   const app = harness(api)
   await app.moveInto('/dest', ['/note.txt', '/src/b'])
   assert.deepEqual(app.alerts, [])
+  app.invalidated.length = 0
   await app.undoLast()
+  assert.deepEqual(new Set(app.invalidated), new Set(['/', '/src', '/dest']))
   assert.deepEqual(calls[1], [{ source: '/dest/b', dest: '/src/b' }, { source: '/dest/note copy.txt', dest: '/note.txt' }])
   assert.equal(app.stack.current.length, 0)
   assert.equal(app.toasts.at(-1).undone, true)
@@ -35,13 +37,16 @@ test('App partial undo retains only failed items for retry and never shows full 
   const api = { moveItems: async () => moved, restoreMoves: async moves => { calls.push(moves); return moves.map(m => ({ ...m, ok: m.source.endsWith('/b') || calls.length > 1, error: 'occupied' })) } }
   const app = harness(api)
   await app.moveInto('/dst', moved.map(m => m.source))
+  app.invalidated.length = 0
   await app.undoLast()
   assert.equal(app.stack.current.length, 1)
   assert.notEqual(app.toasts.at(-1)?.undone, true)
   assert.equal(app.alerts.length, 1)
   assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
   assert.deepEqual(app.stack.current[0].directories, ['/src', '/dst'])
+  app.invalidated.length = 0
   await app.undoLast()
+  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
   assert.deepEqual(calls[1], [{ source: '/dst/a', dest: '/src/a' }])
   assert.equal(app.stack.current.length, 0)
 })
@@ -52,11 +57,13 @@ test('App rejected undo remains retryable; overlapping undo executes once', asyn
   const api = { moveItems: async () => [{ source: '/src/a', dest: '/dst/a', ok: true }], restoreMoves: async () => { attempts++; return new Promise((_, reject) => { release = () => reject(new Error('IPC failed')) }) } }
   const app = harness(api)
   await app.moveInto('/dst', ['/src/a'])
+  app.invalidated.length = 0
   const pending = app.undoLast()
   await app.undoLast()
   // Legacy implementation never calls restoreMoves; report an assertion, never hang.
   assert.equal(attempts, 1)
   release(); await pending
+  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
   assert.equal(app.stack.current.length, 1)
   assert.notEqual(app.toasts.at(-1)?.undone, true)
 })
@@ -100,4 +107,21 @@ test('copy undo retains failed trash items without deleting successful items twi
     assert.deepEqual(calls, ['/dst/b', '/dst/a', '/dst/a'])
     assert.equal(app.stack.current.length, 0)
   } finally { delete globalThis.document }
+})
+
+test('Trash undo restores the full original name and invalidates both original and Trash directories', async () => {
+  const restores = []
+  const app = harness({
+    trash: async () => [{ original: '/note.txt', trashed: '/Trash/note collision.txt' }],
+    restoreMoves: async moves => { restores.push(moves); return moves.map(move => ({ ...move, ok: true })) },
+  })
+  app.doTrash('a', ['/note.txt'])
+  await new Promise(resolve => setImmediate(resolve))
+  assert.deepEqual(app.alerts, [])
+  assert.equal(app.stack.current.length, 1)
+  app.invalidated.length = 0
+  await app.undoLast()
+  assert.deepEqual(restores, [[{ source: '/Trash/note collision.txt', dest: '/note.txt' }]])
+  assert.deepEqual(new Set(app.invalidated), new Set(['/', '/Trash']))
+  assert.equal(app.stack.current.length, 0)
 })

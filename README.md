@@ -49,7 +49,7 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | **Batch rename** | Replace, add, format (with counters and dates) and change case, with a live before/after preview. |
 | **New file** | Right-click empty space in a pane and choose **新建**: Text (`未命名.txt`), Markdown (`未命名.md`), or any file you drop in `~/Library/Application Support/com.bento.app/templates/` (for example a `.docx`). The new item is renamed immediately. A clash becomes `未命名 2.txt` and never overwrites. |
 | **Flexible columns** | Name · Modified · Created · Size · Kind. Drag column borders to resize, right-click the header to choose columns — settings are **per pane**. Long names are shortened in the middle (`Product…admap.pptx`) and secondary columns hide automatically in narrow panes. |
-| **Live folders** | Panes refresh as files change on disk (FSEvents), including expanded sub-folders. Can be switched off in Settings. |
+| **Live folders** | FSEvents updates panes and expanded sub-folders as files change. File operations refresh only affected directories, even with automatic refresh disabled. Interrupted reads retain available rows and offer Retry. |
 | **Keyboard-first** | Editable address bar (<kbd>⌘L</kbd>, <kbd>Tab</kbd> completes while editing), copy paths (<kbd>⌥⌘C</kbd>), <kbd>Tab</kbd> switches panes, <kbd>F5</kbd> / <kbd>F6</kbd> copy or move to the other pane, arrow-key navigation, inline folder expansion, Quick Look on <kbd>Space</kbd>, always-on-top pin (<kbd>⌥⌘T</kbd>). |
 | **Remembers everything** | Window frame, layout, tabs, paths, sort order, column widths and preferences are restored on launch. Follows the system light / dark appearance. |
 
@@ -132,7 +132,7 @@ npm run dev        # Tauri dev mode with hot reload
 | <kbd>↩</kbd> | Open or rename (Settings → General → Return key; rename by default) |
 | <kbd>F2</kbd> | Rename |
 | <kbd>⌘↓</kbd> | Open the selection |
-| <kbd>Space</kbd> | Quick Look |
+| <kbd>Space</kbd> | Quick Look; for one selected file, ↑ / ↓ follow the opening pane’s current file order |
 | <kbd>↑</kbd> <kbd>↓</kbd> · <kbd>Home</kbd> <kbd>End</kbd> · <kbd>PgUp</kbd> <kbd>PgDn</kbd> | Move the selection |
 | <kbd>→</kbd> <kbd>←</kbd> | Enter a folder / go to the parent |
 | <kbd>⌫</kbd> | Go to parent folder |
@@ -142,6 +142,8 @@ npm run dev        # Tauri dev mode with hot reload
 | <kbd>⌥⌘S</kbd> | Toggle sidebar |
 | <kbd>⌥⌘T</kbd> | Keep window on top |
 | <kbd>⌘,</kbd> | Settings |
+
+Move and Trash undo restore the original full filename. If restoration fails, the undo stays available for retry; already restored items are skipped.
 
 </details>
 
