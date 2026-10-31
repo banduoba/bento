@@ -780,6 +780,25 @@ export default function App() {
     rowToastTimer.current = setTimeout(() => setRowToast(null), 2200)
   }
 
+  // 多选时按当前列表顺序输出，避免 Set 插入序和肉眼看到的行序不一致。
+  const orderedPaths = (tabId, paths) => {
+    const list = paths?.length ? paths : selArr(tabId)
+    if (list.length < 2) return list
+    const rows = rowsCache.current[tabId] || []
+    const order = new Map(rows.map((r, i) => [r.path, i]))
+    return [...list].sort((a, b) => (order.get(a) ?? 1e9) - (order.get(b) ?? 1e9))
+  }
+
+  const copyPlainPaths = (paths) => {
+    const list = (paths || []).filter((p) => typeof p === 'string' && p)
+    if (!list.length) return
+    const text = list.join('\n')
+    const done = () => showRowToast(list, list.length === 1 ? '已复制路径' : `已复制 ${list.length} 条路径`)
+    writeText(text).then(done).catch(() => {
+      copyText(text).then(done)
+    })
+  }
+
   const transferInto = async (dest, paths, mode, onSuccess) => {
     if (!paths?.length) return
     modeRef.current = mode
@@ -1141,7 +1160,7 @@ export default function App() {
         action: () => addFavorite(entry.is_dir ? entry.path : parentDir),
       },
       { label: '在终端打开', action: () => termDir && api.openTerminal(termDir).catch((e) => alert(String(e))) },
-      { label: '拷贝路径', action: () => copyText(paths.join('\n')) },
+      { label: '拷贝路径', shortcut: '⌥⌘C', action: () => copyPlainPaths(orderedPaths(tabId, paths)) },
       { label: '在访达中显示', action: () => api.reveal(entry.path).catch(() => {}) },
     ].filter(Boolean)
     setMenu({ x, y, items })
@@ -1278,6 +1297,16 @@ export default function App() {
       setPathEditTick((t) => t + 1)
       return
     }
+    // ⌥⌘C：复制当前选择的完整路径，多选一行一个。macOS 上 ⌥ 会改写 key（ç），所以认 code。
+    // 放在输入框提前返回之前，地址栏聚焦时也能复制文件路径，而不是地址栏里选中的文字。
+    if (e.metaKey && e.altKey && !e.ctrlKey && !e.shiftKey && e.code === 'KeyC') {
+      e.preventDefault()
+      if (e.repeat) return
+      const tab = activeTabOf(focusIdx)
+      if (!tab) return
+      copyPlainPaths(orderedPaths(tab.id))
+      return
+    }
     const tag = document.activeElement?.tagName
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
       handleTextShortcut(e, document.activeElement)
@@ -1337,7 +1366,7 @@ export default function App() {
       return
     }
 
-    if (meta && !e.shiftKey && e.key === 'c') { e.preventDefault(); doCopyCut(tid, 'copy'); return }
+    if (meta && !e.altKey && !e.shiftKey && e.key === 'c') { e.preventDefault(); doCopyCut(tid, 'copy'); return }
     if (meta && !e.shiftKey && e.key === 'x') { e.preventDefault(); doCopyCut(tid, 'move'); return }
     if (meta && !e.shiftKey && e.key === 'v') { e.preventDefault(); doPaste(tid); return }
     if (meta && !e.shiftKey && e.key === 'a') {
