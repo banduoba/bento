@@ -712,16 +712,191 @@ async fn quick_look(
     }
 }
 
-/// 新建空白文本文档，返回实际路径
+/// 内置新建文件的默认名。界面是简体中文，所以用「未命名」而不是 Untitled。
+fn new_file_basename(kind: &str) -> Result<&'static str, String> {
+    match kind {
+        "text" | "txt" => Ok("未命名.txt"),
+        "markdown" | "md" => Ok("未命名.md"),
+        other => Err(format!("不支持的文件类型: {other}")),
+    }
+}
+
+/// 独占创建：目标已存在时返回 AlreadyExists，调用方换下一个名字，绝不覆盖。
+fn create_empty_exclusive(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map(|_| ())
+}
+
+fn copy_exclusive(src: &Path, dst: &Path) -> io::Result<()> {
+    let mut input = fs::File::open(src)?;
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)?;
+    if let Err(e) = io::copy(&mut input, &mut output) {
+        drop(output);
+        let _ = fs::remove_file(dst);
+        return Err(e);
+    }
+    if let Ok(perm) = input.metadata().map(|m| m.permissions()) {
+        let _ = fs::set_permissions(dst, perm);
+    }
+    Ok(())
+}
+
+/// 在目录里放一个不重名的新文件。已占用时用「名称 2.ext」「名称 3.ext」…
+/// `create_new` 失败才换名，避免先检查再创建的窗口里把已有文件盖掉。
+fn place_new_file(
+    dir: &Path,
+    name: &str,
+    mut write: impl FnMut(&Path) -> io::Result<()>,
+    verb: &str,
+) -> Result<PathBuf, String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
+        return Err("名称不合法".into());
+    }
+    if !dir.is_dir() {
+        return Err(format!("不是文件夹: {}", dir.display()));
+    }
+    let (stem, ext) = match name.rfind('.') {
+        Some(i) if i > 0 => (&name[..i], &name[i..]),
+        _ => (name, ""),
+    };
+    let mut last_err: Option<String> = None;
+    for i in 1..10000u32 {
+        let candidate = if i == 1 {
+            dir.join(name)
+        } else {
+            dir.join(format!("{stem} {i}{ext}"))
+        };
+        match write(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                last_err = Some(e.to_string());
+                break;
+            }
+        }
+    }
+    Err(match last_err {
+        Some(e) => format!("{verb}: {e}"),
+        None => format!("{verb}: 没有可用的文件名"),
+    })
+}
+
+fn create_named_file(dir: &Path, kind: &str) -> Result<PathBuf, String> {
+    let name = new_file_basename(kind)?;
+    place_new_file(dir, name, create_empty_exclusive, "创建失败")
+}
+
+/// 新建空白文本文档，返回实际路径。保留给已有调用；新界面走 `create_file`。
 #[tauri::command]
 async fn make_file(path: String) -> Result<String, String> {
-    let dir = PathBuf::from(&path);
-    if !dir.is_dir() {
-        return Err(format!("不是文件夹: {}", path));
+    create_file(path, "text".into()).await
+}
+
+/// 在当前文件夹新建空白文件。`kind` 为 `text` / `markdown`。
+/// 重名时自动「未命名 2.txt」「未命名 2.md」，不覆盖。
+#[tauri::command]
+async fn create_file(dir: String, kind: String) -> Result<String, String> {
+    let path = create_named_file(Path::new(&dir), &kind)?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[derive(Serialize, Clone, Debug)]
+struct FileTemplate {
+    name: String,
+    path: String,
+}
+
+fn ensure_templates_dir(app_dir: &Path) -> Result<PathBuf, String> {
+    let dir = app_dir.join("templates");
+    fs::create_dir_all(&dir).map_err(|e| format!("创建模板目录失败: {e}"))?;
+    Ok(dir)
+}
+
+/// 只列出模板目录顶层的普通文件。隐藏文件、子目录、指向目录外的符号链接都不算模板。
+fn scan_templates(dir: &Path) -> Result<Vec<FileTemplate>, String> {
+    let rd = fs::read_dir(dir).map_err(|e| format!("读取模板目录失败: {e}"))?;
+    let mut items = Vec::new();
+    for entry in rd.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.is_empty() || name.starts_with('.') {
+            continue;
+        }
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        items.push(FileTemplate {
+            name,
+            path: entry.path().to_string_lossy().into_owned(),
+        });
     }
-    let target = unique_path(&dir, "未命名.txt");
-    fs::File::create_new(&target).map_err(|e| format!("创建失败: {}", e))?;
-    Ok(target.to_string_lossy().into_owned())
+    items.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(items)
+}
+
+fn resolve_template(templates_root: &Path, template: &Path) -> Result<PathBuf, String> {
+    let root = fs::canonicalize(templates_root).map_err(|e| format!("模板目录不可用: {e}"))?;
+    let src =
+        fs::canonicalize(template).map_err(|_| format!("模板不存在: {}", template.display()))?;
+    if !src.starts_with(&root) {
+        return Err("模板必须位于模板目录内".into());
+    }
+    if !src.is_file() {
+        return Err("模板不是文件".into());
+    }
+    Ok(src)
+}
+
+fn copy_template_file(
+    templates_root: &Path,
+    dest_dir: &Path,
+    template: &Path,
+) -> Result<PathBuf, String> {
+    let src = resolve_template(templates_root, template)?;
+    let name = src
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| "模板名称无效".to_string())?;
+    let src_for_copy = src.clone();
+    place_new_file(
+        dest_dir,
+        &name,
+        move |dst| copy_exclusive(&src_for_copy, dst),
+        "复制模板失败",
+    )
+}
+
+/// 应用支持目录下的 `templates/`。启动时会创建；打开「新建」菜单时再扫一次。
+#[tauri::command]
+async fn list_templates(app: AppHandle) -> Result<Vec<FileTemplate>, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dir = ensure_templates_dir(&app_dir)?;
+    scan_templates(&dir)
+}
+
+/// 把模板复制到当前文件夹（保留文件名与内容），重名时加「 2」后缀，然后由界面进入重命名。
+#[tauri::command]
+async fn copy_template(dir: String, template: String, app: AppHandle) -> Result<String, String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = ensure_templates_dir(&app_dir)?;
+        let created = copy_template_file(&root, Path::new(&dir), Path::new(&template))?;
+        Ok(created.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize, Clone)]
@@ -2254,6 +2429,12 @@ pub fn run() {
                     }
                 });
             }
+            // 模板目录：用户把 .docx 等文件放进来后，「新建」子菜单会列出它们
+            if let Ok(app_dir) = app.handle().path().app_data_dir() {
+                if let Err(err) = ensure_templates_dir(&app_dir) {
+                    eprintln!("[templates] {err}");
+                }
+            }
             Ok(())
         })
         .on_menu_event(|app, event| {
@@ -2276,6 +2457,9 @@ pub fn run() {
             zip_paths,
             quick_look,
             make_file,
+            create_file,
+            list_templates,
+            copy_template,
             search,
             search_content,
             read_text_preview,
@@ -2531,5 +2715,146 @@ mod complete_path_tests {
         assert!(got.matches[0].is_dir);
         assert!(got.text.ends_with("/DocsLink/"), "{}", got.text);
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod new_file_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "bento-newfile-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn name_of(path: &Path) -> String {
+        path.file_name().unwrap().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn text_and_markdown_skip_existing_names_without_overwrite() {
+        let dir = scratch("kinds");
+        fs::write(dir.join("未命名.txt"), b"keep-txt").unwrap();
+        fs::write(dir.join("未命名 2.txt"), b"keep-2").unwrap();
+        let third = create_named_file(&dir, "text").unwrap();
+        assert_eq!(name_of(&third), "未命名 3.txt");
+        assert_eq!(fs::read(dir.join("未命名.txt")).unwrap(), b"keep-txt");
+        assert_eq!(fs::read(dir.join("未命名 2.txt")).unwrap(), b"keep-2");
+        assert_eq!(fs::read(&third).unwrap(), b"");
+
+        let md = create_named_file(&dir, "markdown").unwrap();
+        assert_eq!(name_of(&md), "未命名.md");
+        fs::write(&md, b"# keep").unwrap();
+        let md2 = create_named_file(&dir, "md").unwrap();
+        assert_eq!(name_of(&md2), "未命名 2.md");
+        assert_eq!(fs::read(&md).unwrap(), b"# keep");
+        assert_eq!(fs::read(&md2).unwrap(), b"");
+        assert!(create_named_file(&dir, "docx")
+            .unwrap_err()
+            .contains("不支持"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refuses_to_create_when_the_parent_is_not_a_directory() {
+        let dir = scratch("notdir");
+        let file = dir.join("file.txt");
+        fs::write(&file, b"x").unwrap();
+        let err = create_named_file(&file, "text").unwrap_err();
+        assert!(err.contains("不是文件夹"), "{err}");
+        assert_eq!(fs::read(&file).unwrap(), b"x");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn templates_are_top_level_files_sorted_by_name() {
+        let root = scratch("scan");
+        let templates = ensure_templates_dir(&root).unwrap();
+        fs::write(templates.join("报告.docx"), b"PK").unwrap();
+        fs::write(templates.join("a.txt"), b"a").unwrap();
+        fs::write(templates.join(".DS_Store"), b"hidden").unwrap();
+        fs::create_dir_all(templates.join("nested")).unwrap();
+        fs::write(templates.join("nested/skip.txt"), b"no").unwrap();
+        let items = scan_templates(&templates).unwrap();
+        let names: Vec<_> = items.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["a.txt", "报告.docx"]);
+        assert!(items
+            .iter()
+            .all(|t| Path::new(&t.path).starts_with(&templates)));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_template_keeps_bytes_and_suffixes_collisions() {
+        let root = scratch("copy");
+        let templates = root.join("templates");
+        let dest = root.join("dest");
+        fs::create_dir_all(&templates).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let src = templates.join("周报.docx");
+        fs::write(&src, b"template-bytes").unwrap();
+        fs::write(dest.join("周报.docx"), b"already").unwrap();
+
+        let created = copy_template_file(&templates, &dest, &src).unwrap();
+        assert_eq!(name_of(&created), "周报 2.docx");
+        assert_eq!(fs::read(&created).unwrap(), b"template-bytes");
+        assert_eq!(fs::read(dest.join("周报.docx")).unwrap(), b"already");
+        assert_eq!(fs::read(&src).unwrap(), b"template-bytes");
+
+        let fresh_dir = root.join("empty");
+        fs::create_dir_all(&fresh_dir).unwrap();
+        let first = copy_template_file(&templates, &fresh_dir, &src).unwrap();
+        assert_eq!(name_of(&first), "周报.docx");
+        assert_eq!(fs::read(&first).unwrap(), b"template-bytes");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_template_rejects_files_outside_the_templates_dir() {
+        let root = scratch("escape");
+        let templates = root.join("templates");
+        let dest = root.join("dest");
+        fs::create_dir_all(&templates).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let outside = root.join("secret.docx");
+        fs::write(&outside, b"secret").unwrap();
+        let err = copy_template_file(&templates, &dest, &outside).unwrap_err();
+        assert!(err.contains("模板必须位于模板目录内"), "{err}");
+        assert!(!dest.join("secret.docx").exists());
+        assert_eq!(fs::read(&outside).unwrap(), b"secret");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_pointing_outside_templates_is_ignored_and_not_copied() {
+        let root = scratch("symlink");
+        let templates = root.join("templates");
+        let dest = root.join("dest");
+        fs::create_dir_all(&templates).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        let outside = root.join("secret.docx");
+        fs::write(&outside, b"secret").unwrap();
+        let link = templates.join("link.docx");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert!(scan_templates(&templates).unwrap().is_empty());
+        let err = copy_template_file(&templates, &dest, &link).unwrap_err();
+        assert!(err.contains("模板必须位于模板目录内"), "{err}");
+        let leftovers: Vec<_> = fs::read_dir(&dest)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = fs::remove_dir_all(&root);
     }
 }
