@@ -32,3 +32,11 @@ test('copy undo carries only directories changed by the successful operation', a
   await h.transfer('/right', ['/source/a'], 'copy')
   assert.deepEqual(h.undo[0][2].directories, ['/right'])
 })
+
+test('published failed move invalidates its explicit affected directories without undo or success feedback', async () => {
+  const h = transferHarness([{ ok: false, source: '/source/a', dest: '/right/a', error: 'source removal failed', affectedDirectories: ['/source', '/right'] }])
+  await h.transfer('/right', ['/source/a'], 'move')
+  assert.deepEqual(new Set(h.invalidated), new Set(['/source', '/right']))
+  assert.deepEqual(h.toasts, [])
+  assert.deepEqual(h.undo, [])
+})

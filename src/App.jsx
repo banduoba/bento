@@ -1009,7 +1009,9 @@ export default function App() {
       // 记录成功的操作供 ⌘Z 撤销
       const ok = (results || []).filter((r) => r.ok && r.dest)
       if (ok.length === paths.length) onSuccess?.()
-      refreshDirectories([...new Set(ok.flatMap(r => mode === 'move' ? [parentPath(r.source), parentPath(r.dest)] : [parentPath(r.dest)]))])
+      refreshDirectories([...new Set((results || []).flatMap(r => r.ok && r.dest
+        ? (mode === 'move' ? [parentPath(r.source), parentPath(r.dest)] : [parentPath(r.dest)])
+        : r.affectedDirectories || []))])
       const moves = ok.filter((r) => r.dest !== r.source)
       if (mode === 'move' && moves.length) {
         pushUndo(
@@ -1043,7 +1045,8 @@ export default function App() {
       const results = await api.moveItems(movedFrom, dest)
       reportErrors(results)
       const ok = (results || []).filter((r) => r.ok && r.dest && r.dest !== r.source)
-      refreshDirectories([...new Set(ok.flatMap(r => [parentPath(r.source), parentPath(r.dest)]))])
+      refreshDirectories([...new Set((results || []).flatMap(r => r.ok && r.dest && r.dest !== r.source
+        ? [parentPath(r.source), parentPath(r.dest)] : r.affectedDirectories || []))])
       if (ok.length) {
         pushUndo(
           ok.length === 1 ? `移动：${basename(ok[0].dest)}` : `移动 ${ok.length} 个项目`,
