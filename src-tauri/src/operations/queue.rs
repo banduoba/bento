@@ -833,10 +833,9 @@ fn worker(shared: Arc<Shared>, executor: Arc<dyn OperationExecutor>) {
                     OutcomeStatus::Failed
                 },
             );
-            let effects = job
-                .outcomes
-                .iter()
-                .any(|o| o.published || o.effect_id.is_some());
+            let effects = job.outcomes.iter().any(|o| {
+                o.published || o.effect_id.is_some() || o.status == OutcomeStatus::Partial
+            });
             let partial = job
                 .outcomes
                 .iter()

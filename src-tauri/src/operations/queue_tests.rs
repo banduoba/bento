@@ -753,3 +753,29 @@ fn recovery_promotes_existing_undo_without_duplicating_its_stack_entry() {
     q.wait_idle();
     assert!(q.list().latest_undo_id.is_none());
 }
+struct ProtectedPartial;
+impl OperationExecutor for ProtectedPartial {
+    fn execute(&self, work: &Work, ctx: &OperationContext) -> ExecutionResult {
+        if let Work::Operation(r) = work {
+            if r.request_id == "protected" {
+                let mut outcome = ItemOutcome::new("i-1", OutcomeStatus::Partial);
+                outcome.retry = RetryKind::ManualRecovery;
+                ctx.record_outcome(outcome);
+                return ExecutionResult::default();
+            }
+        }
+        Success.execute(work, ctx)
+    }
+}
+#[test]
+fn retained_partial_effect_before_publication_blocks_older_undo() {
+    let q = OperationManager::new(Arc::new(ProtectedPartial), Arc::new(|_| {}));
+    q.enqueue(request("first")).unwrap();
+    q.wait_idle();
+    q.enqueue(request("protected")).unwrap();
+    q.wait_idle();
+    assert!(
+        q.list().latest_undo_id.is_none(),
+        "protected original awaiting recovery must block older undo"
+    );
+}
