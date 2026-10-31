@@ -779,29 +779,48 @@ export default function Pane({
     if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
   }
 
-  // 重命名输入框聚焦并选中主名（不含扩展名）
-  useEffect(() => {
-    if (renaming && renaming.path && renaming.tabId === tab.id) {
-      const input = renameRef.current
-      if (input) {
-        input.focus()
-        if (renaming.selectAll) {
-          input.setSelectionRange(0, input.value.length)
-        } else {
-          const dot = input.value.lastIndexOf('.')
-          input.setSelectionRange(0, dot > 0 ? dot : input.value.length)
-        }
-      }
-    }
-    // 依赖 entries：新建后列表异步刷新，行渲染出来时才存在输入框
-  }, [renaming?.path, entries])
-
   const virt = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 30,
     overscan: 14,
   })
+
+  // 重命名输入框聚焦并选中主名（不含扩展名）。新建的文件可能排在视口外，先滚进虚拟列表再等输入框挂上。
+  useEffect(() => {
+    if (!renaming?.path || renaming.tabId !== tab.id) return
+    const idx = rows.findIndex((r) => r.path === renaming.path)
+    let cancelled = false
+    let frames = 0
+    let raf = 0
+    const focus = () => {
+      if (cancelled) return
+      const input = renameRef.current
+      if (!input) {
+        if (idx >= 0 && frames % 4 === 0) {
+          try {
+            virt.scrollToIndex(idx, { align: 'auto' })
+          } catch {}
+        }
+        if (frames++ < 24) raf = requestAnimationFrame(focus)
+        return
+      }
+      if (document.activeElement === input) return
+      input.focus()
+      if (renaming.selectAll) {
+        input.setSelectionRange(0, input.value.length)
+      } else {
+        const dot = input.value.lastIndexOf('.')
+        input.setSelectionRange(0, dot > 0 ? dot : input.value.length)
+      }
+    }
+    focus()
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+    }
+    // entries 变化（新建后刷新）时再试一次；不要把 virt 放进依赖，避免输入过程中反复抢焦点
+  }, [renaming?.path, renaming?.tabId, renaming?.selectAll, entries])
 
   const rowClick = (e, entry, idx) => {
     if (entry.isPseudo) return
