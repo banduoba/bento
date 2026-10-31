@@ -21,9 +21,15 @@ impl SessionStore {
     pub(crate) fn load(&self, dir: &Path) -> Result<Option<Value>, String> {
         let _guard = self.io.lock().map_err(|e| e.to_string())?;
         match fs::read(dir.join("session.json")) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map(Some)
-                .map_err(|e| format!("Cannot read session.json: {e}")),
+            Ok(bytes) => {
+                let value: Value = serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("Cannot read session.json: {e}"))?;
+                if !value.is_object() {
+                    return Err("Session document must be a JSON object".into());
+                }
+                // Unknown versions remain available for the frontend recovery notice.
+                Ok(Some(value))
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("Cannot read session.json: {e}")),
         }
@@ -186,6 +192,19 @@ mod tests {
             store.load(&f.0).is_err(),
             "directory/read failure cannot become null"
         );
+    }
+
+    #[test]
+    fn json_null_or_nonobject_cannot_be_reported_as_an_absent_session() {
+        let f = Fixture::new();
+        let store = SessionStore::default();
+        for bytes in [b"null".as_slice(), b"[]", b"42", b"\"session\""] {
+            fs::write(f.0.join("session.json"), bytes).unwrap();
+            assert!(
+                store.load(&f.0).is_err(),
+                "invalid document must surface recovery"
+            );
+        }
     }
 
     #[test]
