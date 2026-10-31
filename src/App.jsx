@@ -1728,7 +1728,7 @@ export default function App() {
       const entry = firstEntry()
       const primary = entry && !entry.is_dir && !entry.isPseudo ? entry.path
         : paneRows.find(r => paths.includes(r.path) && !r.is_dir && !r.isPseudo)?.path
-      if (primary) previewNavigation.current.open(tid, tab.path, primary)
+      if (primary) previewNavigation.current.open(tid, tab.path, primary, paths)
       return
     }
     if (meta && e.key === '[') { e.preventDefault(); navBack(tid); return }

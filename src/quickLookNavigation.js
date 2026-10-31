@@ -13,8 +13,16 @@ export function createQuickLookNavigation(deps) {
     }).catch(() => {})
   }
   return {
-    open(tabId, directory, path) {
-      if (!filesFor(tabId, directory).some(row => row.path === path)) return
+    open(tabId, directory, path, selectedPaths = []) {
+      const files = filesFor(tabId, directory)
+      if (!files.some(row => row.path === path)) return
+      const selected = new Set(selectedPaths)
+      const gallery = files.filter(row => selected.has(row.path)).map(row => row.path)
+      if (gallery.length > 1) {
+        current = null
+        Promise.resolve(deps.present(path, gallery, null)).catch(() => {})
+        return
+      }
       const session = `preview-${Date.now()}-${++sequence}`
       const state = { tabId, directory, path, session, revision: 0 }
       current = state
