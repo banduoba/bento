@@ -175,7 +175,7 @@ export default function Pane({
     rowDragRef.current = { x: e.clientX, y: e.clientY, paths, preview, started: false }
   }
 
-  // ---------- 列：宽度可拖动、可勾选显示、窗格太窄自动隐藏次要列（均只作用于当前窗格） ----------
+  // ---------- 列：宽度可拖动、可勾选显示、窗格太窄自动隐藏次要列（松手后按当前文件夹记住） ----------
   const colsInnerRef = useRef(null)
   const paneElRef = useRef(null)
   const [paneW, setPaneW] = useState(0)
