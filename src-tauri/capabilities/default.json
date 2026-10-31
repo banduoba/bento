@@ -8,6 +8,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
     "core:window:allow-set-always-on-top",
+    "core:window:allow-set-title",
     "clipboard-manager:allow-read-text",
     "drag:default",
     "dialog:default",

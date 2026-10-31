@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { api, hasTauri } from './api'
 import { IconCheck } from './icons'
-import { basename, parentPath, labelOf, copyText } from './format'
+import { basename, parentPath, labelOf, copyText, folderTitle } from './format'
 import { dragState } from './nativeDrag'
 import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
 import Sidebar from './components/Sidebar'
@@ -370,6 +370,13 @@ export default function App() {
     if (!p) return null
     return p.tabs[p.active] || p.tabs[0]
   }
+
+  // 聚焦窗格当前路径的文件夹名；切换窗格或导航时更新
+  const windowTitle = folderTitle(activeTabOf(focusIdx)?.path, home)
+  useEffect(() => {
+    if (!hasTauri || !cfg) return
+    getCurrentWindow().setTitle(windowTitle).catch((e) => trace(`setTitle failed: ${e}`))
+  }, [cfg, windowTitle])
 
   const updateTab = (tabId, fn) =>
     setCfg((c) => ({
@@ -1367,7 +1374,7 @@ export default function App() {
   return (
     <div className="app">
       <div className="titlebar" onMouseDown={titlebarMouseDown}>
-        <div className="tb-title">Bento</div>
+        <div className="tb-title" title={windowTitle}>{windowTitle}</div>
         <div className="tb-center">
           <div className="layout-pick-wrap">
             <button className="layout-btn" title="窗口布局" onClick={() => setLayoutPickerOpen((o) => !o)}>

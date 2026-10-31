@@ -202,6 +202,12 @@ input, textarea {
   font-size: 13px;
   color: var(--text);
   letter-spacing: 0.2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 42%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tb-center { flex: 1; display: flex; justify-content: center; }
 .layout-pick-wrap { position: relative; }
@@ -256,7 +262,7 @@ input, textarea {
   gap: 2px;
 }
 .mini-grid span { background: currentColor; border-radius: 2px; }
-.tb-right { display: flex; gap: 6px; }
+.tb-right { display: flex; gap: 6px; flex: none; }
 
 .seg {
   display: flex;
