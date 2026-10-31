@@ -4,7 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { api, hasTauri } from './api'
-import { directoryKey, invalidateDirectories, rootRefreshKey } from './paneFeedback'
+import { bumpManualRefreshTick, directoryKey, invalidateDirectories, rootRefreshKey } from './paneFeedback'
 import { createQuickLookNavigation } from './quickLookNavigation'
 import { clearCut, getClip, retainCut, setClip, subscribeClip } from './clipboard'
 import { basename, parentPath, labelOf, copyText, folderTitle } from './format'
@@ -308,6 +308,7 @@ export default function App() {
   }
   const [stats, setStats] = useState({}) // tabId -> { count, selCount, selSize }
   const [tick, setTick] = useState(0)
+  const [manualRefreshTicks, setManualRefreshTicks] = useState({})
   const [directoryVersions, setDirectoryVersions] = useState({})
   const [progress, setProgress] = useState(null)
 
@@ -499,6 +500,7 @@ export default function App() {
     focusTrail.current = { now: focusIdx, other: focusTrail.current.now }
   }
   const refresh = () => setTick((t) => t + 1)
+  const refreshTab = (tabId) => setManualRefreshTicks((ticks) => bumpManualRefreshTick(ticks, tabId))
   const directoryKeyFor = (path) => directoryKey(path, keyCache.current)
   const refreshDirectories = (paths) => {
     const valid = [...new Set(paths.filter(Boolean))]
@@ -556,7 +558,7 @@ export default function App() {
 
   const nav = (tabId, path, isRefresh) => {
     if (isRefresh || !path) {
-      refresh()
+      refreshTab(tabId)
       return
     }
     trace(`nav tab=${tabId} -> ${path}`)
@@ -1474,7 +1476,7 @@ export default function App() {
         shortcut: '⇧⌘.',
         action: () => setCfg((c) => ({ ...c, showHidden: !c.showHidden })),
       },
-      { label: '刷新', shortcut: '⌘R', action: refresh },
+      { label: '刷新', shortcut: '⌘R', action: () => refreshTab(tabId) },
       { sep: true },
       ...folderViewMenu(path),
       { label: '在访达中显示', action: () => api.reveal(path || '/').catch(() => {}) },
@@ -1591,6 +1593,12 @@ export default function App() {
       return
     }
     const tag = document.activeElement?.tagName
+    if (e.metaKey && !e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === 'r' || e.key === 'R')) {
+      e.preventDefault()
+      const tab = activeTabOf(focusIdx)
+      if (tab) refreshTab(tab.id)
+      return
+    }
     if (tag === 'INPUT' || tag === 'TEXTAREA') {
       handleTextShortcut(e, document.activeElement)
       return
@@ -1697,7 +1705,6 @@ export default function App() {
       setCfg((c) => ({ ...c, showHidden: !c.showHidden }))
       return
     }
-    if (meta && (e.key === 'r' || e.key === 'R')) { e.preventDefault(); refresh(); return }
     if (meta && e.altKey && e.code === 'KeyT') {
       // ⌥⌘T：窗口置顶（macOS 上 ⌥T 的 key 是 †，所以用 code）
       e.preventDefault()
@@ -1892,7 +1899,7 @@ export default function App() {
               selection={sel[p.tabs[p.active]?.id] || EMPTY_SELECTION}
               filter={filters[p.tabs[p.active]?.id] || ''}
               renaming={renaming}
-              tick={rootRefreshKey(tick, directoryVersions, directoryKeyFor(p.tabs[p.active]?.path))}
+              tick={rootRefreshKey(tick, directoryVersions, directoryKeyFor(p.tabs[p.active]?.path), manualRefreshTicks[p.tabs[p.active]?.id] || 0)}
               directoryVersions={directoryVersions}
               directoryKeyFor={directoryKeyFor}
               operationToast={rowToast?.tabId === p.tabs[p.active]?.id ? rowToast : null}
