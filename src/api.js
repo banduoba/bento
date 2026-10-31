@@ -5,6 +5,7 @@ export const hasTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERN
 
 export const api = hasTauri
   ? {
+      ...operationApi(invoke),
       listDir: (path, showHidden) => invoke('list_dir', { path, showHidden }),
       // 当前目录分批推送。onBatch 是 Tauri Channel；约 500 条一批，最后一批 done=true。
       listDirStream: (path, showHidden, requestId, sortKey, sortDir, onBatch) =>
@@ -17,24 +18,14 @@ export const api = hasTauri
           onBatch,
         }),
       cancelListDir: (requestId) => invoke('cancel_list_dir', { requestId }),
-      transfer: (sources, dest, mode) => invoke('transfer', { sources, dest, mode }),
-      moveItems: (sources, dest) => invoke('move_items', { sources, dest }),
-      restoreMoves: (moves) => invoke('restore_moves', { moves }),
-      trash: (paths) => invoke('trash', { paths }),
-      makeDir: (path) => invoke('make_dir', { path }),
-      rename: (oldPath, newName) => invoke('rename', { oldPath, newName }),
       openPath: (path) => invoke('open_path', { path }),
       reveal: (path) => invoke('reveal_in_finder', { path }),
       openTerminal: (path) => invoke('open_terminal', { path }),
-      zipPaths: (sources, destDir, options) => invoke('zip_paths', { sources, destDir, options: options || null }),
       quickLook: (path, paths, session = null) =>
         invoke('quick_look', { path, paths: paths && paths.length ? paths : null, session }),
       updateQuickLook: (path, paths, session, revision) =>
         invoke('update_quick_look', { path, paths, session, revision }),
-      makeFile: (path) => invoke('make_file', { path }),
-      createFile: (dir, kind) => invoke('create_file', { dir, kind }),
       listTemplates: () => invoke('list_templates'),
-      copyTemplate: (dir, template) => invoke('copy_template', { dir, template }),
       search: (query, scope, root, showHidden, roots, mode) =>
         invoke('search', { query, scope, root: root || null, showHidden, roots: roots || [], mode: mode || 'name' }),
       copyFilesToClipboard: (paths) => invoke('copy_files_to_clipboard', { paths }),
@@ -294,7 +285,7 @@ function mockApi() {
     }
     return Promise.resolve(results)
   }
-  return {
+  const legacy = {
     listDir: (path, showHidden) => {
       if (path !== HUGE_PATH && !TREE[path]) return Promise.reject(new Error(`无法读取目录 ${path}`))
       return Promise.resolve({ entries: entriesFor(path, showHidden) })
@@ -389,12 +380,6 @@ function mockApi() {
       list.push(E(name, true))
       return Promise.resolve(`${dir}/${name}`)
     },
-    makeFile: (dir) => {
-      const list = (TREE[dir] = TREE[dir] || [])
-      const name = uniqueName(list, '未命名.txt')
-      list.push(E(name, false, 0))
-      return Promise.resolve(`${dir}/${name}`)
-    },
     createFile: (dir, kind) => {
       if (kind !== 'text' && kind !== 'txt' && kind !== 'markdown' && kind !== 'md') {
         return Promise.reject(`不支持的文件类型: ${kind}`)
@@ -439,7 +424,6 @@ function mockApi() {
     openPath: () => Promise.resolve(),
     reveal: () => Promise.resolve(),
     openTerminal: () => Promise.resolve(),
-    zipPaths: () => Promise.resolve([]),
     quickLook: () => Promise.resolve(),
     updateQuickLook: () => Promise.resolve(),
     search: (q, scope, root, showHidden, roots, mode) => {
@@ -517,6 +501,67 @@ function mockApi() {
       return Promise.resolve()
     },
   }
+  return { ...legacy, ...browserOperations(legacy) }
 }
 
 export const fileSrc = hasTauri ? convertFileSrc : (p) => ''
+
+// The native API exposes one write admission boundary. No direct mutation commands.
+export function operationApi(invoke) {
+  return {
+    enqueueOperation: request => invoke('enqueue_operation', { request }),
+    listOperationJobs: () => invoke('list_operation_jobs', {}),
+    getOperationJob: jobId => invoke('get_operation_job', { jobId }),
+    getOperationOutcomes: (jobId, offset = 0, limit = 200) => invoke('get_operation_outcomes', { jobId, offset, limit }),
+    ackOperationOutcomes: (jobId, revision, outcomeCount) => invoke('ack_operation_outcomes', { jobId, revision, outcomeCount }),
+    cancelOperation: jobId => invoke('cancel_operation', { jobId }),
+    resolveOperationConflict: (jobId, conflictId, revision, decision, applyToRemaining = false) =>
+      invoke('resolve_operation_conflict', { jobId, conflictId, revision, decision, applyToRemaining }),
+    undoOperation: (undoId, requestId) => invoke('undo_operation', { undoId, requestId }),
+    listOperationRecoveries: () => invoke('list_operation_recoveries', {}),
+    recoverOperation: (recoveryId, action, requestId) => invoke('recover_operation', { recoveryId, action, requestId }),
+    prepareOperationExit: cancelRemaining => invoke('prepare_operation_exit', { cancelRemaining }),
+  }
+}
+
+function browserOperations(legacy) {
+  const jobs = [], outcomes = new Map()
+  let revision = 0, accepting = true
+  const snapshot = () => ({ sessionId: 'browser', revision, jobs: [...jobs], busy: false, accepting, latestUndoId: null })
+  return {
+    listOperationJobs: async () => snapshot(),
+    listOperationRecoveries: async () => [],
+    getOperationJob: async jobId => jobs.find(j => j.jobId === jobId),
+    getOperationOutcomes: async (jobId, offset, limit) => ({ sessionId:'browser', jobId, revision, offset, total:outcomes.get(jobId)?.length || 0, outcomes:(outcomes.get(jobId) || []).slice(offset,offset+limit) }),
+    enqueueOperation: async request => {
+      const previous = jobs.find(j => j.requestId === request.requestId)
+      if (previous) return previous
+      if (!accepting) throw Error('正在退出，暂不接受文件操作')
+      const rows = []
+      for (const item of request.items) {
+        const source = item.source
+        let actualDestination = null, failure = null
+        try {
+          if (request.kind === 'copy' || request.kind === 'move') {
+            const result = (await (request.kind === 'move' ? legacy.moveItems([source],request.destination) : legacy.transfer([source],request.destination,'copy')))[0]
+            if (!result?.ok) throw Error(result?.error || '操作失败')
+            actualDestination = result.dest
+          } else if (request.kind === 'trash') await legacy.trash([source])
+          else if (request.kind === 'rename') actualDestination = await legacy.rename(source,item.targetName)
+          else if (request.kind === 'create') actualDestination = item.createKind === 'directory' ? await legacy.makeDir(request.destination) : item.createKind === 'template' ? await legacy.copyTemplate(request.destination,source) : await legacy.createFile(request.destination,item.createKind)
+          else throw Error('浏览器演示不支持此操作，请在 Bento 中使用')
+        } catch (error) { failure = { code:'demo', message:String(error), phase:'finished' } }
+        const parent = path => path?.slice(0,path.lastIndexOf('/')) || '/'
+        rows.push({itemId:item.itemId,source:source || null,requestedDestination:request.destination || null,actualDestination,status:failure?'failed':'succeeded',effectId:null,published:!failure,sourceDisposition:!failure && ['move','trash','rename'].includes(request.kind)?'removed':'unchanged',retry:'none',error:failure,affectedDirectories:failure?[]:[...new Set([actualDestination && parent(actualDestination),source && request.kind!=='copy' && parent(source)].filter(Boolean))]})
+      }
+      const failed=rows.filter(r=>r.status==='failed').length
+      const job={ sessionId:'browser', jobId:`browser_${++revision}`, revision:1, requestId:request.requestId, kind:request.kind, state:failed?(failed===rows.length?'failed':'partial'):'completed', phase:'finished', ownerTabId:request.ownerTabId || null, clipRevision:request.clipRevision || null, intent:request.intent || null, cancelRequested:false,cancelability:'immediate',progress:{itemsFinished:rows.length,itemsTotal:rows.length,bytesDone:'0',bytesTotal:null,currentItemId:null,currentPath:null},conflict:null,outcomeCount:rows.length,undoId:null,error:null }
+      if(jobs.length>=256) outcomes.delete(jobs.shift().jobId)
+      jobs.push(job);outcomes.set(job.jobId,rows);return job
+    },
+    ackOperationOutcomes: async () => {},
+    cancelOperation: async jobId => jobs.find(j=>j.jobId===jobId),
+    prepareOperationExit: async cancelRemaining => { accepting=!cancelRemaining;return snapshot() },
+    undoOperation: async () => {throw Error('浏览器演示不支持撤销')},
+  }
+}

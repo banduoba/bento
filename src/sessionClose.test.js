@@ -79,3 +79,35 @@ test('a quit queued at reply settlement is not cleared by pending cleanup', asyn
   assert.equal(flushes, 2)
   assert.deepEqual(replies, [[1, false], [2, true]])
 })
+test('busy close Continue reopens admission without flushing or showing save-failure confirmation', async()=>{
+  const calls=[]
+  const c=createSessionClose({flush:async()=>calls.push('flush'),close:async()=>calls.push('close'),reply:async(...a)=>calls.push(a),confirmDiscard:async()=>assert.fail('Continue is not save failure'),operations:{busy:()=>true,choose:async()=>false,prepare:async cancel=>calls.push(['prepare',cancel])}})
+  await c.requestExit(1)
+  assert.deepEqual(calls,[['prepare',false],[1,false]])
+})
+test('cancel remaining waits for native drain before session flush and final exit reply',async()=>{
+  const gate=deferred(),calls=[]
+  const c=createSessionClose({flush:async()=>calls.push('flush'),close:async()=>{},reply:async(...a)=>calls.push(a),confirmDiscard:async()=>false,operations:{busy:()=>true,choose:async()=>true,prepare:async cancel=>{calls.push(['prepare',cancel]);await gate.promise}}})
+  const exiting=c.requestExit(2);await new Promise(r=>setImmediate(r))
+  assert.deepEqual(calls,[['prepare',true]])
+  gate.resolve();await exiting;assert.deepEqual(calls,[['prepare',true],'flush',[2,true]])
+})
+test('native repeated quit drained event settles the matching pending operations prompt, ignoring old events',async()=>{
+  const calls=[],choice=deferred()
+  const c=createSessionClose({flush:async()=>calls.push('flush'),close:async()=>{},reply:async(...a)=>calls.push(a),confirmDiscard:async()=>false,operations:{busy:()=>true,choose:()=>choice.promise,prepare:async cancel=>calls.push(['prepare',cancel]),drained:()=>calls.push('drained')}})
+  const exiting=c.requestExit(8)
+  c.requestDrained(7);await Promise.resolve();assert.deepEqual(calls,[])
+  c.requestDrained(8);await exiting
+  assert.deepEqual(calls,['drained',['prepare',true],'flush',[8,true]])
+})
+test('cancel after persistence failure reopens operations admission',async()=>{
+  const prepares=[]
+  const c=createSessionClose({flush:async()=>{throw Error('disk')},close:async()=>{},reply:async()=>{},confirmDiscard:async()=>false,operations:{busy:()=>false,choose:async()=>assert.fail(),prepare:async flag=>prepares.push(flag)}})
+  await c.requestExit(3);assert.deepEqual(prepares,[true,false])
+})
+test('duplicate drained event after a completed quit cannot flush and reply twice',async()=>{
+  let flushes=0;const replies=[]
+  const c=createSessionClose({flush:async()=>{flushes++},close:async()=>{},reply:async(...a)=>replies.push(a),confirmDiscard:async()=>false,operations:{busy:()=>false,choose:async()=>true,prepare:async()=>{}}})
+  await c.requestExit(5);await c.requestDrained(5)
+  assert.equal(flushes,1);assert.deepEqual(replies,[[5,true]])
+})

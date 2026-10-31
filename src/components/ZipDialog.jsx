@@ -29,12 +29,12 @@ export const levelOf = (prefs) => (prefs.mode === 'small' ? 9 : prefs.mode === '
 // 路径过长时中间省略，保留开头与结尾
 const ellipsizeMiddle = (s, max = 46) => (s.length <= max ? s : `${s.slice(0, Math.ceil(max * 0.4))}…${s.slice(-Math.floor(max * 0.55))}`)
 
-export default function ZipDialog({ count, dir, defaultName, prefs, onCancel, onSubmit }) {
+export default function ZipDialog({ count, dir, defaultName, prefs, onCancel, onSubmit, requirePassword = false }) {
   const [location, setLocation] = useState(dir)
   const [name, setName] = useState(defaultName)
   const [mode, setMode] = useState(prefs.mode)
   const [level, setLevel] = useState(prefs.level)
-  const [usePw, setUsePw] = useState(prefs.keepPassword && !!prefs.password)
+  const [usePw, setUsePw] = useState(requirePassword || (prefs.keepPassword && !!prefs.password))
   const [pw, setPw] = useState(prefs.password)
   const [keepPw, setKeepPw] = useState(prefs.keepPassword)
   const [oneClick, setOneClick] = useState(prefs.oneClick)

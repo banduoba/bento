@@ -5,7 +5,7 @@ import React from 'react'
 import { act, create } from 'react-test-renderer'
 const require = createRequire(import.meta.url)
 const bridgeKey = '__bentoAppTestBridge'
-const bundle = await build({ entryPoints: [fileURLToPath(new URL('../App.jsx', import.meta.url))], bundle:true, write:false, format:'cjs', platform:'node', jsx:'automatic', loader:{'.svg':'dataurl','.png':'dataurl'}, plugins:[{name:'app-boundaries',setup(b){
+const bundle = await build({ stdin: {contents: `export { default } from './App.jsx'; export * as clipboard from './clipboard.js'; export { dragState } from './nativeDrag.js'; export { byteLabel, progressValue } from './components/OperationQueue.jsx'`, resolveDir: fileURLToPath(new URL('..', import.meta.url)), sourcefile:'app-test-entry.js'}, bundle:true, write:false, format:'cjs', platform:'node', jsx:'automatic', loader:{'.svg':'dataurl','.png':'dataurl'}, plugins:[{name:'app-boundaries',setup(b){
   b.onResolve({filter:/^react(?:\/.*)?$/},({path})=>({path:require.resolve(path),external:true}))
   b.onResolve({filter:/(?:^|\/)api(?:\.js)?$/},()=>({path:'api',namespace:'test'}))
   b.onResolve({filter:/(?:^|\/)components\/(Pane|Sidebar)$/},({path})=>({path:path.split('/').pop(),namespace:'test'}))
@@ -39,14 +39,16 @@ export async function mountApp(t, overrides={}) {
   const dialogs=[]
   let discard=false
   const events=new Map(), writes={session:[],config:[],views:[]}, replies=[]
-  let closeHandler, closes=0, destroyed=0
-  const win={setAlwaysOnTop:async()=>{},setTitle:async()=>{},onDragDropEvent:async()=>()=>{},onMoved:async()=>()=>{},onResized:async()=>()=>{},onCloseRequested:async f=>{closeHandler=f;return()=>{closeHandler=null}},close:async()=>{closes++},destroy:async()=>{closes++;destroyed++}}
-  const api={fsearchStatus:async()=>({ready:true}),diskSpace:async()=>1000,homeDir:async()=>'/home',loadConfig:async()=>null,loadViewSettings:async()=>null,loadSession:async()=>null,listTemplates:async()=>[],resolvePath:async p=>p,saveConfig:async v=>writes.config.push(v),saveViewSettings:async v=>writes.views.push(v),saveSession:async v=>writes.session.push(v),sessionExitReply:async(id,allow)=>replies.push([id,allow]),...overrides}
+  let closeHandler, dragHandler, closes=0, destroyed=0
+  const win={setAlwaysOnTop:async()=>{},setTitle:async()=>{},onDragDropEvent:async f=>{dragHandler=f;return()=>{dragHandler=null}},onMoved:async()=>()=>{},onResized:async()=>()=>{},onCloseRequested:async f=>{closeHandler=f;return()=>{closeHandler=null}},close:async()=>{closes++},destroy:async()=>{closes++;destroyed++}}
+  const emptyQueue=()=>({sessionId:'test',revision:1,jobs:[],busy:false,accepting:true,latestUndoId:null})
+  const api={listOperationJobs:async()=>emptyQueue(),listOperationRecoveries:async()=>[],prepareOperationExit:async()=>emptyQueue(),ackOperationOutcomes:async()=>{},fsearchStatus:async()=>({ready:true}),diskSpace:async()=>1000,homeDir:async()=>'/home',loadConfig:async()=>null,loadViewSettings:async()=>null,loadSession:async()=>null,listTemplates:async()=>[],resolvePath:async p=>p,saveConfig:async v=>writes.config.push(v),saveViewSettings:async v=>writes.views.push(v),saveSession:async v=>writes.session.push(v),sessionExitReply:async(id,allow)=>replies.push([id,allow]),...overrides}
   globalThis[bridgeKey]={api,win,listen:async(name,fn)=>{events.set(name,fn);return()=>events.delete(name)},invoke:async(cmd,args)=>{if(cmd==='session_exit_reply')replies.push([args.requestId,args.allowExit])},confirm:async(...args)=>{dialogs.push(args);return discard}}
+  mod.exports.clipboard.setClip(null)
   let renderer
   const error=console.error
   console.error=(...a)=>{if(!String(a[0]).startsWith('react-test-renderer is deprecated.'))error(...a)}
   try{await act(async()=>{renderer=create(React.createElement(App))})}finally{console.error=error}
-  t.after(async()=>{await act(async()=>renderer.unmount());if(storageDescriptor)Object.defineProperty(globalThis,'localStorage',storageDescriptor);else delete globalThis.localStorage;for(const [k,v]of Object.entries(previous)){if(v===undefined)delete globalThis[k];else globalThis[k]=v}})
-  return {writes,replies,events,api,dialogs,setDiscard(value){discard=value},get closes(){return closes},get destroyed(){return destroyed},get root(){return renderer.root},get panes(){return renderer.root.findAllByType('pane-boundary')},get sidebar(){return renderer.root.findByType('sidebar-boundary')},async run(fn){await act(async()=>{await fn()})},close(){let prevented=false;const pending=closeHandler?.({preventDefault(){prevented=true}});return{pending,prevented}},exit(id){return events.get('bento-session-exit-requested')?.({payload:{requestId:id}})}}
+  t.after(async()=>{await act(async()=>renderer.unmount());mod.exports.clipboard.setClip(null);if(storageDescriptor)Object.defineProperty(globalThis,'localStorage',storageDescriptor);else delete globalThis.localStorage;for(const [k,v]of Object.entries(previous)){if(v===undefined)delete globalThis[k];else globalThis[k]=v}})
+  return {clipboard:mod.exports.clipboard,dragState:mod.exports.dragState,byteLabel:mod.exports.byteLabel,progressValue:mod.exports.progressValue,nativeDrop:payload=>dragHandler?.({payload}),writes,replies,events,api,dialogs,setDiscard(value){discard=value},get closes(){return closes},get destroyed(){return destroyed},get root(){return renderer.root},get panes(){return renderer.root.findAllByType('pane-boundary')},get sidebar(){return renderer.root.findByType('sidebar-boundary')},async run(fn){await act(async()=>{await fn()})},close(){let prevented=false;const pending=closeHandler?.({preventDefault(){prevented=true}});return{pending,prevented}},exit(id){return events.get('bento-session-exit-requested')?.({payload:{requestId:id}})}}
 }

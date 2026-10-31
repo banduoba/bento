@@ -1947,3 +1947,38 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 }
 .zip-checks { display: flex; flex-direction: column; gap: 8px; }
 .zip-actions { display: flex; gap: 8px; }
+
+/* Native file-operation queue: an inspectable popover leaves navigation available. */
+.operations { position: fixed; right: 12px; bottom: 34px; z-index: 160; font-size: 12px; }
+.operation-toggle { float: right; padding: 7px 12px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--popover-bg); color: var(--text); font: inherit; box-shadow: var(--popover-shadow); cursor: pointer; }
+.operation-toggle.active { color: var(--accent); border-color: var(--accent-line); }
+.operation-queue { position: absolute; right: 0; bottom: 40px; width: min(430px, calc(100vw - 24px)); max-height: min(680px, calc(100vh - 150px)); overflow: auto; border: 1px solid var(--popover-border); border-radius: 12px; background: var(--popover-bg); backdrop-filter: blur(24px); box-shadow: var(--popover-shadow); padding: 12px; color: var(--text); }
+.operation-queue > header { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.operation-queue > header b { flex: 1; font-size: 13px; }
+.operation-queue .btn { font-size: 11px; padding: 4px 8px; }
+.operation-note { color: var(--text-2); font-size: 11px; line-height: 1.6; margin: 5px 0; }
+.operation-error { color: var(--danger); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; margin: 6px 0; }
+.operation-job { border: 1px solid var(--border); border-radius: 9px; background: var(--pane-bg); padding: 10px; margin: 8px 0; }
+.operation-job-heading { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+.operation-job-heading > span { color: var(--text-2); }
+.operation-job.partial .operation-job-heading > span, .operation-job.waitingConflict .operation-job-heading > span { color: var(--warning-text); }
+.operation-job.failed .operation-job-heading > span { color: var(--danger); }
+.operation-path { display: block; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; color: var(--text-2); line-height: 1.6; font-size: 11px; }
+.operation-phase { font-size: 11px; margin-top: 8px; color: var(--text-2); }
+.operation-job progress { display: block; width: 100%; height: 5px; margin: 7px 0; accent-color: var(--accent); }
+.operation-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.operation-job details { margin-top: 8px; border-top: 1px solid var(--border); padding-top: 6px; }
+.operation-job details > div { overflow-wrap: anywhere; }
+.operation-job summary { color: var(--text-2); font-size: 11px; cursor: pointer; }
+.operation-recoveries { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
+.operation-recoveries h3 { font-size: 13px; margin: 0; }
+.operation-recoveries article { padding: 8px 0; }
+.operation-recoveries .btn { margin: 4px 4px 0 0; }
+.operation-conflict p, .operation-exit p { color: var(--text-2); font-size: 13px; line-height: 1.6; }
+.operation-conflict dl { padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--pane-bg); }
+.operation-conflict dt { font-size: 11px; color: var(--text-2); }
+.operation-conflict dd { margin: 4px 0 12px; font-size: 12px; overflow-wrap: anywhere; }
+.operation-conflict dd:last-child { margin-bottom: 0; }
+.operation-apply { display: flex; align-items: center; gap: 6px; color: var(--text-2); font-size: 12px; margin-top: 16px; }
+.operation-conflict .modal-footer { flex-wrap: wrap; }
+.operation-notice { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); z-index: 210; padding: 9px 12px; max-width: min(560px, calc(100vw - 32px)); border: 1px solid var(--border); border-radius: 10px; background: var(--popover-bg); box-shadow: var(--popover-shadow); color: var(--text); font-size: 12px; overflow-wrap: anywhere; }

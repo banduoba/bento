@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api } from '../api'
 
 const MODES = [
   { id: 'replace', label: '替换文本' },
@@ -80,17 +79,8 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const apply = async () => {
     if (!valid || busy) return
     setBusy(true)
-    const errors = []
-    for (const r of results) {
-      if (r.newName === r.name) continue
-      try {
-        await api.rename(r.path, r.newName)
-      } catch (e) {
-        errors.push(`${r.name} → ${r.newName}: ${e}`)
-      }
-    }
-    setBusy(false)
-    onApply(errors)
+    try { await onApply(results) }
+    finally { setBusy(false) }
   }
 
   const preview = results.slice(0, 6)

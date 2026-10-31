@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
@@ -10,7 +10,7 @@ import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { api, hasTauri } from './api'
 import { bumpManualRefreshTick, directoryKey, invalidateDirectories, rootRefreshKey } from './paneFeedback'
 import { createQuickLookNavigation } from './quickLookNavigation'
-import { clearCut, getClip, retainCut, setClip, subscribeClip } from './clipboard'
+import { clearCut, getClip, reserveCut, releaseCut, setClip, subscribeClip } from './clipboard'
 import { basename, parentPath, labelOf, copyText, folderTitle } from './format'
 import { dragState } from './nativeDrag'
 import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
@@ -30,6 +30,9 @@ import {
 import Sidebar from './components/Sidebar'
 import Pane from './components/Pane'
 import StatusBar from './components/StatusBar'
+import { createOperationClient } from './operations/client'
+import { createOperationEffects } from './operations/effects'
+import { operationId } from './operations/store'
 import ContextMenu from './components/ContextMenu'
 import BatchRenameDialog from './components/BatchRenameDialog'
 import ZipDialog, { normalizeZipPrefs, levelOf } from './components/ZipDialog'
@@ -45,6 +48,9 @@ import {
   resolveListKey,
   resolvePaneKey,
 } from './shortcuts'
+
+const OperationQueue = lazy(() => import('./components/OperationQueue'))
+const OperationConflict = lazy(() => import('./components/OperationConflict'))
 
 const MIME = 'application/x-bento'
 // 没有选中项时各窗格共用同一只空 Set。每次渲染 new Set() 会让统计 effect 的依赖一直变，
@@ -190,10 +196,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
   const [hoverTip, setHoverTip] = useState(null) // { x, y, text } 原生拖拽目标提示
-  const [undoToast, setUndoToast] = useState(null) // { label, fn } 可撤销操作提示
   const [rowToast, setRowToast] = useState(null) // { tabId, paths, text } feedback owned by one pane
   const rowToastTimer = useRef(null)
-  const undoStackRef = useRef([]) // { label, undo: () => Promise }
   const flashTimer = useRef(null)
   // 活动窗格，以及上一次离开的窗格。多于两个窗格时，F5/F6 送到刚离开的那个。
   // now 在按键时同步更新，长按 Tab 不用等下一次渲染才能继续切。
@@ -212,14 +216,44 @@ export default function App() {
   const [tick, setTick] = useState(0)
   const [manualRefreshTicks, setManualRefreshTicks] = useState({})
   const [directoryVersions, setDirectoryVersions] = useState({})
-  const [progress, setProgress] = useState(null)
 
   const rowsCache = useRef({}) // tabId -> 当前排序后的条目数组
-  const modeRef = useRef('copy')
-  const progTimer = useRef(null)
-  const toastTimer = useRef(null)
   const cfgRef = useRef(null)
   cfgRef.current = cfg
+  const operationDeps = useRef(null)
+  const completionCallbacks = useRef(new Map())
+  const [queueOpen, setQueueOpen] = useState(false)
+  const [operationNotice, setOperationNotice] = useState(null)
+  const [hiddenConflicts, setHiddenConflicts] = useState(new Set())
+  const [exitChoice, setExitChoice] = useState(false)
+  const [exitDraining, setExitDraining] = useState(false)
+  const exitResolver = useRef(null)
+  const operationEffects = useRef(null)
+  if (!operationEffects.current) operationEffects.current = createOperationEffects({
+    refreshDirectories: paths => operationDeps.current.refreshDirectories(paths),
+    removeSelection: paths => operationDeps.current.removeSelection(paths),
+    ownerPath: id => operationDeps.current.ownerPath(id),
+    feedback: (...args) => operationDeps.current.feedback(...args),
+    beginRename: (...args) => operationDeps.current.beginRename(...args),
+  })
+  const operations = useRef(null)
+  if (!operations.current) operations.current = createOperationClient({
+    api, listen: hasTauri ? listen : async () => () => {},
+    onOutcomes: (job, rows) => operationEffects.current.outcomes(job, rows),
+    onSettled: (job, summary) => {
+      operationEffects.current.settled(job, summary)
+      const callback = completionCallbacks.current.get(job.requestId)
+      completionCallbacks.current.delete(job.requestId)
+      if (job.state === 'completed' && (summary.counts.succeeded || 0) + (summary.counts.noop || 0) === job.progress.itemsTotal) callback?.()
+    },
+  })
+  const [operationState, setOperationState] = useState(() => operations.current.getState())
+  useEffect(() => {
+    const client = operations.current
+    const unsubscribe = client.subscribe(setOperationState)
+    client.start().catch(error => setOperationNotice(String(error)))
+    return () => { unsubscribe(); client.dispose(); clearTimeout(rowToastTimer.current); clearTimeout(flashTimer.current) }
+  }, [])
   useEffect(() => subscribeClip(setClipState), [])
   // 窗口置顶：配置变化（含启动恢复）时同步给原生窗口
   useEffect(() => {
@@ -326,6 +360,17 @@ export default function App() {
     const win = getCurrentWindow()
     const coordinator = createSessionClose({
       flush: flushPersistence,
+      operations: {
+        busy: async () => { await operations.current.start(); await operations.current.resync(); return operations.current.getState().busy },
+        choose: () => new Promise(resolve => { exitResolver.current = resolve; setExitChoice(true) }),
+        prepare: async cancelRemaining => {
+          setExitChoice(false)
+          setExitDraining(cancelRemaining)
+          try { await operations.current.prepareExit(cancelRemaining) }
+          finally { setExitDraining(false) }
+        },
+        drained: () => { setExitChoice(false); exitResolver.current?.(true); exitResolver.current = null },
+      },
       // destroy bypasses closeRequested, so the flushed close cannot re-enter this hook.
       close: () => win.destroy(),
       reply: (requestId, allowExit) => api.sessionExitReply(requestId, allowExit),
@@ -340,6 +385,7 @@ export default function App() {
         return coordinator.requestClose().catch(report)
       }),
       listen('bento-session-exit-requested', event => coordinator.requestExit(event.payload?.requestId).catch(report)),
+      listen('bento-operation-exit-drained', event => coordinator.requestDrained(event.payload?.requestId).catch(report)),
     ]
     return () => { registrations.forEach(registration => registration.then(unlisten => unlisten()).catch(report)) }
   }, [])
@@ -417,19 +463,6 @@ export default function App() {
       return { ...c, focusedIdx: clamped }
     })
   }, [focused])
-
-  // ---------- 传输进度 ----------
-  useEffect(() => {
-    if (!hasTauri) return
-    const un = listen('transfer-progress', (e) => {
-      setProgress({ ...e.payload, mode: modeRef.current })
-      clearTimeout(progTimer.current)
-      progTimer.current = setTimeout(() => setProgress(null), 1500)
-    })
-    return () => {
-      un.then((f) => f())
-    }
-  }, [])
 
   // ---------- 拦截外部文件拖放（WebView 默认行为会导航离开） ----------
   useEffect(() => {
@@ -885,11 +918,6 @@ export default function App() {
   }, [])
 
   // ---------- 文件操作 ----------
-  const reportErrors = (items) => {
-    const bad = (items || []).filter((x) => !x.ok)
-    if (bad.length) alert(bad.map((b) => `${basename(b.source)}: ${b.error}`).join('\n'))
-  }
-
   // The owner is captured at operation start; Pane resolves its own visible row or local fallback.
   const targetTabFor = (dest) => {
     const panes = cfgRef.current?.panes || []
@@ -923,167 +951,43 @@ export default function App() {
     })
   }
 
-  // Retain only unfinished reverse moves, including exact original names.
-  const restoreUndo = (moves) => {
-    let pending = [...moves].reverse().filter((m) => m.dest !== m.source)
-      .map((m) => ({ source: m.dest, dest: m.source }))
-    return async () => {
-      const results = await api.restoreMoves(pending)
-      pending = pending.filter((m) => !results?.some((r) => r.ok && r.source === m.source && r.dest === m.dest))
-      if (pending.length) {
-        const errors = (results || []).filter((r) => !r.ok).map((r) => `${basename(r.source)}: ${r.error}`)
-        throw new Error(`${pending.length} 个项目未恢复，已保留以便重试${errors.length ? '\n' + errors.join('\n') : ''}`)
-      }
-      return results
-    }
+  operationDeps.current = {
+    refreshDirectories,
+    ownerPath: id => cfgRef.current?.panes.flatMap(p => p.tabs).find(tab => tab.id === id)?.path,
+    feedback: showRowToast,
+    beginRename: (tabId, path, selectAll) => {
+      setSel(s => ({ ...s, [tabId]: new Set([path]) }))
+      setRenaming({ tabId, path, value: basename(path), selectAll })
+    },
+    removeSelection: paths => {
+      const gone = new Set(paths)
+      setSel(s => Object.fromEntries(Object.entries(s).map(([id, selected]) => [id, new Set([...selected].filter(path => !gone.has(path)))])))
+      window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths } }))
+    },
   }
-
-  const trashUndo = (paths) => {
-    let pending = [...paths].reverse()
-    return async () => {
-      const failed = []
-      for (const path of [...pending]) {
-        try {
-          await api.trash([path])
-          pending = pending.filter((p) => p !== path)
-        } catch (error) { failed.push(`${basename(path)}: ${error}`) }
-      }
-      if (failed.length) throw new Error(failed.join('\n'))
-    }
+  const submitOperation = async (kind, items, destination, ownerTabId, intent, options = {}, extra = {}, onSuccess) => {
+    const request = { requestId: operationId(), kind, items: items.map((item, i) => ({ itemId: `i${i}`, ...item })), destination: destination || null, options, ownerTabId: ownerTabId || null, intent, ...extra }
+    if (onSuccess) completionCallbacks.current.set(request.requestId, onSuccess)
+    setQueueOpen(true)
+    try { return await operations.current.enqueue(request) }
+    catch (error) { setOperationNotice(String(error)); return null }
   }
-
-  const transferInto = async (dest, paths, mode, onSuccess, ownerTabId = targetTabFor(dest)) => {
+  const transferInto = (dest, paths, mode, onSuccess, ownerTabId = targetTabFor(dest), options = {}) => {
     if (!paths?.length) return
-    modeRef.current = mode
-    try {
-      const results = await api.transfer(paths, dest, mode)
-      reportErrors(results)
-      // 记录成功的操作供 ⌘Z 撤销
-      const ok = (results || []).filter((r) => r.ok && r.dest)
-      if (ok.length === paths.length) onSuccess?.()
-      refreshDirectories([...new Set((results || []).flatMap(r => r.ok && r.dest
-        ? (mode === 'move' ? [parentPath(r.source), parentPath(r.dest)] : [parentPath(r.dest)])
-        : r.affectedDirectories || []))])
-      const moves = ok.filter((r) => r.dest !== r.source)
-      if (mode === 'move' && moves.length) {
-        pushUndo(
-          moves.length === 1 ? `移动：${basename(moves[0].dest)}` : `移动 ${moves.length} 个项目`,
-          restoreUndo(moves),
-          { directories: [...new Set(moves.flatMap(m => [parentPath(m.source), parentPath(m.dest)]))] }
-        )
-      }
-      if (mode === 'copy' && ok.length) {
-        const copies = ok.map((r) => r.dest)
-        pushUndo(
-          copies.length === 1 ? `拷贝：${basename(copies[0])}` : `拷贝 ${copies.length} 个项目`,
-          trashUndo(copies),
-          { silent: true, directories: [...new Set(copies.map(parentPath))] }
-        )
-        // Pane repositions its own feedback when the copied row becomes visible.
-        showRowToast(ownerTabId, copies, copies.length === 1 ? `已拷贝：${basename(copies[0])}` : `已拷贝 ${copies.length} 个项目`)
-      }
-    } catch (e) {
-      alert(`操作失败: ${e}`)
-    }
-    if (mode === 'move') setClip(null)
+    return submitOperation(mode === 'move' ? 'move' : 'copy', paths.map(source => ({ source })), dest, ownerTabId, options.keepBoth ? 'duplicate' : 'transfer', options, {}, onSuccess)
   }
-
-  // ⌘V 剪切：同卷 rename，跨卷仅在复制成功后删除源。成功的源立刻从列表消失。
-  const moveInto = async (dest, paths) => {
-    if (!paths?.length) return
-    modeRef.current = 'move'
-    const movedFrom = [...paths]
-    try {
-      const results = await api.moveItems(movedFrom, dest)
-      reportErrors(results)
-      const ok = (results || []).filter((r) => r.ok && r.dest && r.dest !== r.source)
-      refreshDirectories([...new Set((results || []).flatMap(r => r.ok && r.dest && r.dest !== r.source
-        ? [parentPath(r.source), parentPath(r.dest)] : r.affectedDirectories || []))])
-      if (ok.length) {
-        pushUndo(
-          ok.length === 1 ? `移动：${basename(ok[0].dest)}` : `移动 ${ok.length} 个项目`,
-          restoreUndo(ok),
-          { directories: [...new Set(ok.flatMap(m => [parentPath(m.source), parentPath(m.dest)]))] }
-        )
-        const gone = new Set(ok.map((r) => r.source))
-        setSel((s) => {
-          let changed = false
-          const next = {}
-          for (const [id, set] of Object.entries(s)) {
-            const filtered = new Set([...set].filter((p) => !gone.has(p)))
-            if (filtered.size !== set.size) changed = true
-            next[id] = filtered
-          }
-          return changed ? next : s
-        })
-        window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths: [...gone] } }))
-      }
-      const current = getClip()
-      const sameCut = current?.mode === 'cut'
-        && current.paths.length === movedFrom.length
-        && current.paths.every((p, i) => p === movedFrom[i])
-      if (sameCut) {
-        const completed = new Set((results || []).filter((r) => r.ok).map((r) => r.source))
-        retainCut(movedFrom.filter((p) => !completed.has(p)))
-      }
-    } catch (e) {
-      alert(`移动失败: ${e}`)
-    }
+  const moveInto = (dest, paths, ownerTabId = targetTabFor(dest), cutRevision = null) => {
+    if (!paths?.length || (cutRevision && !reserveCut(cutRevision))) return
+    return submitOperation('move', paths.map(source => ({ source })), dest, ownerTabId, cutRevision ? 'cutPaste' : 'transfer', {}, { clipRevision: cutRevision }).then(job => {
+      // An ambiguous admission stays reserved until reconciliation prevents a duplicate cut.
+      if (!job && !operations.current.getState().pendingSubmissions.length && cutRevision) releaseCut(cutRevision)
+      return job
+    })
   }
-
-  // 统一记录可撤销操作并提示（4 秒）
-  const pushUndo = (label, undo, opts = {}) => {
-    undoStackRef.current.push({ label, undo, directories: opts.directories || [] })
-    if (undoStackRef.current.length > 30) undoStackRef.current.shift()
-    if (opts.silent) return
-    setUndoToast({ label })
-    clearTimeout(toastTimer.current)
-    toastTimer.current = setTimeout(() => setUndoToast(null), 4000)
-  }
-
-  // ⌘Z：撤销最近一次移动
-  const undoLast = async () => {
-    const op = undoStackRef.current.at(-1)
-    if (!op || undoStackRef.current.some((item) => item.busy)) return
-    op.busy = true
-    try {
-      await op.undo()
-      const index = undoStackRef.current.indexOf(op)
-      if (index >= 0) undoStackRef.current.splice(index, 1)
-      clearTimeout(toastTimer.current)
-      setUndoToast({ label: op.label, undone: true })
-      setTimeout(() => setUndoToast(null), 2500)
-      refreshDirectories(op.directories)
-    } catch (e) {
-      setUndoToast({ label: op.label })
-      alert(`撤销失败: ${e}`)
-      refreshDirectories(op.directories)
-    } finally {
-      op.busy = false
-    }
-  }
-
+  const undoLast = () => operations.current.undo().catch(error => { setOperationNotice(String(error)); setQueueOpen(true) })
   const doTrash = (tabId, paths) => {
     const list = paths?.length ? paths : selArr(tabId)
-    if (!list.length) return
-    api
-      .trash(list)
-      .then((entries) => {
-        if (entries?.length) {
-          pushUndo(
-            entries.length === 1
-              ? `废纸篓：${basename(entries[0].original)}`
-              : `废纸篓 ${entries.length} 个项目`,
-            restoreUndo(entries.map((e) => ({ source: e.original, dest: e.trashed }))),
-            { directories: [...new Set(entries.flatMap(e => [parentPath(e.original), parentPath(e.trashed)]))] }
-          )
-        }
-      })
-      .catch((e) => alert(String(e)))
-      .finally(() => {
-        setSel((s) => ({ ...s, [tabId]: new Set() }))
-        refreshDirectories(list.map(parentPath))
-      })
+    if (list.length) return submitOperation('trash', list.map(source => ({ source })), null, tabId, 'trash')
   }
 
   // 描述一组条目：单个 →「文件「a.txt」/文件夹「b」」，多个 →「N 个项目（x 个文件、y 个文件夹）」
@@ -1121,7 +1025,7 @@ export default function App() {
     if (!current?.paths?.length) return
     const dest = locateTab(tabId)?.path
     if (!dest) return
-    if (current.mode === 'cut') moveInto(dest, current.paths)
+    if (current.mode === 'cut') moveInto(dest, current.paths, tabId, current.revision)
     else transferInto(dest, current.paths, 'copy', undefined, tabId)
   }
 
@@ -1135,33 +1039,17 @@ export default function App() {
   }
 
   // ---------- 压缩（QSpace 风格「创建归档」）----------
-  const runZip = (paths, dir, o, ownerTabId = targetTabFor(dir)) => {
-    clearTimeout(rowToastTimer.current)
-    showRowToast(ownerTabId, paths, '正在压缩…')
-    api
-      .zipPaths(paths, dir, {
-        name: o.name,
-        level: o.level,
-        password: o.password || undefined,
-        separate: o.separate,
-      })
-      .then((created) => {
-        refreshDirectories(created?.length ? [dir] : [])
-        if (!created?.length) {
-          setRowToast(null)
-          return
-        }
-        pushUndo(
-          created.length === 1 ? `压缩：${basename(created[0])}` : `压缩 ${created.length} 个`,
-          trashUndo(created),
-          { silent: true, directories: [dir] }
-        )
-        showRowToast(ownerTabId, created, created.length === 1 ? `已压缩：${basename(created[0])}` : `已压缩为 ${created.length} 个文件`)
-      })
-      .catch((e) => {
-        setRowToast(null)
-        alert(String(e))
-      })
+  const runZip = (paths, dir, o, ownerTabId = targetTabFor(dir)) => submitOperation('zip', paths.map(source => ({ source })), dir, ownerTabId, 'archive', {
+    archiveName: o.name, compressionLevel: o.level, password: o.password || null, separate: !!o.separate,
+  })
+  const retryOperation = jobId => {
+    const retry = operations.current.retryInfo(jobId)
+    if (retry?.kind !== 'zip') return operations.current.retry(jobId)
+    setZipDlg({
+      id: operationId(), paths: retry.items.map(item => item.source), dir: retry.destination,
+      name: retry.options.archiveName, tabId: retry.ownerTabId, requirePassword: retry.requiresPassword,
+      prefs: normalizeZipPrefs({ mode: 'custom', level: retry.options.compressionLevel, separate: retry.options.separate }),
+    })
   }
   // 默认文件名：单个项目 = 该项目名.zip；多个项目 = 当前文件夹名.zip
   const zipDefaultName = (paths, dir) =>
@@ -1185,47 +1073,20 @@ export default function App() {
   const doDuplicate = (tabId, paths) => {
     const list = paths?.length ? paths : selArr(tabId)
     const dest = locateTab(tabId)?.path
-    if (list.length && dest) transferInto(dest, list, 'copy', undefined, tabId)
+    if (list.length && dest) transferInto(dest, list, 'copy', undefined, tabId, { keepBoth: true })
   }
 
-  const newFolder = (tabId) => {
+  const newFolder = tabId => {
     const dest = locateTab(tabId)?.path
-    if (!dest) return
-    api
-      .makeDir(dest)
-      .then((created) => {
-        refreshDirectories([dest])
-        setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
-        setRenaming({ tabId, path: created, value: basename(created), selectAll: true })
-        pushUndo(`新建文件夹：${basename(created)}`, trashUndo([created]), { directories: [dest] })
-      })
-      .catch((e) => alert(String(e)))
+    if (dest) return submitOperation('create', [{ createKind: 'directory' }], dest, tabId, 'newDirectory')
   }
-
-  const beginCreatedRename = (tabId, created) => {
-    refreshDirectories([parentPath(created)])
-    setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
-    // 与普通重命名一样只选中主文件名，扩展名留着（模板 .docx 不会被一次输入冲掉）
-    setRenaming({ tabId, path: created, value: basename(created) })
-    pushUndo(`新建文件：${basename(created)}`, trashUndo([created]), { directories: [parentPath(created)] })
-  }
-
   const newFile = (tabId, kind) => {
     const dest = locateTab(tabId)?.path
-    if (!dest) return
-    api
-      .createFile(dest, kind)
-      .then((created) => beginCreatedRename(tabId, created))
-      .catch((e) => alert(String(e)))
+    if (dest) return submitOperation('create', [{ createKind: kind === 'md' ? 'markdown' : kind === 'txt' ? 'text' : kind }], dest, tabId, 'newFile')
   }
-
   const newFromTemplate = (tabId, template) => {
     const dest = locateTab(tabId)?.path
-    if (!dest || !template?.path) return
-    api
-      .copyTemplate(dest, template.path)
-      .then((created) => beginCreatedRename(tabId, created))
-      .catch((e) => alert(String(e)))
+    if (dest && template?.path) return submitOperation('create', [{ createKind: 'template', source: template.path }], dest, tabId, 'newTemplate')
   }
 
   const openSearchResult = (item) => {
@@ -1252,19 +1113,8 @@ export default function App() {
     const { tabId, path, value } = renaming
     setRenaming(null)
     const current = basename(path)
-    if (!value || value.trim() === current) return
-    api
-      .rename(path, value)
-      .then((newPath) => {
-        pushUndo(`重命名：${current} → ${value}`, async () => {
-          await api.rename(newPath, current)
-        }, { directories: [parentPath(path)] })
-      })
-      .catch((e) => alert(String(e)))
-      .finally(() => {
-        setSel((s) => ({ ...s, [tabId]: new Set() }))
-        refreshDirectories([parentPath(path)])
-      })
+    if (!value || value === current) return
+    return submitOperation('rename', [{ source: path, targetName: value }], null, tabId, 'rename')
   }
 
   // ---------- 右键菜单 ----------
@@ -1499,6 +1349,7 @@ export default function App() {
   // ---------- 全局快捷键 ----------
   const keyRef = useRef(null)
   keyRef.current = (e) => {
+    if (exitChoice || exitDraining || visibleConflict) return
     // ⌘,：输入框聚焦时也可打开设置
     if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key === ',') {
       e.preventDefault()
@@ -1508,8 +1359,10 @@ export default function App() {
       setSettingsOpen(true)
       return
     }
-    // ⌘Z：撤销最近一次移动
+    // Text inputs retain native undo; file undo belongs to the backend effect stack.
     if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+      const tag = document.activeElement?.tagName
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return
       e.preventDefault()
       undoLast()
       return
@@ -1561,7 +1414,7 @@ export default function App() {
     const paneRows = rowsCache.current[tid] || []
     const firstEntry = () => paneRows.find((x) => x.path === paths[0])
 
-    const listBlocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen
+    const listBlocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen || exitChoice || exitDraining || visibleConflict
     // 重命名输入框还没挂上时也不要把 Tab/F5/F6 当成窗格命令。
     const paneAction = listBlocked || renaming ? null : resolvePaneKey(e)
     if (paneAction === 'focusNext' || paneAction === 'focusPrev') {
@@ -1725,6 +1578,8 @@ export default function App() {
     return () => window.removeEventListener('keydown', h)
   }, [])
 
+  const conflictKey = job => `${job.jobId}:${job.conflict?.conflictId}:${job.conflict?.revision}`
+  const visibleConflict = operationState.jobs.find(job => job.state === 'waitingConflict' && job.conflict && !hiddenConflicts.has(conflictKey(job)))
   const cutSet = useMemo(() => new Set(clip?.mode === 'cut' ? clip.paths : []), [clip])
 
   if (!cfg) return <div className="boot">{recoveryNotice || 'Bento 启动中…'}</div>
@@ -1928,30 +1783,48 @@ export default function App() {
         </div>
       </div>
 
-      <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]} progress={progress} />
+      <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]} />
+      <Suspense fallback={null}>
+        <OperationQueue state={operationState} client={operations.current} open={queueOpen}
+          onToggle={() => setQueueOpen(open => !open)}
+          onConflict={job => setHiddenConflicts(current => {
+            const next = new Set(current)
+            next.delete(conflictKey(job))
+            return next
+          })}
+          onUndo={undoLast} onRetry={retryOperation} onError={error => setOperationNotice(String(error))} reveal={api.reveal} />
+      </Suspense>
+      {operationNotice && <div className="operation-notice" role="alert">
+        {operationNotice} <button className="btn" onClick={() => setOperationNotice(null)}>知道了</button>
+      </div>}
+      {visibleConflict && !exitChoice && !exitDraining && <Suspense fallback={null}>
+        <OperationConflict key={conflictKey(visibleConflict)} job={visibleConflict}
+          onHide={() => setHiddenConflicts(current => new Set([...current, conflictKey(visibleConflict)]))}
+          onResolve={(...args) => operations.current.resolve(...args)} onError={setOperationNotice} />
+      </Suspense>}
+      {(exitChoice || exitDraining) && <div className="modal-backdrop">
+        <section className="modal operation-exit" role="dialog" aria-modal="true" aria-label="退出前的文件操作">
+          <h2 className="modal-title">{exitDraining ? '正在结束文件操作…' : '文件操作尚未完成'}</h2>
+          <p>{exitDraining ? '正在等待当前文件、归档进程和恢复记录安全收尾。'
+            : '继续操作，或取消剩余任务并等待当前项目收尾后退出。已经完成的文件将保留。'}</p>
+          {exitChoice && <div className="modal-footer">
+            <button autoFocus className="btn primary" onClick={() => {
+              setExitChoice(false)
+              exitResolver.current?.(false)
+              exitResolver.current = null
+            }}>继续操作</button>
+            <button className="btn" onClick={() => {
+              setExitChoice(false)
+              exitResolver.current?.(true)
+              exitResolver.current = null
+            }}>取消剩余操作后退出</button>
+          </div>}
+        </section>
+      </div>}
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
       {hoverTip && (
         <div className="drag-tip" style={{ left: hoverTip.x, top: hoverTip.y }}>
           {hoverTip.text}
-        </div>
-      )}
-      {undoToast && (
-        <div className="undo-toast">
-          <span>
-            {undoToast.undone && '已撤销：'}
-            <b>{undoToast.label}</b>
-          </span>
-          {!undoToast.undone && (
-            <button
-              className="undo-btn"
-              onClick={() => {
-                setUndoToast(null)
-                undoLast()
-              }}
-            >
-              撤销
-            </button>
-          )}
         </div>
       )}
       <SearchOverlay
@@ -2003,7 +1876,8 @@ export default function App() {
           count={zipDlg.paths.length}
           dir={zipDlg.dir}
           defaultName={zipDlg.name}
-          prefs={normalizeZipPrefs(cfg.zipPrefs)}
+          prefs={zipDlg.prefs || normalizeZipPrefs(cfg.zipPrefs)}
+          requirePassword={zipDlg.requirePassword}
           onCancel={() => setZipDlg(null)}
           onSubmit={(o, saved) => {
             const d = zipDlg
@@ -2017,12 +1891,10 @@ export default function App() {
         <BatchRenameDialog
           items={batchRename.items}
           onCancel={() => setBatchRename(null)}
-          onApply={(errors) => {
+          onApply={async results => {
             const tid = batchRename.tabId
             setBatchRename(null)
-            setSel((s) => ({ ...s, [tid]: new Set() }))
-            refreshDirectories(batchRename.items.map(item => parentPath(item.path)))
-            if (errors.length) alert(`部分重命名失败：\n${errors.join('\n')}`)
+            await submitOperation('rename', results.filter(item => item.newName !== item.name).map(item => ({ source: item.path, targetName: item.newName })), null, tid, 'batchRename')
           }}
         />
       )}

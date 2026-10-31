@@ -1,136 +1,98 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { parentPath } from './format.js'
-import { directoryKey } from './paneFeedback.js'
+import { mountApp, deferred } from './test/AppHarness.js'
+import { operationBoundary, outcome, key } from './test/OperationBoundary.js'
 
-// Execute the App's actual operation callbacks against the IPC boundary.
-// This catches a wiring regression even if a standalone undo helper stays correct.
-function harness(api) {
-  const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
-  const callbacks = source.slice(source.indexOf('  const reportErrors ='), source.indexOf('  // 描述一组条目'))
-  const stack = { current: [] }, toasts = [], alerts = [], invalidated = []
-  const noop = () => {}
-  const build = new Function('api', 'undoStackRef', 'setUndoToast', 'alert', 'refresh', 'basename', 'setTimeout', 'clearTimeout', 'window', 'CustomEvent', 'modeRef', 'setSel', 'getClip', 'setClip', 'retainCut', 'toastTimer', 'rowToastTimer', 'setRowToast', 'cfgRef', 'visibleCount', 'activeTabOf', 'focusIdx', 'directoryKeyFor', 'parentPath', 'refreshDirectories', `${callbacks}; return { moveInto, transferInto, undoLast, doTrash }`)
-  const actions = build(api, stack, t => toasts.push(t), e => alerts.push(e), noop, p => p.slice(p.lastIndexOf('/') + 1), noop, noop, { dispatchEvent: noop }, class {}, { current: null }, noop, () => null, noop, noop, {}, {}, noop, { current: { panes: [] } }, 2, noop, 0, directoryKey, parentPath, paths => invalidated.push(...paths))
-  return { ...actions, stack, toasts, alerts, invalidated }
+async function completedMove(t,extra={}) {
+  const b=operationBoundary(),h=await mountApp(t,{...b.api,...extra})
+  await h.run(()=>h.panes[0].props.onDropTransfer('/dest',['/src/original'],'move'))
+  b.setUndo('u-exact')
+  await b.emit(h,'j1',{state:'completed',phase:'finished',undoId:'u-exact'},[outcome({source:'/src/original',actualDestination:'/dest/original copy',sourceDisposition:'removed',affectedDirectories:['/src','/dest']})])
+  return {b,h}
 }
-
-test('App undo restores complete original pathname after collision, in reverse order', async () => {
-  const calls = []
-  const moved = [{ source: '/note.txt', dest: '/dest/note copy.txt', ok: true }, { source: '/src/b', dest: '/dest/b', ok: true }]
-  const api = { moveItems: async (sources, dest) => { calls.push({ sources, dest }); return moved }, restoreMoves: async moves => { calls.push(moves); return moves.map(m => ({ ...m, ok: true })) } }
-  const app = harness(api)
-  await app.moveInto('/dest', ['/note.txt', '/src/b'])
-  assert.deepEqual(app.alerts, [])
-  app.invalidated.length = 0
-  await app.undoLast()
-  assert.deepEqual(new Set(app.invalidated), new Set(['/', '/src', '/dest']))
-  assert.deepEqual(calls[1], [{ source: '/dest/b', dest: '/src/b' }, { source: '/dest/note copy.txt', dest: '/note.txt' }])
-  assert.equal(app.stack.current.length, 0)
-  assert.equal(app.toasts.at(-1).undone, true)
+test('App undo uses backend effect id after a collision and refreshes exact original paths from inverse outcomes',async t=>{
+  const {b,h}=await completedMove(t)
+  await key(h,'z',{metaKey:true})
+  const call=b.calls.find(c=>c[0]==='undo')
+  assert.equal(call[1],'u-exact');assert.equal(call.length,3)
+  const inverse=[...b.jobs.values()].find(j=>j.kind==='undo')
+  b.setUndo(null)
+  await b.emit(h,inverse.jobId,{state:'completed',phase:'finished'},[outcome({source:'/dest/original copy',actualDestination:'/src/original',sourceDisposition:'removed',affectedDirectories:['/dest','/src']})])
+  assert.deepEqual(h.panes[0].props.directoryVersions,{'/src':2,'/dest':2})
 })
-
-test('App partial undo retains only failed items for retry and never shows full success', async () => {
-  const moved = [{ source: '/src/a', dest: '/dst/a', ok: true }, { source: '/src/b', dest: '/dst/b', ok: true }]
-  const calls = []
-  const api = { moveItems: async () => moved, restoreMoves: async moves => { calls.push(moves); return moves.map(m => ({ ...m, ok: m.source.endsWith('/b') || calls.length > 1, error: 'occupied' })) } }
-  const app = harness(api)
-  await app.moveInto('/dst', moved.map(m => m.source))
-  app.invalidated.length = 0
-  await app.undoLast()
-  assert.equal(app.stack.current.length, 1)
-  assert.notEqual(app.toasts.at(-1)?.undone, true)
-  assert.equal(app.alerts.length, 1)
-  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
-  assert.deepEqual(app.stack.current[0].directories, ['/src', '/dst'])
-  app.invalidated.length = 0
-  await app.undoLast()
-  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
-  assert.deepEqual(calls[1], [{ source: '/dst/a', dest: '/src/a' }])
-  assert.equal(app.stack.current.length, 0)
+test('partial undo retries the same server id without replaying completed inverse outcomes',async t=>{
+  const {b,h}=await completedMove(t)
+  await key(h,'z',{metaKey:true})
+  const first=[...b.jobs.values()].find(j=>j.kind==='undo')
+  await b.emit(h,first.jobId,{state:'partial',phase:'finished'},[outcome({itemId:'inverse-b',source:'/dest/b',actualDestination:'/src/b',affectedDirectories:['/src','/dest']}),outcome({itemId:'inverse-a',status:'failed',actualDestination:null,effectId:null,published:false,affectedDirectories:[],error:{code:'occupied',phase:'undoing',message:'occupied'}})])
+  assert.equal(h.panes[0].props.directoryVersions['/src'],2)
+  await key(h,'z',{metaKey:true})
+  const calls=b.calls.filter(c=>c[0]==='undo')
+  assert.deepEqual(calls.map(c=>c[1]),['u-exact','u-exact']);assert.notEqual(calls[0][2],calls[1][2])
+  const second=[...b.jobs.values()].filter(j=>j.kind==='undo').at(-1)
+  await b.emit(h,second.jobId,{state:'completed',phase:'finished'},[outcome({itemId:'inverse-a',source:'/dest/a',actualDestination:'/src/a',effectId:'inverse-a',affectedDirectories:['/src','/dest']})])
+  assert.equal(h.panes[0].props.directoryVersions['/src'],3)
+  assert.equal(h.panes[0].props.operationToast,null)
 })
-
-test('App rejected undo remains retryable; overlapping undo executes once', async () => {
-  let release
-  let attempts = 0
-  const api = { moveItems: async () => [{ source: '/src/a', dest: '/dst/a', ok: true }], restoreMoves: async () => { attempts++; return new Promise((_, reject) => { release = () => reject(new Error('IPC failed')) }) } }
-  const app = harness(api)
-  await app.moveInto('/dst', ['/src/a'])
-  app.invalidated.length = 0
-  const pending = app.undoLast()
-  await app.undoLast()
-  // Legacy implementation never calls restoreMoves; report an assertion, never hang.
-  assert.equal(attempts, 1)
-  release(); await pending
-  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
-  assert.equal(app.stack.current.length, 1)
-  assert.notEqual(app.toasts.at(-1)?.undone, true)
+test('rejected undo remains retryable and overlapping key presses admit one undo',async t=>{
+  const gate=deferred(),calls=[]
+  const {h}=await completedMove(t,{undoOperation:async(...a)=>{calls.push(a);await gate.promise;throw Error('lost undo reply')}})
+  await key(h,'z',{metaKey:true});await key(h,'z',{metaKey:true})
+  assert.equal(calls.length,1)
+  await h.run(async()=>{gate.resolve();await new Promise(r=>setImmediate(r))})
+  await h.run(()=>h.root.findAllByType('button').find(n=>n.children.join('')==='同步并重试提交').props.onClick())
+  assert.equal(calls.length,2)
+  assert.deepEqual(calls.map(c=>c[0]),['u-exact','u-exact']);assert.equal(calls[0][1],calls[1][1])
 })
-
-test('legacy transfer move undo also restores exact paths and retains item failures', async () => {
-  const moved = [{ source: '/src/original', dest: '/dst/original copy', ok: true }]
-  const app = harness({ transfer: async () => moved, restoreMoves: async () => [{ source: '/dst/original copy', dest: '/src/original', ok: false, error: 'missing source' }] })
-  await app.transferInto('/dst', ['/src/original'], 'move')
-  await app.undoLast()
-  assert.equal(app.stack.current.length, 1)
-  assert.notEqual(app.toasts.at(-1)?.undone, true)
+test('input, textarea and contenteditable undo remain native while file undo is available',async t=>{
+  const {b,h}=await completedMove(t)
+  for(const element of [{tagName:'INPUT'},{tagName:'TEXTAREA'},{tagName:'DIV',isContentEditable:true}]){
+    document.activeElement=element
+    assert.equal((await key(h,'z',{metaKey:true})).defaultPrevented,false)
+  }
+  assert.equal(b.calls.some(c=>c[0]==='undo'),false)
 })
-
-test('missing undo outcomes retain retry data and cannot count as success', async () => {
-  const app = harness({ moveItems: async () => [{ source: '/src/a', dest: '/dst/a', ok: true }], restoreMoves: async () => [] })
-  await app.moveInto('/dst', ['/src/a'])
-  await app.undoLast()
-  assert.equal(app.stack.current.length, 1)
-  assert.notEqual(app.toasts.at(-1)?.undone, true)
+test('missing inverse outcome pages do not acknowledge results or announce undo success',async t=>{
+  const {b,h}=await completedMove(t)
+  await key(h,'z',{metaKey:true})
+  const inverse=[...b.jobs.values()].find(j=>j.kind==='undo')
+  h.api.getOperationOutcomes=async(id,offset)=>({sessionId:'test',jobId:id,revision:2,offset,total:1,outcomes:[]})
+  inverse.outcomeCount=1
+  await h.run(()=>h.events.get('operation-changed')({payload:{...inverse,revision:2,state:'partial',phase:'finished',outcomeCount:1}}))
+  await h.run(()=>new Promise(r=>setImmediate(r)))
+  assert.equal(b.calls.some(c=>c[0]==='ack'&&c[1]===inverse.jobId),false)
+  assert.equal(h.panes[0].props.operationToast,null)
+  assert.ok(h.root.findAll(n=>n.props.role==='alert').length)
 })
-
-test('copy undo retains failed trash items without deleting successful items twice', async () => {
-  const calls = [], removed = new Set()
-  let failed = false
-  const app = harness({
-    transfer: async () => [{ source: '/src/a', dest: '/dst/a', ok: true }, { source: '/src/b', dest: '/dst/b', ok: true }],
-    trash: async ([path]) => {
-      calls.push(path)
-      if (path === '/dst/a' && !failed) { failed = true; throw new Error('read only') }
-      assert.equal(removed.has(path), false)
-      removed.add(path)
-    },
-  })
-  // A DOM row is unnecessary for these undo checks; skip toast rendering.
-  globalThis.document = { querySelectorAll: () => [] }
-  try {
-    await app.transferInto('/dst', ['/src/a', '/src/b'], 'copy')
-    await app.undoLast()
-    assert.equal(app.stack.current.length, 1)
-    await app.undoLast()
-    assert.deepEqual(calls, ['/dst/b', '/dst/a', '/dst/a'])
-    assert.equal(app.stack.current.length, 0)
-  } finally { delete globalThis.document }
+test('copy undo is a dedicated backend job and never bypasses the queue with direct trash',async t=>{
+  const b=operationBoundary(),h=await mountApp(t,{...b.api,trash:()=>assert.fail('direct trash is forbidden'),restoreMoves:()=>assert.fail('frontend must not construct inverse paths')})
+  await h.run(()=>h.panes[0].props.onDropTransfer('/dest',['/src/a'],'copy'))
+  b.setUndo('copy-effect')
+  await b.emit(h,'j1',{state:'completed',phase:'finished',undoId:'copy-effect'},[outcome()])
+  await key(h,'z',{metaKey:true})
+  assert.equal(b.calls.find(c=>c[0]==='undo')[1],'copy-effect')
 })
-
-test('Trash undo restores the full original name and invalidates both original and Trash directories', async () => {
-  const restores = []
-  const app = harness({
-    trash: async () => [{ original: '/note.txt', trashed: '/Trash/note collision.txt' }],
-    restoreMoves: async moves => { restores.push(moves); return moves.map(move => ({ ...move, ok: true })) },
-  })
-  app.doTrash('a', ['/note.txt'])
-  await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(app.alerts, [])
-  assert.equal(app.stack.current.length, 1)
-  app.invalidated.length = 0
-  await app.undoLast()
-  assert.deepEqual(restores, [[{ source: '/Trash/note collision.txt', dest: '/note.txt' }]])
-  assert.deepEqual(new Set(app.invalidated), new Set(['/', '/Trash']))
-  assert.equal(app.stack.current.length, 0)
+test('Trash undo delegates exact original-name restoration and consumes both authoritative directories',async t=>{
+  const b=operationBoundary(),h=await mountApp(t,b.api),p=h.panes[0].props,id=p.pane.tabs[0].id
+  await h.run(()=>p.onSelect(id,new Set(['/note.txt'])))
+  await key(h,'Backspace',{metaKey:true})
+  assert.equal(b.requests[0].kind,'trash')
+  b.setUndo('trash-effect')
+  await b.emit(h,'j1',{state:'completed',phase:'finished'},[outcome({source:'/note.txt',actualDestination:'/Trash/note collision.txt',sourceDisposition:'removed',affectedDirectories:['/','/Trash']})])
+  await key(h,'z',{metaKey:true})
+  assert.equal(b.calls.find(c=>c[0]==='undo')[1],'trash-effect')
+  const inverse=[...b.jobs.values()].find(j=>j.kind==='undo')
+  await b.emit(h,inverse.jobId,{state:'completed',phase:'finished'},[outcome({source:'/Trash/note collision.txt',actualDestination:'/note.txt',sourceDisposition:'removed',affectedDirectories:['/','/Trash']})])
+  assert.deepEqual(h.panes[0].props.directoryVersions,{'/':2,'/Trash':2})
 })
-
-test('cut move refreshes published partial failures without registering undo or success', async () => {
-  const app = harness({ moveItems: async () => [{ source: '/src/a', dest: '/dst/a', ok: false, error: 'source removal failed', affectedDirectories: ['/src', '/dst'] }] })
-  await app.moveInto('/dst', ['/src/a'])
-  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
-  assert.equal(app.stack.current.length, 0)
-  assert.equal(app.toasts.length, 0)
-  assert.equal(app.alerts.length, 1)
+test('published partial cut leaves recovery guidance and cannot be automatically pasted a second time',async t=>{
+  const b=operationBoundary(),h=await mountApp(t,b.api)
+  await h.run(()=>h.clipboard.setClip({mode:'cut',paths:['/src/a']}))
+  await key(h,'v',{metaKey:true})
+  await b.emit(h,'j1',{state:'partial',phase:'finished'},[outcome({status:'partial',sourceDisposition:'cleanupIncomplete',retry:'finishSourceCleanup',affectedDirectories:['/src','/dest']})])
+  assert.equal(h.clipboard.getClip(),null)
+  await key(h,'v',{metaKey:true})
+  assert.equal(b.requests.length,1)
+  assert.equal(h.panes[0].props.operationToast,null)
+  assert.deepEqual(h.panes[0].props.directoryVersions,{'/src':1,'/dest':1})
 })
