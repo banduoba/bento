@@ -85,3 +85,43 @@ export function pageStride(clientHeight) {
   const height = Number.isFinite(clientHeight) && clientHeight > 0 ? clientHeight : LIST_ROW_HEIGHT * 10
   return Math.max(1, Math.floor(height / LIST_ROW_HEIGHT) - 1)
 }
+
+/**
+ * 窗格快捷键。
+ * focusNext / focusPrev  Tab / Shift+Tab 切换活动窗格
+ * copyToOther            F5 把选中项复制到另一窗格的当前目录
+ * moveToOther            F6 把选中项移动到另一窗格的当前目录
+ *
+ * 不认 ⌘ / ⌥ / ⌃（⌃Tab 仍是窗格内换标签）。是否执行由调用方看可见窗格数：
+ * 单窗格时焦点切换应放行，复制/移动应直接放弃。
+ */
+export function resolvePaneKey(e) {
+  if (!e || e.metaKey || e.altKey || e.ctrlKey) return null
+  if (e.key === 'Tab') return e.shiftKey ? 'focusPrev' : 'focusNext'
+  if (e.shiftKey) return null
+  if (e.key === 'F5') return 'copyToOther'
+  if (e.key === 'F6') return 'moveToOther'
+  return null
+}
+
+/** Tab 之后的活动窗格。不足两个窗格、或下标非法时返回 -1，调用方保持原样。 */
+export function paneIndexAfterKey(action, active, count) {
+  if (action !== 'focusNext' && action !== 'focusPrev') return -1
+  if (!Number.isInteger(count) || count < 2) return -1
+  if (!Number.isInteger(active) || active < 0 || active >= count) return -1
+  const step = action === 'focusNext' ? 1 : count - 1
+  return (active + step) % count
+}
+
+/**
+ * F5/F6 的目标窗格。
+ * 正好两个窗格时就是对侧。更多窗格时优先用刚离开的那个，对不上再取下一个。
+ * 单窗格返回 -1。
+ */
+export function otherPaneIndex(active, count, previous) {
+  if (!Number.isInteger(count) || count < 2) return -1
+  if (!Number.isInteger(active) || active < 0 || active >= count) return -1
+  if (count === 2) return 1 - active
+  if (Number.isInteger(previous) && previous !== active && previous >= 0 && previous < count) return previous
+  return (active + 1) % count
+}

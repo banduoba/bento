@@ -5,8 +5,11 @@ import {
   ENTER_RENAME,
   listIndexAfterKey,
   normalizeEnterAction,
+  otherPaneIndex,
   pageStride,
+  paneIndexAfterKey,
   resolveListKey,
+  resolvePaneKey,
 } from './shortcuts.js'
 
 const key = (props) => resolveListKey({ altKey: false, ctrlKey: false, shiftKey: false, metaKey: false, ...props }, props.enterAction)
@@ -47,6 +50,53 @@ test('modified keys are left alone', () => {
   }
   assert.equal(key({ key: 'ArrowLeft', metaKey: true }), null)
   assert.equal(key({ key: 'ArrowRight', metaKey: true }), null)
+})
+
+const paneKey = (props) => resolvePaneKey({ altKey: false, ctrlKey: false, shiftKey: false, metaKey: false, ...props })
+
+test('Tab and Shift+Tab switch panes; F5 copies and F6 moves', () => {
+  assert.equal(paneKey({ key: 'Tab' }), 'focusNext')
+  assert.equal(paneKey({ key: 'Tab', shiftKey: true }), 'focusPrev')
+  assert.equal(paneKey({ key: 'F5' }), 'copyToOther')
+  assert.equal(paneKey({ key: 'F6' }), 'moveToOther')
+})
+
+test('pane shortcuts ignore modifiers that already mean something else', () => {
+  for (const extra of [{ metaKey: true }, { altKey: true }, { ctrlKey: true }]) {
+    assert.equal(paneKey({ key: 'Tab', ...extra }), null)
+    assert.equal(paneKey({ key: 'F5', ...extra }), null)
+    assert.equal(paneKey({ key: 'F6', ...extra }), null)
+  }
+  assert.equal(paneKey({ key: 'F5', shiftKey: true }), null)
+  assert.equal(paneKey({ key: 'F6', shiftKey: true }), null)
+  assert.equal(paneKey({ key: 'Enter' }), null)
+  assert.equal(paneKey(null), null)
+})
+
+test('Tab cycles visible panes and does nothing when only one is showing', () => {
+  assert.equal(paneIndexAfterKey('focusNext', 0, 1), -1)
+  assert.equal(paneIndexAfterKey('focusPrev', 0, 1), -1)
+  assert.equal(paneIndexAfterKey('focusNext', 0, 2), 1)
+  assert.equal(paneIndexAfterKey('focusNext', 1, 2), 0)
+  assert.equal(paneIndexAfterKey('focusPrev', 0, 2), 1)
+  assert.equal(paneIndexAfterKey('focusPrev', 1, 2), 0)
+  assert.equal(paneIndexAfterKey('focusNext', 3, 4), 0)
+  assert.equal(paneIndexAfterKey('focusPrev', 0, 4), 3)
+  assert.equal(paneIndexAfterKey('copyToOther', 0, 2), -1)
+  assert.equal(paneIndexAfterKey('focusNext', -1, 2), -1)
+  assert.equal(paneIndexAfterKey('focusNext', 0, 0), -1)
+})
+
+test('F5/F6 target the other pane, or the pane just left when there are more than two', () => {
+  assert.equal(otherPaneIndex(0, 1), -1)
+  assert.equal(otherPaneIndex(0, 2), 1)
+  assert.equal(otherPaneIndex(1, 2, 1), 0)
+  assert.equal(otherPaneIndex(2, 4, 0), 0)
+  assert.equal(otherPaneIndex(0, 4, 3), 3)
+  assert.equal(otherPaneIndex(0, 4, 0), 1)
+  assert.equal(otherPaneIndex(0, 4, 9), 1)
+  assert.equal(otherPaneIndex(0, 4, null), 1)
+  assert.equal(otherPaneIndex(4, 4, 1), -1)
 })
 
 test('list index clamps and pages with overlap', () => {
