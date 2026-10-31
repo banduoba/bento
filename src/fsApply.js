@@ -23,7 +23,7 @@ export function normalizeFsChanges(payload) {
   return out
 }
 
-function entryName(entry) {
+export function entryName(entry) {
   if (entry?.name) return entry.name
   const path = entry?.path || ''
   const i = path.lastIndexOf('/')

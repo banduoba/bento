@@ -87,7 +87,7 @@ rm -rf scripts/bench/fixtures/10k scripts/bench/fixtures/100k
 | 字段 | 含义 |
 | --- | --- |
 | `headless.scan_node` | Node `readdir` + 64 路并发 `stat`，组装和 `list_dir` 相近的字段。便携对照，**不能**用来判断 Rust 扫描有没有变快。另有一次 `JSON.stringify`，近似 IPC 打包，不含界面。 |
-| `headless.scan_rust` | 加上 `--rust` 才有。`scripts/bench/scan-rs` 按 `src-tauri/src/lib.rs` 的 `list_dir` / `make_entry` 做：`read_dir`、Rayon 并行 metadata、默认跳过点文件，再 serde 成 `{ entries }`。改了扫描实现要同步改这个小程序，否则它不再代表当前的 `list_dir`。应用不会编译它。 |
+| `headless.scan_rust` | 加上 `--rust` 才有。`scripts/bench/scan-rs` 按 `src-tauri/src/lib.rs` 的 `list_dir` / `make_entry` 做：`read_dir`、Rayon 并行 metadata、默认跳过点文件，再 serde 成 `{ entries }`。改了这套一次性扫描要同步改这个小程序，否则它不再代表当前的 `list_dir`。应用不会编译它。窗格打开目录走的是 `list_dir_stream`（大约 500 条一批），这里**不**计量首屏，也不要把它改成跟流式加载对齐。 |
 | `headless.delete3` | 把夹具里按文件名排序的前 3 个文件 `rename` 到同级临时目录，只计这一段，然后移回。这是 `trash()` 在主目录所在卷上的快速路径，不含选中、IPC 和列表刷新。测完文件都还在。 |
 
 默认 1 次预热（不计入）+ 5 次样本，报告里有 min / median / mean / max。

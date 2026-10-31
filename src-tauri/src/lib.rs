@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 
+mod list_stream;
 mod native_icons;
 use native_icons::file_icons;
 
@@ -80,7 +81,9 @@ struct ListResult {
     entries: Vec<Entry>,
 }
 
-/// 并行列出目录内容（rayon 多线程 stat，大文件夹扫描快）
+/// 并行列出目录内容（rayon 多线程 stat，大文件夹扫描快）。
+/// 窗格打开当前目录走 `list_dir_stream`，大约 500 条一批，第一屏不用等整表。
+/// 侧边栏、展开的子目录和 bench 扫描仍用这一次返回。
 #[tauri::command]
 async fn list_dir(path: String, show_hidden: bool) -> Result<ListResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -2469,6 +2472,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_dir,
+            list_stream::list_dir_stream,
+            list_stream::cancel_list_dir,
             transfer,
             move_items,
             trash,
