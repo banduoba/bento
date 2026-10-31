@@ -311,7 +311,11 @@ export default function Pane({
     const onMoved = (event) => {
       const gone = new Set(event.detail?.paths || [])
       if (!gone.size) return
-      setEntries((prev) => (prev ? prev.filter((entry) => !gone.has(entry.path)) : prev))
+      setEntries((prev) => {
+        if (!prev) return prev
+        const next = prev.filter((entry) => !gone.has(entry.path))
+        return next.length === prev.length ? prev : next
+      })
       let changed = false
       for (const dir of Object.keys(kidsRef.current)) {
         const kids = kidsRef.current[dir]
