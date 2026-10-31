@@ -1209,7 +1209,8 @@ export default function App() {
       setSearchOpen(true)
       return
     }
-    // ⌘L / ⌘⇧G：即使焦点在输入框里也能跳到地址栏编辑（浏览器习惯）
+    // ⌘L / ⌘⇧G：即使焦点在输入框里也能跳到地址栏编辑（浏览器习惯）。
+    // Esc 退出编辑由地址栏输入框自己处理并 stopPropagation，避免落到下面的「取消选择」。
     if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'l' || e.key === 'L')) {
       e.preventDefault()
       setPathEditTick((t) => t + 1)
