@@ -1,5 +1,5 @@
-//! 侧边栏系统图标：macOS 上用 NSWorkspace `iconForFile:` 栅格化成 PNG data URL。
-//! 非 macOS（浏览器假后端 / Linux 检查）返回空图标，前端继续用内置模板图或 IconDrive。
+//! 系统图标：macOS 上用 NSWorkspace `iconForFile:` 栅格化成 PNG data URL。
+//! 侧边栏、文件列表和搜索共用。非 macOS 返回空图标，前端用模板图或小占位图标。
 
 use serde::Serialize;
 use tauri::AppHandle;
@@ -18,7 +18,7 @@ pub struct FileIcon {
     template: bool,
 }
 
-const MAX_PATHS: usize = 64;
+const MAX_PATHS: usize = 128;
 /// 侧边栏 CSS 16px；64px 位图在 Retina 上仍超过 2x。
 #[cfg(target_os = "macos")]
 const ICON_PX: f64 = 64.0;

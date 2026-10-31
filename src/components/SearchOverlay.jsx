@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, fileSrc } from '../api'
-import { fmtDate, fmtSize, isImage, extColor, copyText } from '../format'
-import { IconFolder, IconSearch } from '../icons'
+import { fmtDate, fmtSize, copyText } from '../format'
+import { IconSearch } from '../icons'
+import FileIcon from './FileIcon'
 import ContextMenu from './ContextMenu'
 import { makeDragPreview, runNativeDrag } from '../nativeDrag'
 
@@ -521,18 +522,7 @@ export default function SearchOverlay({
               >
                 <span className="search-file">
                   <span className="fileicon">
-                    {item.is_dir ? (
-                      <IconFolder size={22} />
-                    ) : isImage(item.name.split('.').pop().toLowerCase()) ? (
-                      <img className="thumb" src={fileSrc(item.path)} loading="lazy" alt="" draggable={false} />
-                    ) : (
-                      <span
-                        className="exttile"
-                        style={{ background: extColor(item.name.split('.').pop().toLowerCase()) }}
-                      >
-                        {(item.name.split('.').pop() || 'file').slice(0, 4)}
-                      </span>
-                    )}
+                    <FileIcon path={item.path} name={item.name} isDir={item.is_dir} />
                   </span>
                   <span className="search-main">
                     <span className="search-heading">
