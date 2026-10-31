@@ -114,7 +114,7 @@
     --dialog-shadow: 0 4px 12px rgba(0, 0, 0, 0.3), 0 20px 56px rgba(0, 0, 0, 0.5);
   }
 
-  /* 只反色内置的单色模板图。NSWorkspace 彩色图标带 .sb-color-icon，保持原色。 */
+  /* 只反色单色模板图。内置彩色侧边栏图和 NSWorkspace 彩色图标带 .sb-color-icon，保持原色。 */
   .sb-system-icon.sb-template-icon { filter: invert(0.88) hue-rotate(180deg); }
 }
 

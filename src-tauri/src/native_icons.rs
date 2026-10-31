@@ -1,5 +1,7 @@
 //! 系统图标：macOS 上用 NSWorkspace `iconForFile:` 栅格化成 PNG data URL。
-//! 侧边栏、文件列表和搜索共用。非 macOS 返回空图标，前端用模板图或小占位图标。
+//! 文件列表、搜索、位置卷和自定义收藏共用。
+//! 侧边栏里的主目录、桌面、文稿等已知目录不用这套图（那是蓝文件夹加角标），
+//! 前端改用内置的独立彩色字形。非 macOS 返回空图标。
 
 use serde::Serialize;
 use tauri::AppHandle;
