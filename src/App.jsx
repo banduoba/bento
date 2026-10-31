@@ -243,7 +243,8 @@ export default function App() {
   const [sel, setSel] = useState({}) // tabId -> Set(paths)
   const [filters, setFilters] = useState({}) // tabId -> string
   const [clip, setClipState] = useState(getClip) // { mode: 'copy' | 'cut', paths }
-  const [menu, setMenu] = useState(null) // { x, y, items }
+  const [menu, setMenu] = useState(null) // { x, y, items, kind? }
+  const [templates, setTemplates] = useState([]) // 应用支持目录 templates/ 里的文件
   const [renaming, setRenaming] = useState(null) // { tabId, path, value }
   const [batchRename, setBatchRename] = useState(null) // { tabId, items }
   const [zipDlg, setZipDlg] = useState(null) // { id, paths, dir, name } 「创建归档」对话框
@@ -298,6 +299,20 @@ export default function App() {
       setFocused(Math.min(c.focusedIdx || 0, paneCount(c.layout) - 1))
       trace(`boot: focusedIdx=${c.focusedIdx} layout=${c.layout} panes=${c.panes.length} ws=${c.workspaces.length}`)
     })()
+  }, [])
+
+  // 启动时扫描模板目录；打开空白菜单时会再扫一次，放下新模板不用重启
+  useEffect(() => {
+    let live = true
+    api
+      .listTemplates()
+      .then((list) => {
+        if (live && Array.isArray(list)) setTemplates(list)
+      })
+      .catch(() => {})
+    return () => {
+      live = false
+    }
   }, [])
 
   // ---------- 配置持久化：每次变化立即写盘（去防抖：关窗太快也不会丢状态） ----------
@@ -1054,19 +1069,31 @@ export default function App() {
       .catch((e) => alert(String(e)))
   }
 
-  const newFile = (tabId) => {
+  const beginCreatedRename = (tabId, created) => {
+    refresh()
+    setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
+    // 与普通重命名一样只选中主文件名，扩展名留着（模板 .docx 不会被一次输入冲掉）
+    setRenaming({ tabId, path: created, value: basename(created) })
+    pushUndo(`新建文件：${basename(created)}`, async () => {
+      await api.trash([created])
+    })
+  }
+
+  const newFile = (tabId, kind) => {
     const dest = locateTab(tabId)?.path
     if (!dest) return
     api
-      .makeFile(dest)
-      .then((created) => {
-        refresh()
-        setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
-        setRenaming({ tabId, path: created, value: basename(created), selectAll: true })
-        pushUndo(`新建文件：${basename(created)}`, async () => {
-          await api.trash([created])
-        })
-      })
+      .createFile(dest, kind)
+      .then((created) => beginCreatedRename(tabId, created))
+      .catch((e) => alert(String(e)))
+  }
+
+  const newFromTemplate = (tabId, template) => {
+    const dest = locateTab(tabId)?.path
+    if (!dest || !template?.path) return
+    api
+      .copyTemplate(dest, template.path)
+      .then((created) => beginCreatedRename(tabId, created))
       .catch((e) => alert(String(e)))
   }
 
@@ -1189,29 +1216,51 @@ export default function App() {
     })
   }
 
-  const blankMenu = (tabId, x, y) =>
-    setMenu({
-      x,
-      y,
-      items: [
-        { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId) },
-        { label: '新建文本文档', action: () => newFile(tabId) },
-        {
-          label: '将当前文件夹添加到书签',
-          action: () => addFavorite(locateTab(tabId)?.path),
-        },
-        { label: '粘贴项目', shortcut: '⌘V', disabled: !clip, action: () => doPaste(tabId) },
-        { sep: true },
-        {
-          label: cfg.showHidden ? '隐藏隐藏文件' : '显示隐藏文件',
-          shortcut: '⇧⌘.',
-          action: () => setCfg((c) => ({ ...c, showHidden: !c.showHidden })),
-        },
-        { label: '刷新', shortcut: '⌘R', action: refresh },
-        { sep: true },
-        { label: '在访达中显示', action: () => api.reveal(locateTab(tabId)?.path || '/').catch(() => {}) },
-      ],
-    })
+  const newFileItems = (tabId, list) => {
+    const items = [
+      { label: '文本文件', action: () => newFile(tabId, 'text') },
+      { label: 'Markdown', action: () => newFile(tabId, 'markdown') },
+    ]
+    if (list?.length) {
+      items.push({ sep: true })
+      for (const t of list) items.push({ label: t.name, action: () => newFromTemplate(tabId, t) })
+    }
+    return items
+  }
+
+  const blankItems = (tabId, list) => [
+    { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId) },
+    { label: '新建', children: newFileItems(tabId, list) },
+    {
+      label: '将当前文件夹添加到书签',
+      action: () => addFavorite(locateTab(tabId)?.path),
+    },
+    { label: '粘贴项目', shortcut: '⌘V', disabled: !clip, action: () => doPaste(tabId) },
+    { sep: true },
+    {
+      label: cfg.showHidden ? '隐藏隐藏文件' : '显示隐藏文件',
+      shortcut: '⇧⌘.',
+      action: () => setCfg((c) => ({ ...c, showHidden: !c.showHidden })),
+    },
+    { label: '刷新', shortcut: '⌘R', action: refresh },
+    { sep: true },
+    { label: '在访达中显示', action: () => api.reveal(locateTab(tabId)?.path || '/').catch(() => {}) },
+  ]
+
+  const blankMenu = (tabId, x, y) => {
+    setMenu({ kind: 'blank', tabId, x, y, items: blankItems(tabId, templates) })
+    api
+      .listTemplates()
+      .then((list) => {
+        if (!Array.isArray(list)) return
+        setTemplates(list)
+        setMenu((m) => {
+          if (!m || m.kind !== 'blank' || m.tabId !== tabId) return m
+          return { ...m, items: blankItems(tabId, list) }
+        })
+      })
+      .catch(() => {})
+  }
 
   const tabMenu = (tabId, x, y) =>
     setMenu({

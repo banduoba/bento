@@ -17,6 +17,9 @@ export const api = hasTauri
       quickLook: (path, paths) =>
         invoke('quick_look', { path, paths: paths && paths.length ? paths : null }),
       makeFile: (path) => invoke('make_file', { path }),
+      createFile: (dir, kind) => invoke('create_file', { dir, kind }),
+      listTemplates: () => invoke('list_templates'),
+      copyTemplate: (dir, template) => invoke('copy_template', { dir, template }),
       search: (query, scope, root, showHidden, roots, mode) =>
         invoke('search', { query, scope, root: root || null, showHidden, roots: roots || [], mode: mode || 'name' }),
       copyFilesToClipboard: (paths) => invoke('copy_files_to_clipboard', { paths }),
@@ -174,6 +177,26 @@ function mockApi() {
     return Promise.resolve({ text, base, matches: matches.slice(0, 50) })
   }
   const fillPath = (dir, entries) => entries.map((e) => ({ ...e, path: `${dir}/${e.name}` }))
+  // 与 Rust place_new_file 一致：「名称.ext」已存在时用「名称 2.ext」，不覆盖。
+  const uniqueName = (list, name) => {
+    const names = new Set(list.map((e) => e.name))
+    const dot = name.lastIndexOf('.')
+    const stem = dot > 0 ? name.slice(0, dot) : name
+    const ext = dot > 0 ? name.slice(dot) : ''
+    let n = name
+    let i = 2
+    while (names.has(n)) {
+      n = `${stem} ${i}${ext}`
+      i++
+    }
+    return n
+  }
+  const TEMPLATES = [
+    {
+      name: '示例模板.docx',
+      path: '/Users/demo/Library/Application Support/com.bento.app/templates/示例模板.docx',
+    },
+  ]
   const rekeyMockTree = (oldPath, newPath) => {
     const prefix = `${oldPath}/`
     const moves = []
@@ -262,20 +285,33 @@ function mockApi() {
     },
     makeDir: (dir) => {
       const list = (TREE[dir] = TREE[dir] || [])
-      const names = new Set(list.map((e) => e.name))
-      let name = '未命名文件夹'
-      let i = 2
-      while (names.has(name)) name = `未命名文件夹 ${i++}`
+      const name = uniqueName(list, '未命名文件夹')
       list.push(E(name, true))
       return Promise.resolve(`${dir}/${name}`)
     },
     makeFile: (dir) => {
       const list = (TREE[dir] = TREE[dir] || [])
-      const names = new Set(list.map((e) => e.name))
-      let name = '未命名.txt'
-      let i = 2
-      while (names.has(name)) name = `未命名 ${i++}.txt`
+      const name = uniqueName(list, '未命名.txt')
       list.push(E(name, false, 0))
+      return Promise.resolve(`${dir}/${name}`)
+    },
+    createFile: (dir, kind) => {
+      if (kind !== 'text' && kind !== 'txt' && kind !== 'markdown' && kind !== 'md') {
+        return Promise.reject(`不支持的文件类型: ${kind}`)
+      }
+      const list = (TREE[dir] = TREE[dir] || [])
+      const base = kind === 'markdown' || kind === 'md' ? '未命名.md' : '未命名.txt'
+      const name = uniqueName(list, base)
+      list.push(E(name, false, 0))
+      return Promise.resolve(`${dir}/${name}`)
+    },
+    listTemplates: () => Promise.resolve(TEMPLATES.map((t) => ({ ...t }))),
+    copyTemplate: (dir, template) => {
+      const list = (TREE[dir] = TREE[dir] || [])
+      const known = TEMPLATES.find((t) => t.path === template)
+      const base = known?.name || String(template).slice(String(template).lastIndexOf('/') + 1) || '未命名'
+      const name = uniqueName(list, base)
+      list.push(E(name, false, known ? 120 : 0))
       return Promise.resolve(`${dir}/${name}`)
     },
     rename: (oldPath, newName) => {
