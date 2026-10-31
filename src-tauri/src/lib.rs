@@ -2319,6 +2319,29 @@ async fn save_config(app: AppHandle, config: serde_json::Value) -> Result<(), St
     .map_err(|e| e.to_string())
 }
 
+/// 视图设置：`{ version, defaults, overrides }`。与工作区配置分开，键是规范化路径。
+/// 文件不存在时返回 null，由前端回落到默认，不把缺文件当成错误。
+#[tauri::command]
+async fn load_view_settings(app: AppHandle) -> Result<serde_json::Value, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let file = dir.join("view-settings.json");
+    match fs::read_to_string(&file) {
+        Ok(s) => serde_json::from_str(&s).map_err(|e| e.to_string()),
+        Err(_) => Ok(serde_json::Value::Null),
+    }
+}
+
+#[tauri::command]
+async fn save_view_settings(app: AppHandle, view_settings: serde_json::Value) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::write(
+        dir.join("view-settings.json"),
+        serde_json::to_string_pretty(&view_settings).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
+}
+
 /// 可见窗格的当前目录（含展开的子目录）。不再可见的路径会 unwatch。
 #[tauri::command]
 fn set_watched(paths: Vec<String>, state: tauri::State<'_, FsWatcher>) -> Result<(), String> {
@@ -2478,6 +2501,8 @@ pub fn run() {
             fsearch_status,
             load_config,
             save_config,
+            load_view_settings,
+            save_view_settings,
             file_icons
         ])
         .run(tauri::generate_context!())

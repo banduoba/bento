@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
@@ -9,6 +9,19 @@ import { IconCheck } from './icons'
 import { basename, parentPath, labelOf, copyText, folderTitle } from './format'
 import { dragState } from './nativeDrag'
 import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
+import {
+  applyToAllFolders,
+  canonicalPathKey,
+  clearFolderOverride,
+  hasFolderOverride,
+  normalizeViewSettings,
+  rekeyOverride,
+  resolveViewKey,
+  seedViewSettings,
+  syncPaneViews,
+  viewForPath,
+  withFolderPatch,
+} from './viewSettings'
 import Sidebar from './components/Sidebar'
 import Pane from './components/Pane'
 import StatusBar from './components/StatusBar'
@@ -73,6 +86,7 @@ async function handleTextShortcut(e, el) {
   }
 }
 
+const EMPTY_SELECTION = new Set()
 let tabSeq = 1
 const freshId = () => `t${tabSeq++}`
 const blankTab = (path) => ({ id: freshId(), path, history: [path], hi: 0, sortKey: 'name', sortDir: 'asc' })
@@ -292,9 +306,18 @@ export default function App() {
     ;(async () => {
       const h = await api.homeDir()
       setHome(h)
-      const saved = await api.loadConfig().catch(() => null)
+      const [saved, storedViews] = await Promise.all([
+        api.loadConfig().catch(() => null),
+        api.loadViewSettings().catch(() => null),
+      ])
       const c = sanitizeConfig(saved, h)
-      setCfg(c)
+      const focus = Math.min(Math.max(c.focusedIdx || 0, 0), Math.max(c.panes.length - 1, 0))
+      // 没有视图文件时，把当前聚焦窗格的排序/列收成全局默认，避免升级后忘掉。
+      const viewSettings =
+        storedViews && typeof storedViews === 'object'
+          ? normalizeViewSettings(storedViews)
+          : seedViewSettings(c.panes, focus)
+      setCfg({ ...c, viewSettings })
       // 恢复上次工作的聚焦窗格（否则每次重启都回到左侧，侧边栏点击就会“没反应”）
       setFocused(Math.min(c.focusedIdx || 0, paneCount(c.layout) - 1))
       trace(`boot: focusedIdx=${c.focusedIdx} layout=${c.layout} panes=${c.panes.length} ws=${c.workspaces.length}`)
@@ -316,15 +339,27 @@ export default function App() {
   }, [])
 
   // ---------- 配置持久化：每次变化立即写盘（去防抖：关窗太快也不会丢状态） ----------
+  // 视图设置单独写 view-settings.json，不塞进工作区配置。
+  const configForDisk = (c) => {
+    const { viewSettings, ...rest } = withActiveSnapshot(c)
+    return rest
+  }
   useEffect(() => {
     if (!cfg) return
-    api.saveConfig(withActiveSnapshot(cfg)).catch(() => {})
+    api.saveConfig(configForDisk(cfg)).catch(() => {})
   }, [cfg])
+  useEffect(() => {
+    if (!cfg?.viewSettings) return
+    api.saveViewSettings(cfg.viewSettings).catch(() => {})
+  }, [cfg?.viewSettings])
 
   // 关窗兜底保存
   useEffect(() => {
     const h = () => {
-      if (cfgRef.current) api.saveConfig(withActiveSnapshot(cfgRef.current)).catch(() => {})
+      const c = cfgRef.current
+      if (!c) return
+      api.saveConfig(configForDisk(c)).catch(() => {})
+      if (c.viewSettings) api.saveViewSettings(c.viewSettings).catch(() => {})
     }
     window.addEventListener('beforeunload', h)
     window.addEventListener('pagehide', h)
@@ -333,6 +368,70 @@ export default function App() {
       window.removeEventListener('pagehide', h)
     }
   }, [])
+
+  // 路径 → canonicalize 后的键。解析失败时记下词法键，查找缺覆盖就用默认，不把错误抛到界面。
+  const keyCache = useRef(new Map())
+  const [keyEpoch, setKeyEpoch] = useState(0)
+  const keyFor = (path) => {
+    const lex = canonicalPathKey(path)
+    if (!lex) return null
+    return keyCache.current.get(lex) || lex
+  }
+  const viewPathSig = cfg
+    ? cfg.panes.map((p) => `${p.active}\t${p.tabs.map((t) => t.path).join('\t')}`).join('\n')
+    : ''
+  useEffect(() => {
+    if (!viewPathSig) return
+    const paths = []
+    const seen = new Set()
+    for (const pane of cfgRef.current?.panes || []) {
+      for (const tab of pane.tabs || []) {
+        const lex = canonicalPathKey(tab.path)
+        if (!lex || seen.has(lex) || keyCache.current.has(lex)) continue
+        seen.add(lex)
+        paths.push(tab.path)
+      }
+    }
+    if (!paths.length) return
+    let cancelled = false
+    ;(async () => {
+      let changed = false
+      for (const path of paths) {
+        const lex = canonicalPathKey(path)
+        if (!lex || cancelled) return
+        let key = lex
+        try {
+          key = (await resolveViewKey(path, api.resolvePath)) || lex
+        } catch {
+          key = lex
+        }
+        if (cancelled) return
+        if (keyCache.current.get(lex) !== key) {
+          keyCache.current.set(lex, key)
+          if (key !== lex) changed = true
+        }
+      }
+      if (changed && !cancelled) setKeyEpoch((n) => n + 1)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [viewPathSig])
+
+  // 导航、换标签、改排序/列之后，把有效视图写回窗格。缺覆盖时用默认，不报错。
+  useLayoutEffect(() => {
+    setCfg((c) => {
+      if (!c?.viewSettings) return c
+      let store = c.viewSettings
+      for (const [lex, canon] of keyCache.current) {
+        const next = rekeyOverride(store, lex, canon)
+        if (next !== store) store = next
+      }
+      const panes = syncPaneViews(c.panes, store, keyFor)
+      if (store === c.viewSettings && panes === c.panes) return c
+      return { ...c, viewSettings: store, panes }
+    })
+  }, [viewPathSig, cfg?.viewSettings, keyEpoch])
 
   // 聚焦窗格变化时持久化
   useEffect(() => {
@@ -1193,11 +1292,61 @@ export default function App() {
     setMenu({ x, y, items })
   }
 
-  // 每个窗格各自的列设置（宽度 / 显示哪些列）
-  const patchPane = (i, patch) =>
-    setCfg((c) => ({ ...c, panes: c.panes.map((pp, j) => (j === i ? { ...pp, ...patch, colsVersion: 2 } : pp)) }))
+  // 排序和列按文件夹记住：改当前目录只写它的覆盖，其他目录仍用默认或自己的覆盖。
+  const commitFolderView = (path, patch) => {
+    const lex = canonicalPathKey(path)
+    if (!lex) return
+    const key = keyCache.current.get(lex) || lex
+    setCfg((c) => {
+      const store = withFolderPatch(c.viewSettings, key, patch)
+      if (store === c.viewSettings) return c
+      return { ...c, viewSettings: store }
+    })
+  }
+  const clearFolderView = (path) => {
+    const lex = canonicalPathKey(path)
+    if (!lex) return
+    setCfg((c) => {
+      let store = clearFolderOverride(c.viewSettings, lex)
+      const canon = keyCache.current.get(lex)
+      if (canon && canon !== lex) store = clearFolderOverride(store, canon)
+      if (store === c.viewSettings) return c
+      return { ...c, viewSettings: store }
+    })
+  }
+  const applyViewToAll = (path) => {
+    const key = keyFor(path)
+    if (!key) return
+    setCfg((c) => {
+      const store = applyToAllFolders(c.viewSettings, viewForPath(c.viewSettings, key))
+      if (store === c.viewSettings) return c
+      return { ...c, viewSettings: store }
+    })
+  }
+  const folderOverridden = (path) => {
+    const lex = canonicalPathKey(path)
+    if (!lex || !cfg?.viewSettings) return false
+    if (hasFolderOverride(cfg.viewSettings, lex)) return true
+    const canon = keyCache.current.get(lex)
+    return !!(canon && canon !== lex && hasFolderOverride(cfg.viewSettings, canon))
+  }
+  const folderViewMenu = (path) => [
+    {
+      label: '此文件夹使用默认视图',
+      disabled: !path || !folderOverridden(path),
+      action: () => path && clearFolderView(path),
+    },
+    {
+      label: '应用到所有文件夹',
+      disabled: !path,
+      action: () => path && applyViewToAll(path),
+    },
+  ]
   const colMenu = (i, x, y) => {
-    const vis = normalizeVis(cfg.panes[i]?.colVisible)
+    const pane = cfg.panes[i]
+    const path = pane?.tabs[pane.active]?.path
+    const current = viewForPath(cfg.viewSettings, keyFor(path))
+    const vis = current.columns.visible
     setMenu({
       x,
       y,
@@ -1205,13 +1354,14 @@ export default function App() {
         ...COL_LABELS.map(([key, label]) => ({
           label,
           checked: !!vis[key],
-          action: () => patchPane(i, { colVisible: { ...vis, [key]: !vis[key] } }),
+          action: () =>
+            path &&
+            commitFolderView(path, {
+              columns: { widths: current.columns.widths, visible: { ...vis, [key]: !vis[key] } },
+            }),
         })),
         { sep: true },
-        {
-          label: '恢复到默认',
-          action: () => patchPane(i, { colWidths: normalizeCols(null), colVisible: normalizeVis(null) }),
-        },
+        ...folderViewMenu(path),
       ],
     })
   }
@@ -1228,24 +1378,28 @@ export default function App() {
     return items
   }
 
-  const blankItems = (tabId, list) => [
-    { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId) },
-    { label: '新建', children: newFileItems(tabId, list) },
-    {
-      label: '将当前文件夹添加到书签',
-      action: () => addFavorite(locateTab(tabId)?.path),
-    },
-    { label: '粘贴项目', shortcut: '⌘V', disabled: !clip, action: () => doPaste(tabId) },
-    { sep: true },
-    {
-      label: cfg.showHidden ? '隐藏隐藏文件' : '显示隐藏文件',
-      shortcut: '⇧⌘.',
-      action: () => setCfg((c) => ({ ...c, showHidden: !c.showHidden })),
-    },
-    { label: '刷新', shortcut: '⌘R', action: refresh },
-    { sep: true },
-    { label: '在访达中显示', action: () => api.reveal(locateTab(tabId)?.path || '/').catch(() => {}) },
-  ]
+  const blankItems = (tabId, list) => {
+    const path = locateTab(tabId)?.path
+    return [
+      { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId) },
+      { label: '新建', children: newFileItems(tabId, list) },
+      {
+        label: '将当前文件夹添加到书签',
+        action: () => addFavorite(path),
+      },
+      { label: '粘贴项目', shortcut: '⌘V', disabled: !clip, action: () => doPaste(tabId) },
+      { sep: true },
+      {
+        label: cfg.showHidden ? '隐藏隐藏文件' : '显示隐藏文件',
+        shortcut: '⇧⌘.',
+        action: () => setCfg((c) => ({ ...c, showHidden: !c.showHidden })),
+      },
+      { label: '刷新', shortcut: '⌘R', action: refresh },
+      { sep: true },
+      ...folderViewMenu(path),
+      { label: '在访达中显示', action: () => api.reveal(path || '/').catch(() => {}) },
+    ]
+  }
 
   const blankMenu = (tabId, x, y) => {
     setMenu({ kind: 'blank', tabId, x, y, items: blankItems(tabId, templates) })
@@ -1629,11 +1783,16 @@ export default function App() {
               home={home}
               cfg={cfg}
               focused={i === focusIdx}
-              selection={sel[p.tabs[p.active]?.id] || new Set()}
+              selection={sel[p.tabs[p.active]?.id] || EMPTY_SELECTION}
               filter={filters[p.tabs[p.active]?.id] || ''}
               renaming={renaming}
               tick={tick}
-              onColWidths={(w) => patchPane(i, { colWidths: normalizeCols(w) })}
+              onColWidths={(w) => {
+                const path = p.tabs[p.active]?.path
+                if (!path) return
+                const current = viewForPath(cfg.viewSettings, keyFor(path))
+                commitFolderView(path, { columns: { widths: normalizeCols(w), visible: current.columns.visible } })
+              }}
               onColMenu={(x, y) => colMenu(i, x, y)}
               cutSet={cutSet}
               editPathSignal={i === focusIdx ? pathEditTick : 0}
@@ -1668,9 +1827,10 @@ export default function App() {
               onSwitchTab={switchTab}
               onDropTransfer={transferInto}
               onFilter={(tid, v) => setFilters((f) => ({ ...f, [tid]: v }))}
-              onSort={(tid, key, dir) =>
-                updateTab(tid, (t) => ({ ...t, sortKey: key, sortDir: dir }))
-              }
+              onSort={(tid, key, dir) => {
+                const path = locateTab(tid)?.path
+                if (path) commitFolderView(path, { sort: { key, dir } })
+              }}
               onStats={(tid, st) => setStats((s) => ({ ...s, [tid]: st }))}
               onRowsCache={(tid, rows) => {
                 rowsCache.current[tid] = rows

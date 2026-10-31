@@ -35,6 +35,8 @@ export const api = hasTauri
       fileIcons: (paths) => invoke('file_icons', { paths }),
       loadConfig: () => invoke('load_config'),
       saveConfig: (config) => invoke('save_config', { config }),
+      loadViewSettings: () => invoke('load_view_settings'),
+      saveViewSettings: (viewSettings) => invoke('save_view_settings', { viewSettings }),
     }
   : mockApi()
 
@@ -390,6 +392,19 @@ function mockApi() {
     saveConfig: (config) => {
       try {
         localStorage.setItem('bento-mock-config', JSON.stringify(config))
+      } catch {}
+      return Promise.resolve()
+    },
+    loadViewSettings: () => {
+      try {
+        return Promise.resolve(JSON.parse(localStorage.getItem('bento-view-settings') || 'null'))
+      } catch {
+        return Promise.resolve(null)
+      }
+    },
+    saveViewSettings: (viewSettings) => {
+      try {
+        localStorage.setItem('bento-view-settings', JSON.stringify(viewSettings))
       } catch {}
       return Promise.resolve()
     },
