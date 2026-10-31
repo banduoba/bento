@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { fmtSize } from '../format'
+import { listCountLabel } from '../dirLoad'
 
 export default function StatusBar({ path, stats, progress }) {
   const [free, setFree] = useState(null)
@@ -16,7 +17,7 @@ export default function StatusBar({ path, stats, progress }) {
     }
   }, [path])
 
-  const parts = [`${stats?.count ?? 0} 个项目`]
+  const parts = [listCountLabel(stats)]
   if (stats?.selCount > 0) {
     parts.push(`已选 ${stats.selCount} 个${stats.selSize ? `（${fmtSize(stats.selSize)}）` : ''}`)
   }

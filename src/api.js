@@ -1,10 +1,22 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { LIST_BATCH } from './dirLoad.js'
 
 export const hasTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__
 
 export const api = hasTauri
   ? {
       listDir: (path, showHidden) => invoke('list_dir', { path, showHidden }),
+      // 当前目录分批推送。onBatch 是 Tauri Channel；约 500 条一批，最后一批 done=true。
+      listDirStream: (path, showHidden, requestId, sortKey, sortDir, onBatch) =>
+        invoke('list_dir_stream', {
+          path,
+          showHidden,
+          requestId,
+          sortKey: sortKey || 'name',
+          sortDir: sortDir || 'asc',
+          onBatch,
+        }),
+      cancelListDir: (requestId) => invoke('cancel_list_dir', { requestId }),
       transfer: (sources, dest, mode) => invoke('transfer', { sources, dest, mode }),
       moveItems: (sources, dest) => invoke('move_items', { sources, dest }),
       trash: (paths) => invoke('trash', { paths }),
@@ -61,7 +73,9 @@ function mockApi() {
     '/Users/demo/Desktop': [E('截图1.png', false, 1024e3), E('截图2.png', false, 2048e3), E('报告.pdf', false, 300e3)],
     '/Users/demo/Documents': [E('示例文档.docx', false, 120e3), E('示例表格.xlsx', false, 88e3), E('示例文件夹', true)],
     '/Users/demo/Documents/示例文件夹': [E('示例脚本.rs', false, 4e3), E('示例库.rs', false, 9e3)],
-    '/Users/demo/Downloads': [E('示例安装包.dmg', false, 500e6), E('示例数据.csv', false, 20e3)],
+    '/Users/demo/Downloads': [E('示例安装包.dmg', false, 500e6), E('示例数据.csv', false, 20e3), E('大量文件', true)],
+    // 浏览器里打开这个目录会分批吐出 1 万个文件，用来看虚拟列表。条目不放进 TREE，避免搜索把它们扫进去。
+    '/Users/demo/Downloads/大量文件': [],
     '/Users/demo/Pictures': [E('示例图片.jpg', false, 3e6)],
     '/Users/demo/Movies': [], '/Users/demo/Music': [],
     '/Users/demo/项目A_测试': [
@@ -179,6 +193,33 @@ function mockApi() {
     return Promise.resolve({ text, base, matches: matches.slice(0, 50) })
   }
   const fillPath = (dir, entries) => entries.map((e) => ({ ...e, path: `${dir}/${e.name}` }))
+  const HUGE_PATH = '/Users/demo/Downloads/大量文件'
+  const HUGE_COUNT = 10000
+  let hugeCache = null
+  const hugeEntries = () => {
+    if (hugeCache) return hugeCache
+    const list = new Array(HUGE_COUNT)
+    for (let i = 0; i < HUGE_COUNT; i++) {
+      const name = `f${String(i).padStart(6, '0')}.txt`
+      list[i] = {
+        name,
+        path: `${HUGE_PATH}/${name}`,
+        is_dir: false,
+        size: 32,
+        mtime_ms: now,
+        btime_ms: now,
+        ext: 'txt',
+      }
+    }
+    hugeCache = list
+    return list
+  }
+  const cancelledStreams = new Set()
+  const entriesFor = (path, showHidden) => {
+    const source = path === HUGE_PATH ? hugeEntries() : fillPath(path, TREE[path] || [])
+    if (showHidden) return source
+    return source.filter((entry) => !entry.name.startsWith('.'))
+  }
   // 与 Rust place_new_file 一致：「名称.ext」已存在时用「名称 2.ext」，不覆盖。
   const uniqueName = (list, name) => {
     const names = new Set(list.map((e) => e.name))
@@ -248,10 +289,46 @@ function mockApi() {
     return Promise.resolve(results)
   }
   return {
-    listDir: (path) => {
-      const entries = TREE[path]
-      if (!entries) return Promise.reject(new Error(`无法读取目录 ${path}`))
-      return Promise.resolve({ entries: fillPath(path, entries) })
+    listDir: (path, showHidden) => {
+      if (path !== HUGE_PATH && !TREE[path]) return Promise.reject(new Error(`无法读取目录 ${path}`))
+      return Promise.resolve({ entries: entriesFor(path, showHidden) })
+    },
+    listDirStream: (path, showHidden, requestId, sortKey, sortDir, onBatch) => {
+      cancelledStreams.delete(requestId)
+      if (path !== HUGE_PATH && !TREE[path]) return Promise.reject(new Error(`无法读取目录 ${path}`))
+      let entries = entriesFor(path, showHidden)
+      if (path === HUGE_PATH && (sortKey || 'name') === 'name' && sortDir === 'desc') {
+        entries = entries.slice().reverse()
+      }
+      const total = entries.length
+      return new Promise((resolve, reject) => {
+        let offset = 0
+        let index = 0
+        const pump = () => {
+          if (cancelledStreams.has(requestId)) {
+            cancelledStreams.delete(requestId)
+            resolve()
+            return
+          }
+          const slice = entries.slice(offset, offset + LIST_BATCH)
+          const done = offset + LIST_BATCH >= entries.length
+          offset += LIST_BATCH
+          try {
+            onBatch?.onmessage?.({ entries: slice, index, done, total })
+          } catch (err) {
+            reject(err)
+            return
+          }
+          index += 1
+          if (done) resolve()
+          else setTimeout(pump, path === HUGE_PATH ? 16 : 0)
+        }
+        setTimeout(pump, 0)
+      })
+    },
+    cancelListDir: (requestId) => {
+      cancelledStreams.add(requestId)
+      return Promise.resolve()
     },
     moveItems: (sources, dest) => mockMoveItems(sources, dest),
     transfer: (sources, dest, mode) => {

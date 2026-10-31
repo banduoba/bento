@@ -156,7 +156,7 @@ flowchart LR
     CMD --> MAC["AppKit 桥接<br/>NSPasteboard · 原生拖拽"]
 ```
 
-- **前端**：React 19、Vite 7，列表使用 [@tanstack/react-virtual](https://tanstack.com/virtual) 虚拟滚动。
+- **前端**：React 19、Vite 7，列表使用 [@tanstack/react-virtual](https://tanstack.com/virtual) 虚拟滚动。打开目录时大约每 500 条经 Tauri Channel 推一批，只挂载可见行，行按路径做键。
 - **后端**：Rust + Tauri 2：rayon 并行扫描目录、APFS `clonefile`、fsearch 引擎、`notify`（FSEvents）实时监听，以及用 `objc2` 调用原生剪贴板与窗口行为。
 - **拖拽**：拖出使用 [tauri-plugin-drag](https://github.com/crabnebula-dev/drag-rs) 发起原生 `NSDraggingSession`，拖入使用 Tauri 窗口的 drag-drop 事件。
 

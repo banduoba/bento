@@ -7,4 +7,5 @@ publish = false
 
 [dependencies]
 notify = "8"
+rayon = "1"
 serde = { version = "1", features = ["derive"] }
