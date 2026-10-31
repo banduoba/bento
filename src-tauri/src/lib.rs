@@ -12,6 +12,8 @@ use std::sync::OnceLock;
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 
+mod session_store;
+mod session_exit;
 mod list_stream;
 mod native_icons;
 use native_icons::file_icons;
@@ -2955,11 +2957,15 @@ fn enable_background_drag(app: &tauri::App) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(std::sync::Arc::new(session_store::SessionStore::default()))
+        .manage(session_exit::ExitState::default())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            session_exit::install_native_quit(app)?;
             #[cfg(target_os = "macos")]
             enable_background_drag(app);
             let app_handle = app.handle().clone();
@@ -3065,14 +3071,22 @@ pub fn run() {
             append_error_log,
             save_window_state,
             fsearch_status,
+            session_store::load_session,
+            session_store::save_session,
+            session_exit::session_exit_reply,
             load_config,
             save_config,
             load_view_settings,
             save_view_settings,
             file_icons
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                session_exit::on_exit_requested(app, code, api);
+            }
+        });
 }
 
 #[cfg(test)]

@@ -48,6 +48,9 @@ export const api = hasTauri
       resolvePath: (path) => invoke('resolve_path', { path }),
       completePath: (path) => invoke('complete_path', { path }),
       fileIcons: (paths) => invoke('file_icons', { paths }),
+      loadSession: () => invoke('load_session'),
+      saveSession: (session) => invoke('save_session', { session }),
+      sessionExitReply: (requestId, allowExit) => invoke('session_exit_reply', { requestId, allowExit }),
       loadConfig: () => invoke('load_config'),
       saveConfig: (config) => invoke('save_config', { config }),
       loadViewSettings: () => invoke('load_view_settings'),
@@ -477,6 +480,15 @@ function mockApi() {
     completePath: (path) => mockCompletePath(path),
     fileIcons: (paths) =>
       Promise.resolve((paths || []).map((path) => ({ path, icon: null, template: false }))),
+    loadSession: () => {
+      try { return Promise.resolve(JSON.parse(localStorage.getItem('bento-mock-session') || 'null')) }
+      catch (error) { return Promise.reject(error) }
+    },
+    saveSession: session => {
+      try { localStorage.setItem('bento-mock-session', JSON.stringify(session)); return Promise.resolve() }
+      catch (error) { return Promise.reject(error) }
+    },
+    sessionExitReply: () => Promise.resolve(),
     // 浏览器测试视图也用 localStorage 记住工作区/布局，行为与真实 app 一致
     loadConfig: () => {
       try {
