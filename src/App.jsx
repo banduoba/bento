@@ -4,6 +4,7 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { api, hasTauri } from './api'
+import { clearCut, getClip, retainCut, setClip, subscribeClip } from './clipboard'
 import { IconCheck } from './icons'
 import { basename, parentPath, labelOf, copyText, folderTitle } from './format'
 import { dragState } from './nativeDrag'
@@ -238,7 +239,7 @@ export default function App() {
   const [focused, setFocused] = useState(0)
   const [sel, setSel] = useState({}) // tabId -> Set(paths)
   const [filters, setFilters] = useState({}) // tabId -> string
-  const [clip, setClip] = useState(null) // { mode, paths }
+  const [clip, setClipState] = useState(getClip) // { mode: 'copy' | 'cut', paths }
   const [menu, setMenu] = useState(null) // { x, y, items }
   const [renaming, setRenaming] = useState(null) // { tabId, path, value }
   const [batchRename, setBatchRename] = useState(null) // { tabId, items }
@@ -275,6 +276,7 @@ export default function App() {
   const toastTimer = useRef(null)
   const cfgRef = useRef(null)
   cfgRef.current = cfg
+  useEffect(() => subscribeClip(setClipState), [])
   // 窗口置顶：配置变化（含启动恢复）时同步给原生窗口
   useEffect(() => {
     if (!hasTauri || !cfg) return
@@ -814,6 +816,51 @@ export default function App() {
     refresh()
   }
 
+  // ⌘V 剪切：同卷 rename，跨卷仅在复制成功后删除源。成功的源立刻从列表消失。
+  const moveInto = async (dest, paths) => {
+    if (!paths?.length) return
+    modeRef.current = 'move'
+    const movedFrom = [...paths]
+    try {
+      const results = await api.moveItems(movedFrom, dest)
+      reportErrors(results)
+      const ok = (results || []).filter((r) => r.ok && r.dest && r.dest !== r.source)
+      if (ok.length) {
+        pushUndo(
+          ok.length === 1 ? `移动：${basename(ok[0].dest)}` : `移动 ${ok.length} 个项目`,
+          async () => {
+            for (const m of ok) {
+              await api.moveItems([m.dest], m.source.slice(0, m.source.lastIndexOf('/')))
+            }
+          }
+        )
+        const gone = new Set(ok.map((r) => r.source))
+        setSel((s) => {
+          let changed = false
+          const next = {}
+          for (const [id, set] of Object.entries(s)) {
+            const filtered = new Set([...set].filter((p) => !gone.has(p)))
+            if (filtered.size !== set.size) changed = true
+            next[id] = filtered
+          }
+          return changed ? next : s
+        })
+        window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths: [...gone] } }))
+      }
+      const current = getClip()
+      const sameCut = current?.mode === 'cut'
+        && current.paths.length === movedFrom.length
+        && current.paths.every((p, i) => p === movedFrom[i])
+      if (sameCut) {
+        const failed = new Set((results || []).filter((r) => !r.ok).map((r) => r.source))
+        retainCut(movedFrom.filter((p) => failed.has(p)))
+      }
+    } catch (e) {
+      alert(`移动失败: ${e}`)
+    }
+    refresh()
+  }
+
   // 统一记录可撤销操作并提示（4 秒）
   const pushUndo = (label, undo, opts = {}) => {
     undoStackRef.current.push({ label, undo })
@@ -877,24 +924,31 @@ export default function App() {
 
   const doCopyCut = (tabId, mode) => {
     const paths = selArr(tabId)
-    if (paths.length) {
-      setClip({ mode, paths })
-      // 提示贴在被复制的文件旁边，而不是屏幕底部
-      showRowToast(paths, `${mode === 'copy' ? '已复制' : '已剪切'}${describeItems(tabId, paths)}`)
-      // 文件引用写进系统剪贴板：其他软件 ⌘V 可直接粘贴文件本体
-      if (mode === 'copy') {
-        api
-          .copyFilesToClipboard(paths)
-          .then(() => trace(`clipboard ok ${paths.length} paths`))
-          .catch((e) => trace(`clipboard FAILED ${e}`))
-      }
+    const cut = mode === 'cut' || mode === 'move'
+    if (!paths.length) {
+      // ⌘C 没有选中项时取消剪切；已有拷贝则保持，避免把拷贝剪贴板清掉。
+      if (!cut) clearCut()
+      return
+    }
+    setClip({ mode: cut ? 'cut' : 'copy', paths: [...paths] })
+    // 提示贴在被复制的文件旁边，而不是屏幕底部
+    showRowToast(paths, `${cut ? '已剪切' : '已复制'}${describeItems(tabId, paths)}`)
+    // 文件引用写进系统剪贴板：其他软件 ⌘V 可直接粘贴文件本体。剪切只留在应用内。
+    if (!cut) {
+      api
+        .copyFilesToClipboard(paths)
+        .then(() => trace(`clipboard ok ${paths.length} paths`))
+        .catch((e) => trace(`clipboard FAILED ${e}`))
     }
   }
 
   const doPaste = (tabId) => {
-    if (!clip) return
+    const current = getClip()
+    if (!current?.paths?.length) return
     const dest = locateTab(tabId)?.path
-    if (dest) transferInto(dest, clip.paths, clip.mode)
+    if (!dest) return
+    if (current.mode === 'cut') moveInto(dest, current.paths)
+    else transferInto(dest, current.paths, 'copy')
   }
 
   // 收藏常用目录（书签）：去重
@@ -1365,7 +1419,11 @@ export default function App() {
       return
     }
     if (e.key === 'Backspace') { e.preventDefault(); nav(tid, parentPath(tab.path)); return }
-    if (e.key === 'Escape') { onSelect(tid, new Set()); return }
+    if (e.key === 'Escape') {
+      clearCut()
+      onSelect(tid, new Set())
+      return
+    }
   }
 
   useEffect(() => {
@@ -1374,7 +1432,7 @@ export default function App() {
     return () => window.removeEventListener('keydown', h)
   }, [])
 
-  const cutSet = useMemo(() => new Set(clip?.mode === 'move' ? clip.paths : []), [clip])
+  const cutSet = useMemo(() => new Set(clip?.mode === 'cut' ? clip.paths : []), [clip])
 
   if (!cfg) return <div className="boot">Bento 启动中…</div>
 
