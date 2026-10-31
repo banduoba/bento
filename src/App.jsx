@@ -505,7 +505,7 @@ export default function App() {
     if (!valid.length) return
     // Invalidate lexical and known alias keys immediately, then resolve unknown aliases without scanning.
     setDirectoryVersions(v => invalidateDirectories(v, valid.flatMap(path => [path, directoryKeyFor(path)])))
-    Promise.all(valid.map(path => api.resolvePath(path).catch(() => path))).then(resolved => {
+    Promise.all(valid.map(path => api.resolvePath(path.endsWith('/') ? path : path + '/').catch(() => path))).then(resolved => {
       const extra = resolved.filter((path, i) => directoryKey(path) !== directoryKeyFor(valid[i]))
       if (extra.length) setDirectoryVersions(v => invalidateDirectories(v, extra))
     })

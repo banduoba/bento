@@ -659,11 +659,35 @@ export default function Pane({
     reloadKidsRef.current()
   }, [manualTick])
   const seenDirectoryVersions = useRef(directoryVersions)
+  const childDirectoryIdentities = useRef(new Map())
+  useEffect(() => { childDirectoryIdentities.current.clear() }, [tab.id, tab.path])
   useEffect(() => {
-    const paths = changedDirectories(seenDirectoryVersions.current, directoryVersions, Object.keys(kidsRef.current), directoryKeyFor)
+    const before = seenDirectoryVersions.current
+    const cached = Object.keys(kidsRef.current)
+    const paths = changedDirectories(before, directoryVersions, cached, directoryKeyFor)
     seenDirectoryVersions.current = directoryVersions
     if (paths.length) reloadKidsRef.current(new Set(paths))
-  }, [directoryVersions])
+    // An expanded symlink can point outside its pane-root alias. Resolve identity only (no listing),
+    // and cache it so later writes through a physical path reach that expanded directory too.
+    let live = true
+    const pending = cached.filter(path => !paths.includes(path)).map(path => {
+      if (!childDirectoryIdentities.current.has(path)) {
+        const request = api.resolvePath(path.endsWith('/') ? path : path + '/').catch(() => {
+          if (childDirectoryIdentities.current.get(path) === request) childDirectoryIdentities.current.delete(path)
+          return path
+        })
+        childDirectoryIdentities.current.set(path, request)
+      }
+      return childDirectoryIdentities.current.get(path).then(key => [path, key])
+    })
+    Promise.all(pending).then(resolved => {
+      if (!live || seenDirectoryVersions.current !== directoryVersions) return
+      const aliased = resolved.filter(([path, key]) => Object.hasOwn(kidsRef.current, path)
+        && (before[key] || 0) !== (directoryVersions[key] || 0)).map(([path]) => path)
+      if (aliased.length) reloadKidsRef.current(new Set(aliased))
+    })
+    return () => { live = false }
+  }, [directoryVersions, tab.id, tab.path])
 
   // 文件系统监听：当前目录 + 展开的子目录有文件新增/修改/删除时自动刷新，无需 ⌘R
   // 设置里「自动刷新目录」关闭时不登记监听（后端随之释放全部 FSEvents 流）
