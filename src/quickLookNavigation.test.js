@@ -76,3 +76,9 @@ test('a new filter excluding the displayed item starts at its eligible edge', as
   nav.navigate({ session: opens[0][2], direction: 1 })
   assert.deepEqual(selected, ['/b'])
 })
+test('multiple selected files retain the existing native gallery presentation', () => {
+  const opens = []
+  const nav = createQuickLookNavigation({ getRows: () => [{ path: '/a' }, { path: '/b' }], select() {}, reveal() {}, present: (...args) => opens.push(args), update() {} })
+  nav.open('right', '/', '/a', ['/b', '/a'])
+  assert.deepEqual(opens[0], ['/a', ['/a', '/b'], null])
+})
