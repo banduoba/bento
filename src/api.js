@@ -19,6 +19,7 @@ export const api = hasTauri
       cancelListDir: (requestId) => invoke('cancel_list_dir', { requestId }),
       transfer: (sources, dest, mode) => invoke('transfer', { sources, dest, mode }),
       moveItems: (sources, dest) => invoke('move_items', { sources, dest }),
+      restoreMoves: (moves) => invoke('restore_moves', { moves }),
       trash: (paths) => invoke('trash', { paths }),
       makeDir: (path) => invoke('make_dir', { path }),
       rename: (oldPath, newName) => invoke('rename', { oldPath, newName }),
@@ -330,6 +331,21 @@ function mockApi() {
       cancelledStreams.add(requestId)
       return Promise.resolve()
     },
+    restoreMoves: (moves) => Promise.resolve(moves.map(({ source, dest }) => {
+      const split = (p) => { const i = p.lastIndexOf('/'); return [i <= 0 ? '/' : p.slice(0, i), p.slice(i + 1)] }
+      const [from, name] = split(source), [to, restoredName] = split(dest)
+      const entry = TREE[from]?.find((e) => e.name === name)
+      const fail = (error) => ({ source, dest, ok: false, error })
+      if (!entry) return fail('源不存在')
+      if (source === dest) return { source, dest, ok: true, error: null }
+      if (!TREE[to]) return fail('目标不是文件夹')
+      if (TREE[to].some((e) => e.name === restoredName)) return fail('原路径已被占用')
+      if (dest.startsWith(`${source}/`)) return fail('不能恢复到自身内部')
+      TREE[from] = TREE[from].filter((e) => e !== entry)
+      TREE[to].push({ ...entry, name: restoredName })
+      if (entry.is_dir) rekeyMockTree(source, dest)
+      return { source, dest, ok: true, error: null }
+    })),
     moveItems: (sources, dest) => mockMoveItems(sources, dest),
     transfer: (sources, dest, mode) => {
       for (const p of sources) {
