@@ -54,3 +54,27 @@ test('mounted Pane anchors operation feedback using only its own row, with a pan
   assert.equal(toast.props.style.top, 48)
   assert.ok(toast.props.style.left + toast.props.style.maxWidth <= 200)
 })
+
+test('an expanded symlink directory updates when a different pane writes through its physical path', async t => {
+  const h = await mountPane(t, undefined, { resolvePath: path => Promise.resolve(path === '/d/link/' ? '/physical' : path) })
+  await h.batch(h.requests[0], [entry('link', { is_dir: true })], true, 1)
+  await h.flushFrames()
+  await h.resolve(h.requests[0])
+  await h.expand('/d/link')
+  await h.resolveKids(h.childRequests[0], [])
+  const rootReads = h.requests.length
+  await h.update({ directoryVersions: { '/physical': 1 } })
+  assert.equal(h.requests.length, rootReads)
+  assert.deepEqual(h.childRequests.map(r => r.path), ['/d/link', '/d/link'])
+})
+
+test('expanded-directory identity resolution preserves a real terminal space', async t => {
+  const h = await mountPane(t, undefined, { resolvePath: path => Promise.resolve(path === '/d/link /' ? '/physical space' : path) })
+  await h.batch(h.requests[0], [entry('link ', { is_dir: true })], true, 1)
+  await h.flushFrames()
+  await h.resolve(h.requests[0])
+  await h.expand('/d/link ')
+  await h.resolveKids(h.childRequests[0], [])
+  await h.update({ directoryVersions: { '/physical space': 1 } })
+  assert.deepEqual(h.childRequests.map(r => r.path), ['/d/link ', '/d/link '])
+})

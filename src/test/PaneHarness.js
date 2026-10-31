@@ -51,7 +51,7 @@ export const entry = (name, extra = {}) => ({
   path: `/d/${name}`, name, is_dir: false, size: 1, mtime_ms: 1, btime_ms: 1, ext: '', ...extra,
 })
 
-export async function mountPane(t, rendererOptions) {
+export async function mountPane(t, rendererOptions, apiOverrides = {}) {
   const previous = Object.fromEntries(['window', 'requestAnimationFrame', 'cancelAnimationFrame', 'IS_REACT_ACT_ENVIRONMENT', bridgeKey].map((key) => [key, globalThis[key]]))
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
   globalThis.window = new EventTarget()
@@ -81,6 +81,8 @@ export async function mountPane(t, rendererOptions) {
       cancelListDir(id) { cancelled.push(id); return Promise.resolve() },
       listDir(path, showHidden) { return new Promise((resolve, reject) => childRequests.push({ path, showHidden, resolve, reject })) },
       dirActivity: () => Promise.resolve([]),
+      resolvePath: path => Promise.resolve(path),
+      ...apiOverrides,
     },
     subscribe(fn) { subscribers.add(fn); return () => subscribers.delete(fn) },
   }
