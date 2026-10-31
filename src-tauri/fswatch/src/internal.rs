@@ -1,6 +1,7 @@
 //! Exact, identity-owned internal paths shared by all listing/event paths.
 use std::os::unix::fs::MetadataExt;
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
@@ -11,20 +12,22 @@ struct Owned {
     dev: u64,
     ino: u64,
 }
-fn registry() -> &'static Mutex<Vec<Owned>> {
-    static R: OnceLock<Mutex<Vec<Owned>>> = OnceLock::new();
-    R.get_or_init(|| Mutex::new(vec![]))
+fn registry() -> &'static Mutex<HashMap<PathBuf, Owned>> {
+    static R: OnceLock<Mutex<HashMap<PathBuf, Owned>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
 }
 pub fn register_internal(path: &Path) -> std::io::Result<()> {
     let path = fs::canonicalize(path)?;
     let m = fs::symlink_metadata(&path)?;
     let mut r = registry().lock().unwrap_or_else(|e| e.into_inner());
-    r.retain(|v| v.path != path);
-    r.push(Owned {
-        path,
-        dev: m.dev(),
-        ino: m.ino(),
-    });
+    r.insert(
+        path.clone(),
+        Owned {
+            path,
+            dev: m.dev(),
+            ino: m.ino(),
+        },
+    );
     Ok(())
 }
 pub fn unregister_internal(path: &Path) {
@@ -32,7 +35,7 @@ pub fn unregister_internal(path: &Path) {
     registry()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .retain(|v| v.path != p);
+        .remove(&p);
 }
 // Resolve the longest existing prefix, including aliases to registered roots.
 fn resolved(path: &Path) -> PathBuf {
@@ -50,7 +53,13 @@ pub fn is_internal(path: &Path) -> bool {
         (Some(parent), Some(name)) => resolved(parent).join(name),
         _ => p.clone(),
     };
-    let owned = registry().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let owned = {
+        let map = registry().lock().unwrap_or_else(|e| e.into_inner());
+        p.ancestors()
+            .chain(lexical.ancestors())
+            .filter_map(|ancestor| map.get(ancestor).cloned())
+            .collect::<Vec<_>>()
+    };
     owned.iter().any(|v| {
         (p.starts_with(&v.path) || lexical.starts_with(&v.path))
             && match fs::symlink_metadata(&v.path) {
@@ -76,6 +85,9 @@ mod tests {
         assert!(is_internal(&private));
         assert!(is_internal(&alias.join("child")));
         assert!(!is_internal(&user));
+        std::os::unix::fs::symlink(&user, private.join("outward")).unwrap();
+        assert!(is_internal(&private.join("outward")));
+        std::fs::remove_file(private.join("outward")).unwrap();
         std::fs::remove_dir(&private).unwrap();
         std::fs::create_dir(&private).unwrap();
         assert!(!is_internal(&private));

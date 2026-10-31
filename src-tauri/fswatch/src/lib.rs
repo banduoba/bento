@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-mod stream;
 mod internal;
-pub use internal::{register_internal, unregister_internal, is_internal};
+mod stream;
+pub use internal::{is_internal, register_internal, unregister_internal};
 pub use stream::{
     begin_list_request, cancel_list_request, finish_list_request, name_sort_desc, stream_list_dir,
     DirBatch, LIST_BATCH,
@@ -36,7 +36,9 @@ pub struct Entry {
 }
 
 pub fn make_entry(p: &Path, name: String) -> Option<Entry> {
-    if is_internal(p) { return None; }
+    if is_internal(p) {
+        return None;
+    }
     let md = fs::metadata(p).or_else(|_| fs::symlink_metadata(p)).ok()?;
     let is_dir = md.is_dir();
     let size = if is_dir { 0 } else { md.len() };
@@ -317,7 +319,9 @@ fn classify(watched: &HashMap<PathBuf, Vec<String>>, ev: &Event) -> Vec<Note> {
 }
 
 fn classify_path(watched: &HashMap<PathBuf, Vec<String>>, path: &Path, op: Op) -> Option<Note> {
-    if is_internal(path) { return None; }
+    if is_internal(path) {
+        return None;
+    }
     if watched.contains_key(path) {
         return Some(Note::Reload(path.to_path_buf()));
     }
@@ -329,7 +333,9 @@ fn classify_path(watched: &HashMap<PathBuf, Vec<String>>, path: &Path, op: Op) -
 }
 
 fn classify_ambiguous(watched: &HashMap<PathBuf, Vec<String>>, path: &Path) -> Option<Note> {
-    if is_internal(path) { return None; }
+    if is_internal(path) {
+        return None;
+    }
     if watched.contains_key(path) {
         return Some(Note::Reload(path.to_path_buf()));
     }
@@ -1102,5 +1108,52 @@ mod tests {
         drop(watcher);
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dir2);
+    }
+}
+
+#[cfg(test)]
+mod internal_filter_tests {
+    use super::*;
+    #[test]
+    fn snapshot_stream_and_mixed_rename_event_hide_only_owned_root() {
+        let root =
+            std::env::temp_dir().join(format!("bento-internal-stream-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let internal = root.join(".bento-owned");
+        let user = root.join(".bento-user");
+        fs::create_dir(&internal).unwrap();
+        fs::create_dir(&user).unwrap();
+        register_internal(&internal).unwrap();
+        assert!(make_entry(&internal, ".bento-owned".into()).is_none());
+        assert!(make_entry(&user, ".bento-user".into()).is_some());
+        let mut entries = vec![];
+        let mut total = 0;
+        stream_list_dir(
+            root.to_str().unwrap(),
+            true,
+            10,
+            false,
+            &AtomicBool::new(false),
+            |batch| {
+                total = batch.total;
+                entries.extend(batch.entries);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, ".bento-user");
+        let mut watched = HashMap::new();
+        watched.insert(root.clone(), vec![root.to_string_lossy().into()]);
+        let event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(internal.clone())
+            .add_path(user.clone());
+        let notes = classify(&watched, &event);
+        assert_eq!(notes.len(), 1);
+        assert!(matches!(&notes[0],Note::Child(_,path,Op::Upsert) if path==&user));
+        unregister_internal(&internal);
+        fs::remove_dir_all(root).unwrap();
     }
 }

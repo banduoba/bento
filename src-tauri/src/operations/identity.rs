@@ -68,7 +68,7 @@ impl Manifest {
             if f.metadata()?.ino() != m.ino() || f.metadata()?.dev() != m.dev() {
                 return Err(changed());
             }
-            let mut buf = [0; 1024 * 256];
+            let mut buf = vec![0; 1024 * 256];
             loop {
                 checkpoint()?;
                 let n = f.read(&mut buf)?;

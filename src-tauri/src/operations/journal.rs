@@ -46,11 +46,13 @@ impl OwnedRoot {
         self.identity.matches(&self.path)
     }
     pub fn cleanup(&self) -> io::Result<()> {
-        if fs::symlink_metadata(&self.path).is_err_and(|e|e.kind()==io::ErrorKind::NotFound){return Ok(());}
+        if fs::symlink_metadata(&self.path).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
+            return Ok(());
+        }
         if !self.valid() {
             return Err(super::identity::changed());
         }
-        crate::cleanup_staging(&self.path);
+        super::executor::remove_captured(&self.path)?;
         if fs::symlink_metadata(&self.path).is_ok() {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
@@ -219,6 +221,14 @@ impl Journal {
                     {
                         record.cleanup_pending = true;
                     }
+                }
+            }
+            for protected in &mut record.protected {
+                if fs::symlink_metadata(&protected.path).is_err()
+                    && !protected.manifest.matches_captured(&protected.original)
+                    && protected.manifest.matches_captured(&record.destination)
+                {
+                    protected.path = record.destination.clone();
                 }
             }
             record.protected.retain(|p| {

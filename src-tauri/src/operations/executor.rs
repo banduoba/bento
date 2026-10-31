@@ -31,6 +31,9 @@ pub(crate) enum Point {
     ArchiveSpawned,
     CapturedSource,
     Cloned,
+    UndoRename,
+    UndoSourceCleanup,
+    AfterSourceRemoved,
 }
 type Hook = Arc<dyn Fn(Point, &Path, &OperationContext) -> io::Result<()> + Send + Sync>;
 pub struct FileExecutor {
@@ -344,20 +347,24 @@ impl FileExecutor {
         })();
         if let Err(e) = settled {
             out.status = OutcomeStatus::Partial;
-            out.source_disposition = if moving {
+            out.source_disposition = if moving && record.cleanup_pending {
                 SourceDisposition::CleanupIncomplete
+            } else if moving {
+                SourceDisposition::Removed
             } else {
                 SourceDisposition::Unchanged
             };
-            out.retry = if moving {
+            out.retry = if moving && record.cleanup_pending {
                 RetryKind::FinishSourceCleanup
             } else {
                 RetryKind::ManualRecovery
             };
             out.error = Some(error(&e, Phase::RemovingSource));
             // A partially copied move must never become a normal move-back undo.
-            effect.kind = if moving {
+            effect.kind = if moving && record.cleanup_pending {
                 EffectKind::IncompleteMove
+            } else if moving {
+                EffectKind::Move
             } else {
                 EffectKind::Created
             };
@@ -600,6 +607,11 @@ impl FileExecutor {
                         return Err(e);
                     }
                 }
+                if let Ok(restored) = Manifest::capture(source, &|| Ok(())) {
+                    if manifest.same_captured_manifest(&restored) {
+                        self.refresh_previous_guards(source, manifest, &restored);
+                    }
+                }
                 r.protected.clear();
                 self.abandon(&r);
                 if crate::is_exdev(&e) {
@@ -652,12 +664,14 @@ impl FileExecutor {
         self.save(r, c)?;
         self.at(Point::CapturedSource, &held.path, c)?;
         remove_captured(&held.path)?;
-        r.protected.retain(|p| p.path != held.path);
+        r.protected
+            .retain(|p| p.path != held.path && fs::symlink_metadata(&p.path).is_ok());
         r.cleanup_pending = false;
         r.phase = "sourceRemoved".into();
+        self.at(Point::AfterSourceRemoved, &source, c)?;
         self.save(r, c)
     }
-    fn copy_tree(
+    pub(crate) fn copy_tree(
         &self,
         source: &Path,
         dest: &Path,
@@ -705,7 +719,7 @@ impl FileExecutor {
                     .create_new(true)
                     .mode(0o600)
                     .open(dest)?;
-                let mut buf = [0u8; 1024 * 256];
+                let mut buf = vec![0u8; 1024 * 256];
                 loop {
                     checkpoint(c)?;
                     let n = input.read(&mut buf)?;
@@ -856,7 +870,7 @@ pub(crate) fn invalid(s: &str) -> io::Error {
 fn cancelled() -> io::Error {
     io::Error::new(io::ErrorKind::Interrupted, "cancelled")
 }
-fn checkpoint(c: &OperationContext) -> io::Result<()> {
+pub(crate) fn checkpoint(c: &OperationContext) -> io::Result<()> {
     c.checkpoint().map_err(|_| cancelled())
 }
 pub(crate) fn error(e: &io::Error, phase: Phase) -> OperationError {
@@ -922,8 +936,11 @@ mod archive;
 pub(crate) fn rename_prepared(source: &Path, destination: &Path) -> io::Result<()> {
     use std::os::unix::{fs::MetadataExt, io::AsRawFd};
     let md = fs::symlink_metadata(source)?;
-    if !md.is_dir() || md.mode() & 0o200 != 0 {
-        return crate::rename_no_replace(source, destination);
+    let first = crate::rename_no_replace(source, destination);
+    match first {
+        Ok(()) => return Ok(()),
+        Err(ref e) if e.kind() == io::ErrorKind::PermissionDenied && md.is_dir() => {}
+        Err(e) => return Err(e),
     }
     let file = OpenOptions::new()
         .read(true)
@@ -932,18 +949,32 @@ pub(crate) fn rename_prepared(source: &Path, destination: &Path) -> io::Result<(
     if file.metadata()?.ino() != md.ino() || file.metadata()?.dev() != md.dev() {
         return Err(identity::changed());
     }
-    if unsafe {
-        libc::fchmod(
-            file.as_raw_fd(),
-            ((md.mode() | 0o200) & 0o7777) as libc::mode_t,
-        )
-    } != 0
-    {
+    #[cfg(target_os = "macos")]
+    let acl = DirectoryAcl::read(file.as_raw_fd())?;
+    // Restrict group/other access before temporarily removing a deny-write ACL.
+    if unsafe { libc::fchmod(file.as_raw_fd(), 0o700) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    #[cfg(target_os = "macos")]
+    if let Err(err) = acl.clear() {
+        let _ = unsafe { libc::fchmod(file.as_raw_fd(), (md.mode() & 0o7777) as libc::mode_t) };
+        return Err(err);
+    }
     let renamed = crate::rename_no_replace(source, destination);
-    if unsafe { libc::fchmod(file.as_raw_fd(), (md.mode() & 0o7777) as libc::mode_t) } != 0 {
-        let error = io::Error::last_os_error();
+    #[cfg(target_os = "macos")]
+    let acl_restored = acl.restore();
+    #[cfg(not(target_os = "macos"))]
+    let acl_restored: io::Result<()> = Ok(());
+    // Restore the restrictive ACL before returning the original mode; never grant
+    // group/other rights while the saved denial ACL is temporarily absent.
+    let restored = acl_restored.and_then(|_| {
+        if unsafe { libc::fchmod(file.as_raw_fd(), (md.mode() & 0o7777) as libc::mode_t) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    });
+    if let Err(error) = restored {
         return if renamed.is_ok() {
             Err(io::Error::new(
                 error.kind(),
@@ -958,18 +989,90 @@ pub(crate) fn rename_prepared(source: &Path, destination: &Path) -> io::Result<(
     }
     renamed
 }
+#[cfg(target_os = "macos")]
+struct DirectoryAcl {
+    fd: libc::c_int,
+    original: *mut libc::c_void,
+}
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn acl_get_fd_np(fd: libc::c_int, kind: libc::c_int) -> *mut libc::c_void;
+    fn acl_set_fd_np(fd: libc::c_int, acl: *mut libc::c_void, kind: libc::c_int) -> libc::c_int;
+    fn acl_init(count: libc::c_int) -> *mut libc::c_void;
+    fn acl_free(acl: *mut libc::c_void) -> libc::c_int;
+}
+#[cfg(target_os = "macos")]
+impl DirectoryAcl {
+    fn read(fd: libc::c_int) -> io::Result<Self> {
+        let mut original = unsafe { acl_get_fd_np(fd, 0x100) };
+        if original.is_null() {
+            let e = io::Error::last_os_error();
+            if e.raw_os_error() != Some(libc::ENOENT) {
+                return Err(e);
+            }
+            original = unsafe { acl_init(0) };
+            if original.is_null() {
+                return Err(io::Error::last_os_error());
+            }
+        }
+        Ok(Self { fd, original })
+    }
+    fn clear(&self) -> io::Result<()> {
+        let empty = unsafe { acl_init(0) };
+        if empty.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let rc = unsafe { acl_set_fd_np(self.fd, empty, 0x100) };
+        let e = io::Error::last_os_error();
+        unsafe { acl_free(empty) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(e)
+        }
+    }
+    fn restore(&self) -> io::Result<()> {
+        if unsafe { acl_set_fd_np(self.fd, self.original, 0x100) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+#[cfg(target_os = "macos")]
+impl Drop for DirectoryAcl {
+    fn drop(&mut self) {
+        unsafe { acl_free(self.original) };
+    }
+}
 
 // Destruction is limited to a verified tree captured beneath a private owned root.
 // Readonly modes are restored if removal cannot complete; no symlink is followed.
-fn remove_captured(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_captured(path: &Path) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
     let md = fs::symlink_metadata(path)?;
     if !md.is_dir() {
         return fs::remove_file(path);
     }
-    fs::set_permissions(
-        path,
-        fs::Permissions::from_mode(md.permissions().mode() | 0o700),
-    )?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(path)?;
+    #[cfg(target_os = "macos")]
+    let acl = DirectoryAcl::read(file.as_raw_fd())?;
+    if unsafe { libc::fchmod(file.as_raw_fd(), 0o700) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(err) = acl.clear() {
+        let _ = unsafe {
+            libc::fchmod(
+                file.as_raw_fd(),
+                (md.permissions().mode() & 0o7777) as libc::mode_t,
+            )
+        };
+        return Err(err);
+    }
     let result = (|| {
         for e in fs::read_dir(path)? {
             remove_captured(&e?.path())?;
@@ -977,7 +1080,18 @@ fn remove_captured(path: &Path) -> io::Result<()> {
         fs::remove_dir(path)
     })();
     if result.is_err() {
-        let _ = fs::set_permissions(path, md.permissions());
+        #[cfg(target_os = "macos")]
+        let restored = acl.restore();
+        #[cfg(not(target_os = "macos"))]
+        let restored: io::Result<()> = Ok(());
+        if restored.is_ok() {
+            let _ = unsafe {
+                libc::fchmod(
+                    file.as_raw_fd(),
+                    (md.permissions().mode() & 0o7777) as libc::mode_t,
+                )
+            };
+        }
     }
     result
 }

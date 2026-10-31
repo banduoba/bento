@@ -1,6 +1,9 @@
 //! Inverse effects are identity guarded, run in reverse order, and remember applied steps.
 use super::{
-    executor::{affected, basename, display, error, invalid, rename_prepared, FileExecutor, Point},
+    executor::{
+        affected, basename, checkpoint, display, error, invalid, remove_captured, rename_prepared,
+        FileExecutor, Point,
+    },
     identity::{self, Manifest},
     journal::{self, OwnedRoot, Protected, Record},
     queue::OperationContext,
@@ -25,6 +28,8 @@ pub(crate) struct Effect {
     pub journal_id: String,
     pub backup: Option<Protected>,
     pub inverse_done: bool,
+    pub inverse_cleanup_pending: bool,
+    pub inverse_guard: Option<Manifest>,
     pub complete: bool,
     pub inverse_destination: Option<PathBuf>,
     pub held: Option<Protected>,
@@ -49,6 +54,8 @@ impl Effect {
             journal_id,
             backup: None,
             inverse_done: false,
+            inverse_cleanup_pending: false,
+            inverse_guard: None,
             complete: false,
             inverse_destination: None,
             held: None,
@@ -131,7 +138,12 @@ impl FileExecutor {
             ..Default::default()
         }
     }
-    fn refresh_previous_guards(&self, path: &std::path::Path, previous: &Manifest, new: &Manifest) {
+    pub(crate) fn refresh_previous_guards(
+        &self,
+        path: &std::path::Path,
+        previous: &Manifest,
+        new: &Manifest,
+    ) {
         let mut map = self.undo.lock().unwrap_or_else(|e| e.into_inner());
         for effects in map.values_mut() {
             for effect in effects {
@@ -151,6 +163,35 @@ impl FileExecutor {
             r.destination_manifest = Some(e.manifest.clone());
             r
         });
+        if e.inverse_done && e.inverse_guard.is_none() {
+            let target = e
+                .inverse_destination
+                .as_ref()
+                .ok_or_else(identity::changed)?;
+            let actual = Manifest::capture(target, &|| Ok(()))?;
+            let expected = record
+                .incoming_manifest
+                .as_ref()
+                .filter(|_| record.destination == *target)
+                .unwrap_or(&e.manifest);
+            if !expected.same_captured_manifest(&actual) {
+                return Err(identity::changed());
+            }
+            e.inverse_guard = Some(actual.clone());
+            record.destination_manifest = Some(actual);
+        }
+        if e.inverse_cleanup_pending {
+            self.finish_inverse_cleanup(e, &mut record, c)?;
+            if e.kind == EffectKind::Move {
+                if let Some(previous) = &e.source_manifest {
+                    self.refresh_previous_guards(
+                        e.inverse_destination.as_ref().unwrap(),
+                        previous,
+                        e.inverse_guard.as_ref().unwrap(),
+                    );
+                }
+            }
+        }
         if !e.inverse_done {
             let target = if let Some(target) = &e.inverse_destination {
                 target.clone()
@@ -197,25 +238,24 @@ impl FileExecutor {
             }
             record.phase = "undoMoving".into();
             self.save(&record, c)?;
-            match crate::relocate(&held.path, &target) {
+            match self.move_inverse(e, &held, &target, &mut record, c) {
                 Ok(()) => {}
                 Err(err) => {
-                    // A cross-volume inverse may have published before captured-source cleanup failed.
-                    // Keep both paths and block replay; recovery retains the unique object.
-                    if crate::published_destination(&err).is_some() {
-                        record.phase = "undoPublishedPartial".into();
-                        let _ = self.journal.save(&record);
-                        return Err(err);
+                    if !e.inverse_done {
+                        if rename_prepared(&held.path, &e.destination).is_ok() {
+                            e.held = None;
+                            record.protected.retain(|p| p.path != held.path);
+                            if let Ok(current) = Manifest::capture(&e.destination, &|| Ok(())) {
+                                if e.manifest.same_captured_manifest(&current) {
+                                    e.manifest = current;
+                                }
+                            }
+                        }
                     }
-                    if rename_prepared(&held.path, &e.destination).is_ok() {
-                        e.held = None;
-                    }
+                    let _ = self.journal.save(&record);
                     return Err(err);
                 }
             }
-            e.inverse_done = true;
-            e.held = None;
-            record.protected.retain(|p| p.path != held.path);
             if e.kind == EffectKind::Move {
                 if let Some(previous) = &e.source_manifest {
                     let restored = Manifest::capture(&target, &|| Ok(()))?;
@@ -225,9 +265,6 @@ impl FileExecutor {
                     self.refresh_previous_guards(&target, previous, &restored);
                 }
             }
-            e.inverse_done = true;
-            e.held = None;
-            record.protected.retain(|p| p.path != held.path);
             record.phase = "undoMoved".into();
             self.save(&record, c)?;
             self.at(Point::UndoMoved, &target, c)?;
@@ -246,13 +283,107 @@ impl FileExecutor {
             record.protected.retain(|p| p.path != backup.path);
             let restored = Manifest::capture(&backup.original, &|| Ok(()))?;
             self.refresh_previous_guards(&backup.original, &backup.manifest, &restored);
-            record.protected.retain(|p| p.path != backup.path);
-            e.backup = None;
             self.save(&record, c)?;
         }
         e.complete = true;
         self.finish_record(&record);
         Ok(())
+    }
+    fn move_inverse(
+        &self,
+        e: &mut Effect,
+        held: &Protected,
+        target: &std::path::Path,
+        record: &mut Record,
+        c: &OperationContext,
+    ) -> io::Result<()> {
+        let renamed = self
+            .at(Point::UndoRename, target, c)
+            .and_then(|_| rename_prepared(&held.path, target));
+        match renamed {
+            Ok(()) => {
+                e.inverse_done = true;
+                e.held = None;
+                record.protected.retain(|p| p.path != held.path);
+                let actual = Manifest::capture(target, &|| Ok(()))?;
+                if !held.manifest.same_captured_manifest(&actual) {
+                    return Err(identity::changed());
+                }
+                e.inverse_guard = Some(actual);
+                return Ok(());
+            }
+            Err(err) if crate::is_exdev(&err) => {}
+            Err(err) if crate::published_destination(&err).is_some() => {
+                e.inverse_done = true;
+                return Err(err);
+            }
+            Err(err) => return Err(err),
+        }
+        let root = OwnedRoot::create(target.parent().unwrap())?;
+        let incoming = root.path.join("inverse");
+        record.roots.push(root.clone());
+        record.incoming = Some(incoming.clone());
+        record.phase = "inverseCopying".into();
+        self.save(record, c)?;
+        self.copy_tree(&held.path, &incoming, c, &e.item_id, &mut 0)?;
+        let prepared = Manifest::capture(&incoming, &|| checkpoint(c))?;
+        if !held.manifest.same_contents(&prepared) || !held.manifest.matches_captured(&held.path) {
+            return Err(identity::changed());
+        }
+        record.incoming_manifest = Some(prepared.clone());
+        record.source = Some(held.path.clone());
+        record.source_manifest = Some(Manifest::capture(&held.path, &|| Ok(()))?);
+        record.destination = target.to_path_buf();
+        record.move_intent = true;
+        record.phase = "inversePrepared".into();
+        self.save(record, c)?;
+        checkpoint(c)?;
+        c.set_phase(Phase::Undoing, Cancelability::Finishing);
+        if let Err(err) = rename_prepared(&incoming, target) {
+            if crate::published_destination(&err).is_some() {
+                e.inverse_done = true;
+                e.inverse_cleanup_pending = true;
+            }
+            return Err(err);
+        }
+        e.inverse_done = true;
+        e.inverse_cleanup_pending = true;
+        let published = Manifest::capture(target, &|| Ok(()))?;
+        if !prepared.same_captured_manifest(&published) {
+            return Err(identity::changed());
+        }
+        e.inverse_guard = Some(published.clone());
+        record.destination_manifest = Some(published);
+        record.cleanup_pending = true;
+        record.phase = "inversePublished".into();
+        self.save(record, c)?;
+        self.finish_inverse_cleanup(e, record, c)
+    }
+    fn finish_inverse_cleanup(
+        &self,
+        e: &mut Effect,
+        record: &mut Record,
+        c: &OperationContext,
+    ) -> io::Result<()> {
+        let target = e
+            .inverse_destination
+            .as_ref()
+            .ok_or_else(identity::changed)?;
+        if !e.inverse_guard.as_ref().is_some_and(|m| m.matches(target)) {
+            return Err(identity::changed());
+        }
+        let held = e.held.as_ref().ok_or_else(identity::changed)?;
+        if !held.manifest.matches_remaining(&held.path) {
+            return Err(identity::changed());
+        }
+        self.at(Point::UndoSourceCleanup, &held.path, c)?;
+        remove_captured(&held.path)?;
+        record.protected.retain(|p| p.path != held.path);
+        record.cleanup_pending = false;
+        record.phase = "inverseSourceRemoved".into();
+        e.held = None;
+        e.inverse_cleanup_pending = false;
+        self.save(record, c)
     }
     pub(crate) fn execute_recovery(
         &self,
@@ -285,7 +416,9 @@ impl FileExecutor {
                             record.source.as_ref() == Some(&p.original)
                                 && fs::symlink_metadata(&p.path).is_ok()
                         });
-                    if record.cleanup_pending {return settled;}
+                    if record.cleanup_pending {
+                        return settled;
+                    }
                     // Convert the existing incomplete effect; never copy a second destination.
                     for (undo_id, effects) in self
                         .undo
@@ -296,6 +429,11 @@ impl FileExecutor {
                         for e in effects {
                             if e.journal_id == id && e.kind == EffectKind::IncompleteMove {
                                 e.kind = EffectKind::Move;
+                                recovered_undo = Some(undo_id.clone());
+                            }
+                            if e.journal_id == id && e.inverse_cleanup_pending {
+                                e.inverse_cleanup_pending = false;
+                                e.held = None;
                                 recovered_undo = Some(undo_id.clone());
                             }
                         }
@@ -378,6 +516,7 @@ impl FileExecutor {
                         mutated = true;
                         out.actual_destination = Some(display(&protected.original));
                         record.protected.retain(|p| p.path != protected.path);
+                        record.cleanup_pending = false;
                         self.save(&record, c)?;
                     }
                 }
