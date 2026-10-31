@@ -78,6 +78,16 @@ export function splitName(name, isDir) {
 
 export const basename = (p) => p.split('/').filter(Boolean).pop() || p
 
+// 标题栏：聚焦目录的最后一段（完整文件夹名，如 2026-10-31_delete_tang0715m）。
+// `/` 与没有段名的卷根不用空串：启动盘用 Macintosh HD，外置卷用卷名；没有路径时用主目录标签。
+export function folderTitle(path, home) {
+  const raw = typeof path === 'string' ? path.trim() : ''
+  if (!raw) return home && home !== '/' ? '主目录' : 'Macintosh HD'
+  if (/^\/+$/.test(raw)) return 'Macintosh HD'
+  const name = raw.split('/').filter(Boolean).pop()
+  return name || (home && home !== '/' ? '主目录' : 'Macintosh HD')
+}
+
 export function parentPath(p) {
   if (!p || p === '/') return null
   const parts = p.split('/').filter(Boolean)
