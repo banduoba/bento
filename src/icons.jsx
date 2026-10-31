@@ -73,6 +73,18 @@ export const IconCopy = (p) => (
 export const IconCheck = (p) => (
   <svg {...S(p)}><path d="m5 12.5 4.5 4.5L19 7" /></svg>
 )
+export const IconFile = (p) => (
+  <svg width={p.size || 16} height={p.size || 16} viewBox="0 0 16 16" aria-hidden="true">
+    <path
+      d="M3.5 1.6h5.1L12.6 5.4V13a1.4 1.4 0 0 1-1.4 1.4H4.9A1.4 1.4 0 0 1 3.5 13V1.6z"
+      fill="#f4f4f8"
+      stroke="#b4b4be"
+      strokeWidth="1"
+      strokeLinejoin="round"
+    />
+    <path d="M8.4 1.8v3.5h3.6" fill="none" stroke="#b4b4be" strokeWidth="1" strokeLinejoin="round" />
+  </svg>
+)
 export const IconFolder = (p) => (
   <svg width={p.size || 26} height={p.size || 26} viewBox="0 0 24 24">
     <path
