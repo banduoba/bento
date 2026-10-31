@@ -36,6 +36,20 @@ test('mounted Pane rescans the affected root with automatic refresh disabled', a
   assert.equal(h.requests.at(-1).path, '/d')
 })
 
+test('manual refresh epoch rereads only the owning pane even when another pane shares its directory', async t => {
+  const h = await mountPane(t)
+  await h.update({ tick: rootRefreshKey(0, {}, '/d') })
+  const before = h.requests.length
+  const siblingTick = rootRefreshKey(0, {}, '/d')
+  await h.update({ tick: rootRefreshKey(0, {}, '/d', 1) })
+  assert.equal(h.requests.length, before + 1)
+  assert.equal(h.requests.at(-1).path, '/d')
+  assert.equal(siblingTick, '0:0')
+  const afterOwnRefresh = h.requests.length
+  await h.update({ tick: rootRefreshKey(0, {}, '/d', 1) })
+  assert.equal(h.requests.length, afterOwnRefresh)
+})
+
 test('mounted Pane anchors operation feedback using only its own row, with a pane-local fallback', async t => {
   const previous = globalThis.ResizeObserver
   globalThis.ResizeObserver = class { observe() {} disconnect() {} }

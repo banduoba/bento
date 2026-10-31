@@ -30,8 +30,14 @@ export function invalidateDirectories(versions, paths) {
   return next
 }
 
-export function rootRefreshKey(tick, versions, path) {
-  return `${tick}:${versions[directoryKey(path)] || 0}`
+export function bumpManualRefreshTick(ticks, tabId) {
+  if (tabId == null) return ticks
+  return { ...ticks, [tabId]: (ticks[tabId] || 0) + 1 }
+}
+
+export function rootRefreshKey(tick, versions, path, tabTick = 0) {
+  const epoch = tabTick ? `${tick}.${tabTick}` : tick
+  return `${epoch}:${versions[directoryKey(path)] || 0}`
 }
 
 export function changedDirectories(before, after, paths, keyFor = directoryKey) {
