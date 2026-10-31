@@ -2,6 +2,10 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
+import { confirm } from '@tauri-apps/plugin-dialog'
+import { blankTab, blankPane, freshId, navigateTab, restoreSession, sessionForDisk, preferencesForDisk } from './session'
+import { createSerialSaver } from './persistence'
+import { createSessionClose } from './sessionClose'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { api, hasTauri } from './api'
 import { bumpManualRefreshTick, directoryKey, invalidateDirectories, rootRefreshKey } from './paneFeedback'
@@ -11,7 +15,6 @@ import { basename, parentPath, labelOf, copyText, folderTitle } from './format'
 import { dragState } from './nativeDrag'
 import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
 import {
-  DEFAULT_SORT,
   applyToAllFolders,
   canonicalPathKey,
   clearFolderOverride,
@@ -20,7 +23,6 @@ import {
   rekeyOverride,
   resolveViewKey,
   seedViewSettings,
-  sortFromSavedTab,
   syncPaneViews,
   viewForPath,
   withFolderPatch,
@@ -100,17 +102,6 @@ async function handleTextShortcut(e, el) {
   }
 }
 
-let tabSeq = 1
-const freshId = () => `t${tabSeq++}`
-const blankTab = (path) => ({
-  id: freshId(),
-  path,
-  history: [path],
-  hi: 0,
-  sortKey: DEFAULT_SORT.key,
-  sortDir: DEFAULT_SORT.dir,
-})
-const blankPane = (path) => ({ tabs: [blankTab(path)], active: 0 })
 const freshWsId = () => `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 
 // ---------- 布局预设（grid-template-areas 定义） ----------
@@ -130,101 +121,25 @@ const AREA_LETTERS = ['a', 'b', 'c', 'd']
 const getPreset = (id) => LAYOUT_PRESETS.find((p) => p.id === id) || LAYOUT_PRESETS[1]
 const paneCount = (layoutId) => getPreset(layoutId).panes
 const paneName = (layoutId, i) => getPreset(layoutId).names?.[i] || `窗格 ${i + 1}`
-const normalizeLayout = (l) => {
-  if (typeof l === 'string' && LAYOUT_PRESETS.some((p) => p.id === l)) return l
-  if (typeof l === 'number') return { 1: '1', 2: '2c', 4: '4' }[l] || '2c'
-  return '2c'
+const normalizeLayout = l => {
+  if (typeof l === 'string' && LAYOUT_PRESETS.some(p => p.id === l)) return l
+  return typeof l === 'number' ? ({ 1: '1', 2: '2c', 4: '4' }[l] || '2c') : '2c'
 }
 
-function sanitizePanes(raw, home) {
-  return (Array.isArray(raw) ? raw : []).map((p) => {
-    // 兼容 v0.1 老格式（pane 直接带 path，无 tabs）
-    const rawTabs = Array.isArray(p?.tabs) && p.tabs.length ? p.tabs : [p?.path != null ? p : { path: home }]
-    const tabs = rawTabs.map((t) => {
-      const path = typeof t?.path === 'string' && t.path.startsWith('/') ? t.path : home
-      const history = Array.isArray(t?.history) && t.history.length ? t.history : [path]
-      return {
-        id: freshId(),
-        path,
-        history,
-        hi: Math.min(Math.max(t?.hi ?? history.length - 1, 0), history.length - 1),
-        ...sortFromSavedTab(t),
-      }
-    })
-    return {
-      tabs,
-      active: Math.min(Math.max(p?.active ?? 0, 0), tabs.length - 1),
-      // 列设置按窗格各自保存；colsVersion<2 的旧值是旧默认（全显示），丢弃以套用新默认（修改日期/大小/种类）
-      colWidths: normalizeCols(p?.colsVersion === 2 ? p.colWidths : null),
-      colVisible: normalizeVis(p?.colsVersion === 2 ? p.colVisible : null),
-      colsVersion: 2,
-    }
-  })
-}
-
-const defaultConfig = (home) => ({
-  layout: 2,
-  showHidden: false,
-  showSidebar: true,
-  autoRefresh: true,
-  alwaysOnTop: false,
-  enterAction: 'rename',
-  zipPrefs: normalizeZipPrefs(null),
-  focusedIdx: 0,
-  searchPrefs: { scope: 'global', sort: 'btime' },
-  searchPaths: [],
-  favorites: ['Desktop', 'Documents', 'Downloads', 'Movies', 'Music', 'Pictures'].map((n) => ({
-    name: n,
-    path: `${home}/${n}`,
-  })),
-  panes: [blankPane(home), blankPane(home)],
-  workspaces: [],
-  activeWorkspace: null,
-})
+const defaultFavorites = home => ['Desktop', 'Documents', 'Downloads', 'Movies', 'Music', 'Pictures'].map(name => ({
+  name,
+  path: `${home}/${name}`,
+}))
 
 function sanitizeConfig(saved, home) {
-  const base = defaultConfig(home)
-  if (!saved || !Array.isArray(saved.panes) || saved.panes.length === 0) {
-    return {
-      ...base,
-      workspaces: [{ id: 'w-default', name: '默认', panes: base.panes, layout: base.layout, focusedIdx: 0 }],
-      activeWorkspace: 'w-default',
-    }
-  }
-  const panes = sanitizePanes(saved.panes, home)
-  const layout = normalizeLayout(saved.layout)
-  const focusedIdx = Number.isInteger(saved.focusedIdx) ? Math.max(saved.focusedIdx, 0) : 0
-
-  let workspaces
-  let activeWorkspace
-  if (Array.isArray(saved.workspaces) && saved.workspaces.length) {
-    workspaces = saved.workspaces.map((w) => {
-      const wsPanes = sanitizePanes(w?.panes, home)
-      return {
-        id: typeof w?.id === 'string' && w.id ? w.id : freshWsId(),
-        name: typeof w?.name === 'string' && w.name ? w.name : '工作区',
-        panes: wsPanes.length ? wsPanes : [blankPane(home)],
-        layout: normalizeLayout(w?.layout),
-        focusedIdx: Math.max(w?.focusedIdx || 0, 0),
-      }
-    })
-    activeWorkspace = workspaces.some((w) => w.id === saved.activeWorkspace)
-      ? saved.activeWorkspace
-      : workspaces[0].id
-  } else {
-    workspaces = [{ id: 'w-default', name: '默认', panes, layout, focusedIdx }]
-    activeWorkspace = 'w-default'
-  }
-
+  saved = saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {}
   return {
-    layout,
     showHidden: !!saved.showHidden,
     showSidebar: saved.showSidebar !== false,
     autoRefresh: saved.autoRefresh !== false,
     alwaysOnTop: saved.alwaysOnTop === true,
     enterAction: normalizeEnterAction(saved.enterAction),
     zipPrefs: normalizeZipPrefs(saved.zipPrefs),
-    focusedIdx,
     searchPrefs: {
       scope: ['pane', 'home', 'global'].includes(saved.searchPrefs?.scope) ? saved.searchPrefs.scope : 'global',
       sort: ['btime', 'mtime', 'size', 'name', 'score'].includes(saved.searchPrefs?.sort) ? saved.searchPrefs.sort : 'btime',
@@ -233,22 +148,7 @@ function sanitizeConfig(saved, home) {
     searchPaths: Array.isArray(saved.searchPaths)
       ? saved.searchPaths.filter((p) => typeof p === 'string' && p.startsWith('/'))
       : [],
-    favorites: Array.isArray(saved.favorites) ? saved.favorites : base.favorites,
-    panes,
-    workspaces,
-    activeWorkspace,
-  }
-}
-
-// 保存前把当前实时状态镜像进活动工作区快照
-function withActiveSnapshot(c) {
-  return {
-    ...c,
-    workspaces: (c.workspaces || []).map((w) =>
-      w.id === c.activeWorkspace
-        ? { ...w, panes: c.panes, layout: c.layout, focusedIdx: c.focusedIdx }
-        : w
-    ),
+    favorites: Array.isArray(saved.favorites) ? saved.favorites : defaultFavorites(home),
   }
 }
 
@@ -272,6 +172,8 @@ function MiniGrid({ preset }) {
 export default function App() {
   const [cfg, setCfg] = useState(null)
   const [home, setHome] = useState('/')
+  const [recoveryNotice, setRecoveryNotice] = useState(null)
+  const [saveError, setSaveError] = useState(null)
   const [focused, setFocused] = useState(0)
   const [sel, setSel] = useState({}) // tabId -> Set(paths)
   const [filters, setFilters] = useState({}) // tabId -> string
@@ -325,27 +227,80 @@ export default function App() {
     getCurrentWindow().setAlwaysOnTop(!!cfg.alwaysOnTop).catch((e) => trace(`setAlwaysOnTop failed: ${e}`))
   }, [cfg?.alwaysOnTop])
 
+  // The close hook is installed immediately; flushing waits until disk hydration finishes.
+  const hydration = useRef(null)
+  if (!hydration.current) {
+    let resolve
+    const promise = new Promise(done => { resolve = done })
+    hydration.current = { promise, resolve, error: null }
+  }
+  const savers = useRef(null)
+  if (!savers.current) {
+    const onError = error => setSaveError(String(error))
+    savers.current = {
+      session: createSerialSaver(api.saveSession, { delay: 300, onError }),
+      // Commit the migrated session before stripping its legacy fields from config.
+      config: createSerialSaver(async prefs => {
+        await savers.current.session.flush()
+        await api.saveConfig(prefs)
+      }, { delay: 300, onError }),
+      views: createSerialSaver(api.saveViewSettings, { delay: 0, onError }),
+    }
+  }
+  const queuePersistence = c => {
+    if (!c) return
+    savers.current.session.update(sessionForDisk(c))
+    savers.current.config.update(preferencesForDisk(c))
+    if (c.viewSettings) savers.current.views.update(c.viewSettings)
+  }
+  const flushPersistence = async () => {
+    await hydration.current.promise
+    if (hydration.current.error) throw hydration.current.error
+    // Re-read the live ref after awaiting writes in case navigation happened during IO.
+    let before
+    do {
+      before = cfgRef.current
+      queuePersistence(before)
+      const results = await Promise.allSettled(Object.values(savers.current).map(saver => saver.flush()))
+      const failed = results.find(result => result.status === 'rejected')
+      if (failed) throw failed.reason
+    } while (before !== cfgRef.current)
+    setSaveError(null)
+  }
+
   // ---------- 启动 ----------
   useEffect(() => {
+    let live = true
     ;(async () => {
-      const h = await api.homeDir()
-      setHome(h)
-      const [saved, storedViews] = await Promise.all([
-        api.loadConfig().catch(() => null),
-        api.loadViewSettings().catch(() => null),
-      ])
-      const c = sanitizeConfig(saved, h)
-      const focus = Math.min(Math.max(c.focusedIdx || 0, 0), Math.max(c.panes.length - 1, 0))
-      // 没有视图文件时，把当前聚焦窗格的排序/列收成全局默认，避免升级后忘掉。
-      const viewSettings =
-        storedViews && typeof storedViews === 'object'
-          ? normalizeViewSettings(storedViews)
-          : seedViewSettings(c.panes, focus)
-      setCfg({ ...c, viewSettings })
-      // 恢复上次工作的聚焦窗格（否则每次重启都回到左侧，侧边栏点击就会“没反应”）
-      setFocused(Math.min(c.focusedIdx || 0, paneCount(c.layout) - 1))
-      trace(`boot: focusedIdx=${c.focusedIdx} layout=${c.layout} panes=${c.panes.length} ws=${c.workspaces.length}`)
+      try {
+        const h = await api.homeDir()
+        const [saved, storedViews, loaded] = await Promise.all([
+          api.loadConfig().catch(() => null),
+          api.loadViewSettings().catch(() => null),
+          api.loadSession().then(value => ({ value }), error => ({ error })),
+        ])
+        if (!live) return
+        const { session, warning } = restoreSession(loaded.value, saved, h)
+        const c = { ...sanitizeConfig(saved, h), ...session }
+        const focus = c.focusedIdx
+        const viewSettings = storedViews && typeof storedViews === 'object'
+          ? normalizeViewSettings(storedViews) : seedViewSettings(c.panes, focus)
+        const initial = { ...c, viewSettings }
+        cfgRef.current = initial
+        setHome(h)
+        setCfg(initial)
+        setFocused(focus)
+        if (loaded.error || warning) setRecoveryNotice(warning || `会话读取失败，已从旧配置恢复：${loaded.error}。请检查并重试保存。`)
+        hydration.current.resolve()
+        trace(`boot: focusedIdx=${focus} layout=${c.layout} panes=${c.panes.length} ws=${c.workspaces.length}`)
+      } catch (error) {
+        if (!live) return
+        hydration.current.error = error
+        hydration.current.resolve()
+        setRecoveryNotice(`启动恢复失败：${error}`)
+      }
     })()
+    return () => { live = false }
   }, [])
 
   // 启动时扫描模板目录；打开空白菜单时会再扫一次，放下新模板不用重启
@@ -362,35 +317,31 @@ export default function App() {
     }
   }, [])
 
-  // ---------- 配置持久化：每次变化立即写盘（去防抖：关窗太快也不会丢状态） ----------
-  // 视图设置单独写 view-settings.json，不塞进工作区配置。
-  const configForDisk = (c) => {
-    const { viewSettings, ...rest } = withActiveSnapshot(c)
-    return rest
-  }
-  useEffect(() => {
-    if (!cfg) return
-    api.saveConfig(configForDisk(cfg)).catch(() => {})
-  }, [cfg])
-  useEffect(() => {
-    if (!cfg?.viewSettings) return
-    api.saveViewSettings(cfg.viewSettings).catch(() => {})
-  }, [cfg?.viewSettings])
+  // Compare document snapshots: stats, refresh and preference changes do not write session.json.
+  useEffect(() => { if (cfg) queuePersistence(cfg) }, [cfg])
+  useEffect(() => () => { Object.values(savers.current).forEach(saver => saver.dispose()) }, [])
 
-  // 关窗兜底保存
   useEffect(() => {
-    const h = () => {
-      const c = cfgRef.current
-      if (!c) return
-      api.saveConfig(configForDisk(c)).catch(() => {})
-      if (c.viewSettings) api.saveViewSettings(c.viewSettings).catch(() => {})
-    }
-    window.addEventListener('beforeunload', h)
-    window.addEventListener('pagehide', h)
-    return () => {
-      window.removeEventListener('beforeunload', h)
-      window.removeEventListener('pagehide', h)
-    }
+    if (!hasTauri) return
+    const win = getCurrentWindow()
+    const coordinator = createSessionClose({
+      flush: flushPersistence,
+      // destroy bypasses closeRequested, so the flushed close cannot re-enter this hook.
+      close: () => win.destroy(),
+      reply: (requestId, allowExit) => api.sessionExitReply(requestId, allowExit),
+      confirmDiscard: error => confirm(`保存失败：${error}\n仍要退出吗？未保存的更改将丢失。`, {
+        title: '无法保存会话', kind: 'warning', okLabel: '仍退出', cancelLabel: '取消退出',
+      }),
+    })
+    const report = error => setSaveError(String(error))
+    const registrations = [
+      win.onCloseRequested(event => {
+        event.preventDefault()
+        return coordinator.requestClose().catch(report)
+      }),
+      listen('bento-session-exit-requested', event => coordinator.requestExit(event.payload?.requestId).catch(report)),
+    ]
+    return () => { registrations.forEach(registration => registration.then(unlisten => unlisten()).catch(report)) }
   }, [])
 
   // 路径 → canonicalize 后的键。解析失败时记下词法键，查找缺覆盖就用默认，不把错误抛到界面。
@@ -562,17 +513,16 @@ export default function App() {
       return
     }
     trace(`nav tab=${tabId} -> ${path}`)
-    updateTab(tabId, (t) => {
-      if (t.path === path) return t
-      const history = [...t.history.slice(0, t.hi + 1), path]
-      return { ...t, path, history, hi: history.length - 1 }
-    })
-    setSel((s) => ({ ...s, [tabId]: new Set() }))
+    updateTab(tabId, t => navigateTab(t, { path }))
+    setSel(s => ({ ...s, [tabId]: new Set() }))
   }
 
-  const navBack = (tabId) => updateTab(tabId, (t) => (t.hi > 0 ? { ...t, hi: t.hi - 1, path: t.history[t.hi - 1] } : t))
-  const navForward = (tabId) =>
-    updateTab(tabId, (t) => (t.hi < t.history.length - 1 ? { ...t, hi: t.hi + 1, path: t.history[t.hi + 1] } : t))
+  const travel = (tabId, step) => {
+    updateTab(tabId, t => navigateTab(t, { step }))
+    setSel(s => ({ ...s, [tabId]: new Set() }))
+  }
+  const navBack = tabId => travel(tabId, -1)
+  const navForward = tabId => travel(tabId, 1)
 
   const openEntry = (tabId, entry) => {
     if (entry.is_dir) nav(tabId, entry.path)
@@ -1777,12 +1727,14 @@ export default function App() {
 
   const cutSet = useMemo(() => new Set(clip?.mode === 'cut' ? clip.paths : []), [clip])
 
-  if (!cfg) return <div className="boot">Bento 启动中…</div>
+  if (!cfg) return <div className="boot">{recoveryNotice || 'Bento 启动中…'}</div>
 
   const focusedTab = activeTabOf(focusIdx)
 
   return (
     <div className="app">
+      {recoveryNotice && <div role="alert">{recoveryNotice} <button onClick={() => setRecoveryNotice(null)}>知道了</button></div>}
+      {saveError && <div role="alert">保存失败：{saveError} <button onClick={() => flushPersistence().catch(error => setSaveError(String(error)))}>重试保存</button></div>}
       <div className="titlebar" onMouseDown={titlebarMouseDown}>
         <div className="tb-title" title={windowTitle}>{windowTitle}</div>
         <div className="tb-center">
