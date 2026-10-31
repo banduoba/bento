@@ -188,3 +188,36 @@ test('a terminal event during an older queue-summary request schedules a trailin
   assert.equal(h.client.getState().accepting,false)
   h.client.dispose()
 })
+test('terminal settlement stays busy until async effects succeed, then publishes idle before a pending ACK',async t=>{
+  const gate=deferred(),started=deferred(),ackGate=deferred(),ackStarted=deferred();let emitted,settlements=0
+  const h=harness({listOperationJobs:async()=>queue([],{latestUndoId:'u1'}),ackOperationOutcomes:async()=>{ackStarted.resolve();await ackGate.promise}},{onSettled:async()=>{settlements++;started.resolve();await gate.promise}})
+  t.after(async()=>{gate.resolve();ackGate.resolve();await emitted;h.client.dispose()})
+  await h.client.start();await h.client.enqueue(request)
+  emitted=h.emit(job({revision:3,state:'completed',phase:'finished',outcomeCount:1,undoId:'u1'}))
+  await started.promise
+  assert.equal(h.client.getState().jobs[0].resultsPending,true)
+  assert.equal(h.client.getState().busy,true)
+  await assert.rejects(h.client.undo(),/任务/)
+  gate.resolve();await ackStarted.promise
+  assert.equal(h.client.getState().jobs[0].resultsPending,false)
+  assert.equal(h.client.getState().busy,false)
+  assert.equal(settlements,1)
+  ackGate.resolve();await emitted
+})
+test('failed terminal settlement remains pending through retry while ACK-only retry never replays effects',async()=>{
+  let settlements=0,outcomes=0,acks=0,failSettlement=true,failAck=true
+  const h=harness({listOperationJobs:async()=>queue([],{latestUndoId:'u1'}),ackOperationOutcomes:async()=>{acks++;if(failAck)throw Error('ACK reply lost')}},{onOutcomes:()=>{outcomes++},onSettled:async()=>{settlements++;if(failSettlement)throw Error('terminal effects unavailable')}})
+  await h.client.start()
+  await h.emit(job({revision:4,state:'completed',phase:'finished',outcomeCount:1,undoId:'u1'}))
+  assert.equal(h.client.getState().busy,true)
+  assert.equal(h.client.getState().jobs[0].resultsPending,true)
+  assert.deepEqual([outcomes,settlements,acks],[1,1,0])
+  await assert.rejects(h.client.undo(),/任务/)
+  failSettlement=false;await h.client.resync();await h.client.idle()
+  assert.equal(h.client.getState().busy,false)
+  assert.equal(h.client.getState().jobs[0].resultsPending,false)
+  assert.deepEqual([outcomes,settlements,acks],[1,2,1])
+  failAck=false;await h.client.resync();await h.client.idle()
+  assert.deepEqual([outcomes,settlements,acks],[1,2,2])
+  h.client.dispose()
+})

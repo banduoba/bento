@@ -15,7 +15,8 @@ export function createOperationClient({ api, listen, onOutcomes = () => {}, onSe
   const publish = () => {
     if (!disposed) store.update({ jobs: [...records.values()].map(r => {
       const request = requests.get(r.job.requestId)
-      return { ...r.job, sources: request?.items.map(item => item.source).filter(Boolean).slice(0, 3) || [], destination: request?.destination, details: r.details, counts: r.counts, resultsPending: r.offset < r.job.outcomeCount, detailError: r.error }
+      const resultsPending = r.offset < r.job.outcomeCount || (terminal(r.job.state) && !r.settled)
+      return { ...r.job, sources: request?.items.map(item => item.source).filter(Boolean).slice(0, 3) || [], destination: request?.destination, details: r.details, counts: r.counts, resultsPending, detailError: r.error }
     }) })
   }
   const drain = record => {
@@ -45,8 +46,10 @@ export function createOperationClient({ api, listen, onOutcomes = () => {}, onSe
       if (!disposed && terminal(record.job.state) && !record.settled && record.offset >= record.job.outcomeCount) {
         await onSettled(record.job, { counts: record.counts, details: record.details })
         record.settled = true
+        record.error = null
         const request = requests.get(record.job.requestId)
         if (request?.options?.password) requests.set(record.job.requestId, { ...request, options: { ...request.options, password: undefined } })
+        publish()
       }
       if (!disposed && record.settled && !record.acked) {
         await api.ackOperationOutcomes(record.job.jobId, record.job.revision, record.job.outcomeCount)
