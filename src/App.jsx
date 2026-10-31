@@ -10,6 +10,7 @@ import { basename, parentPath, labelOf, copyText, folderTitle } from './format'
 import { dragState } from './nativeDrag'
 import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
 import {
+  DEFAULT_SORT,
   applyToAllFolders,
   canonicalPathKey,
   clearFolderOverride,
@@ -18,6 +19,7 @@ import {
   rekeyOverride,
   resolveViewKey,
   seedViewSettings,
+  sortFromSavedTab,
   syncPaneViews,
   viewForPath,
   withFolderPatch,
@@ -89,7 +91,14 @@ async function handleTextShortcut(e, el) {
 const EMPTY_SELECTION = new Set()
 let tabSeq = 1
 const freshId = () => `t${tabSeq++}`
-const blankTab = (path) => ({ id: freshId(), path, history: [path], hi: 0, sortKey: 'name', sortDir: 'asc' })
+const blankTab = (path) => ({
+  id: freshId(),
+  path,
+  history: [path],
+  hi: 0,
+  sortKey: DEFAULT_SORT.key,
+  sortDir: DEFAULT_SORT.dir,
+})
 const blankPane = (path) => ({ tabs: [blankTab(path)], active: 0 })
 const freshWsId = () => `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
 
@@ -128,8 +137,7 @@ function sanitizePanes(raw, home) {
         path,
         history,
         hi: Math.min(Math.max(t?.hi ?? history.length - 1, 0), history.length - 1),
-        sortKey: { date: 'mtime' }[t?.sortKey] || (['name', 'size', 'kind', 'mtime', 'btime'].includes(t?.sortKey) ? t.sortKey : 'name'),
-        sortDir: t?.sortDir === 'desc' ? 'desc' : 'asc',
+        ...sortFromSavedTab(t),
       }
     })
     return {
