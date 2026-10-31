@@ -550,3 +550,72 @@ fn apply_remaining_is_scoped_to_matching_conflict_kinds() {
     q.wait_idle();
     assert_eq!(q.get(&j.job_id).unwrap().state, JobState::Completed);
 }
+struct ReversibleThenUnprotected;
+impl OperationExecutor for ReversibleThenUnprotected {
+    fn execute(&self, work: &Work, ctx: &OperationContext) -> ExecutionResult {
+        if let Work::Operation(r) = work {
+            if r.request_id == "unprotected" {
+                return Partial.execute(work, ctx);
+            }
+        }
+        Success.execute(work, ctx)
+    }
+}
+#[test]
+fn latest_effect_without_safe_inverse_blocks_older_undo() {
+    let q = OperationManager::new(Arc::new(ReversibleThenUnprotected), Arc::new(|_| {}));
+    q.enqueue(request("reversible")).unwrap();
+    q.wait_idle();
+    assert_eq!(q.list().latest_undo_id.as_deref(), Some("undo-1"));
+    q.enqueue(request("unprotected")).unwrap();
+    q.wait_idle();
+    assert!(q.list().latest_undo_id.is_none());
+    assert!(q.undo("undo-1".into(), "wrong-old-undo".into()).is_err());
+}
+struct ProgressSync {
+    updated: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+impl OperationExecutor for ProgressSync {
+    fn execute(&self, _: &Work, ctx: &OperationContext) -> ExecutionResult {
+        ctx.progress(1, Some(2), None, None);
+        ctx.progress(2, Some(2), None, None);
+        self.updated.send(()).unwrap();
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        ctx.record_outcome(ItemOutcome::new("i-1", OutcomeStatus::Succeeded));
+        ExecutionResult::default()
+    }
+}
+#[test]
+fn throttled_progress_still_advances_authoritative_snapshot_revision() {
+    let (tx, rx) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let events = Arc::new(Mutex::new(vec![]));
+    let seen = events.clone();
+    let q = OperationManager::new(
+        Arc::new(ProgressSync {
+            updated: tx,
+            release: Mutex::new(wait),
+        }),
+        Arc::new(move |e| seen.lock().unwrap().push(e)),
+    );
+    let j = q.enqueue(request("r")).unwrap();
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    let snapshot = q.get(&j.job_id).unwrap();
+    let latest_progress = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.progress.bytes_done != "0")
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(snapshot.progress.bytes_done, "2");
+    assert!(snapshot.revision > latest_progress.revision);
+    release.send(()).unwrap();
+    q.wait_idle();
+}
