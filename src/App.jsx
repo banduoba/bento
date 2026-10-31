@@ -31,7 +31,15 @@ import ZipDialog, { normalizeZipPrefs, levelOf } from './components/ZipDialog'
 import SettingsDialog from './components/SettingsDialog'
 import SearchOverlay from './components/SearchOverlay'
 import { IconEye, IconEyeOff, IconSearch, IconChevronDown, IconSettings, IconPin } from './icons'
-import { listIndexAfterKey, normalizeEnterAction, pageStride, resolveListKey } from './shortcuts'
+import {
+  listIndexAfterKey,
+  normalizeEnterAction,
+  otherPaneIndex,
+  pageStride,
+  paneIndexAfterKey,
+  resolveListKey,
+  resolvePaneKey,
+} from './shortcuts'
 
 const MIME = 'application/x-bento'
 
@@ -274,6 +282,9 @@ export default function App() {
   const rowToastTimer = useRef(null)
   const undoStackRef = useRef([]) // { label, undo: () => Promise }
   const flashTimer = useRef(null)
+  // 活动窗格，以及上一次离开的窗格。多于两个窗格时，F5/F6 送到刚离开的那个。
+  // now 在按键时同步更新，长按 Tab 不用等下一次渲染才能继续切。
+  const focusTrail = useRef({ now: 0, other: 1 })
 
   // 闪烁提示：让用户一眼看到导航发生在哪个窗格
   const triggerFlash = (idx) => {
@@ -472,6 +483,9 @@ export default function App() {
 
   const visibleCount = cfg ? paneCount(cfg.layout) : 1
   const focusIdx = cfg ? Math.min(focused, visibleCount - 1) : 0
+  if (focusTrail.current.now !== focusIdx) {
+    focusTrail.current = { now: focusIdx, other: focusTrail.current.now }
+  }
   const refresh = () => setTick((t) => t + 1)
 
   // ---------- 窗口拖动（标题栏空白处按下即拖，双击最大化） ----------
@@ -1524,6 +1538,36 @@ export default function App() {
     const firstEntry = () => paneRows.find((x) => x.path === paths[0])
 
     const listBlocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen
+    // 重命名输入框还没挂上时也不要把 Tab/F5/F6 当成窗格命令。
+    const paneAction = listBlocked || renaming ? null : resolvePaneKey(e)
+    if (paneAction === 'focusNext' || paneAction === 'focusPrev') {
+      // 单窗格：不拦截 Tab，地址栏以外的焦点移动保持原样。
+      if (visibleCount < 2) return
+      e.preventDefault()
+      const current = focusTrail.current.now
+      const next = paneIndexAfterKey(paneAction, current, visibleCount)
+      if (next < 0 || next === current) return
+      focusTrail.current = { now: next, other: current }
+      setFocused(next)
+      triggerFlash(next)
+      // 把 DOM 焦点跟到新窗格的列表上，避免高亮在这边、键盘焦点还留在那边。
+      requestAnimationFrame(() => {
+        document.querySelectorAll('.panes > .pane')[next]?.querySelector('.rows')?.focus({ preventScroll: true })
+      })
+      return
+    }
+    if (paneAction === 'copyToOther' || paneAction === 'moveToOther') {
+      e.preventDefault()
+      if (e.repeat || visibleCount < 2) return
+      const destIdx = otherPaneIndex(focusIdx, visibleCount, focusTrail.current.other)
+      const dest = destIdx >= 0 ? activeTabOf(destIdx)?.path : null
+      const moving = orderedPaths(tid)
+      if (!dest || !moving.length) return
+      triggerFlash(destIdx)
+      if (paneAction === 'moveToOther') moveInto(dest, moving)
+      else transferInto(dest, moving, 'copy')
+      return
+    }
     const listAction = listBlocked ? null : resolveListKey(e, cfg?.enterAction)
     if (listAction) {
       e.preventDefault()
