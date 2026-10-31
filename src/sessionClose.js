@@ -4,11 +4,21 @@ export function createSessionClose({ flush, close, reply, confirmDiscard }) {
   const run = () => {
     if (pending) return pending
     pending = (async () => {
-      let allow = true
-      try { await flush() } catch (error) { allow = await confirmDiscard(error) }
-      if (exitId != null) await reply(exitId, allow)
-      else if (allow) await close()
-    })().finally(() => { pending = null; exitId = null })
+      do {
+        let allow = true
+        try { await flush() } catch (error) { allow = await confirmDiscard(error) }
+        // Claim only this reply. A request received while its IPC is pending
+        // remains queued and needs a fresh flush and cancellation decision.
+        const requestId = exitId
+        exitId = null
+        if (requestId != null) await reply(requestId, allow)
+        else if (allow) await close()
+      } while (exitId != null)
+    })().finally(() => {
+      pending = null
+      // A request can also arrive after the loop returns but before cleanup.
+      if (exitId != null) return run()
+    })
     return pending
   }
   return {
