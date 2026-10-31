@@ -155,7 +155,7 @@ flowchart LR
     CMD --> MAC["AppKit bridge<br/>NSPasteboard · native drag"]
 ```
 
-- **Frontend** — React 19, Vite 7, [@tanstack/react-virtual](https://tanstack.com/virtual) for virtualised lists.
+- **Frontend** — React 19, Vite 7, [@tanstack/react-virtual](https://tanstack.com/virtual). Opening a folder streams entries in batches of about 500 over a Tauri channel, and the list mounts only the visible rows, keyed by path.
 - **Backend** — Rust on Tauri 2: parallel directory scans (rayon), APFS `clonefile`, the fsearch engine, `notify` (FSEvents) for live updates, and `objc2` for the native pasteboard and window behaviour.
 - **Drag & drop** — a native `NSDraggingSession` via [tauri-plugin-drag](https://github.com/crabnebula-dev/drag-rs) for dragging out, and Tauri's window drag-drop events for dragging in.
 

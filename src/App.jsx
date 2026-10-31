@@ -34,6 +34,9 @@ import { IconEye, IconEyeOff, IconSearch, IconChevronDown, IconSettings, IconPin
 import { listIndexAfterKey, normalizeEnterAction, pageStride, resolveListKey } from './shortcuts'
 
 const MIME = 'application/x-bento'
+// 没有选中项时各窗格共用同一只空 Set。每次渲染 new Set() 会让统计 effect 的依赖一直变，
+// 分批加载时每一批都会把更新深度打满。
+const EMPTY_SELECTION = new Set()
 
 // 调试埋点：写进 dev 日志（stderr）
 const trace = (m) => {
@@ -86,7 +89,6 @@ async function handleTextShortcut(e, el) {
   }
 }
 
-const EMPTY_SELECTION = new Set()
 let tabSeq = 1
 const freshId = () => `t${tabSeq++}`
 const blankTab = (path) => ({ id: freshId(), path, history: [path], hi: 0, sortKey: 'name', sortDir: 'asc' })
@@ -1831,7 +1833,23 @@ export default function App() {
                 const path = locateTab(tid)?.path
                 if (path) commitFolderView(path, { sort: { key, dir } })
               }}
-              onStats={(tid, st) => setStats((s) => ({ ...s, [tid]: st }))}
+              onStats={(tid, st) =>
+                setStats((s) => {
+                  const prev = s[tid]
+                  if (
+                    prev &&
+                    prev.count === st.count &&
+                    prev.total === st.total &&
+                    prev.listing === st.listing &&
+                    prev.listingLive === st.listingLive &&
+                    prev.selCount === st.selCount &&
+                    prev.selSize === st.selSize
+                  ) {
+                    return s
+                  }
+                  return { ...s, [tid]: st }
+                })
+              }
               onRowsCache={(tid, rows) => {
                 rowsCache.current[tid] = rows
               }}

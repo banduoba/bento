@@ -1,9 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Channel } from '@tauri-apps/api/core'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
-import { api } from '../api'
+import { api, hasTauri } from '../api'
 import { setWatch, clearWatch, onFsChange } from '../fsWatch'
 import { applyDirDelta, normalizeFsChanges } from '../fsApply'
+import { nextLoadRequestId, noteDelta, reduceLoadBatches, shouldRestartLoad } from '../dirLoad'
 import { fmtSize, fmtDate, basename, parentPath, labelOf, makeMatcher, copyText, kindOf, splitName } from '../format'
 import { COL_MIN, COL_MAX, DEFAULT_COLS, applyColVars, fitColumns, normalizeCols, normalizeVis } from '../columns'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
@@ -65,7 +67,14 @@ export default function Pane({
   onRenameCancel,
 }) {
   const [entries, setEntries] = useState(null)
+  const [loadProgress, setLoadProgress] = useState(null) // { total, live } | null。live 时列表随批次增长
   const [error, setError] = useState(null)
+  const loadStateRef = useRef(null)
+  const beginLoadRef = useRef(() => 0)
+  const cancelLoadRef = useRef(() => {})
+  const folderKeyRef = useRef('')
+  const entriesRef = useRef(entries)
+  entriesRef.current = entries
   const [dropTarget, setDropTarget] = useState(null) // 'bg' | 文件夹路径
   const [editingPath, setEditingPath] = useState(null) // 非空 = 地址栏编辑中
   const [pathError, setPathError] = useState(null) // 回车跳转失败时的行内错误，保留输入
@@ -321,25 +330,169 @@ export default function Pane({
     return () => window.removeEventListener('bento-moved', onMoved)
   }, [])
 
-  useEffect(() => {
-    let live = true
+  // 打开目录：第一批先画出来，其余约 500 条一批补上。刷新同一目录时先留着旧列表，扫完再换。
+  // request id 对不上、或这次加载已取消，就丢掉批次。切走时再通知后端停掉还没扫完的批。
+  const cancelLoad = (id) => {
+    const session = loadStateRef.current
+    if (session && session.id === id) {
+      session.cancelled = true
+      if (session.raf) cancelAnimationFrame(session.raf)
+      session.raf = 0
+    }
+    api.cancelListDir(id).catch(() => {})
+  }
+  const beginLoad = (path, showHidden, blank, tabId, sortKey, sortDir) => {
+    const prev = loadStateRef.current
+    if (prev && !prev.done && !prev.cancelled) {
+      prev.cancelled = true
+      if (prev.raf) cancelAnimationFrame(prev.raf)
+      prev.raf = 0
+      api.cancelListDir(prev.id).catch(() => {})
+    }
+    const id = nextLoadRequestId()
+    const paintLive = !!blank
+    const session = {
+      id,
+      tabId,
+      path,
+      showHidden,
+      sortKey: sortKey || 'name',
+      sortDir: sortDir || 'asc',
+      cancelled: false,
+      done: false,
+      settled: false,
+      sawBatch: false,
+      streamDone: false,
+      paintStarted: false,
+      raf: 0,
+      total: null,
+      built: [],
+      removes: new Set(),
+      upserts: new Map(),
+    }
+    loadStateRef.current = session
+    if (blank) {
+      entriesRef.current = null
+      setEntries(null)
+    }
+    setError(null)
+    setLoadProgress({ total: null, live: paintLive })
+    const pending = []
+    const flush = () => {
+      if (session.cancelled || loadStateRef.current !== session) return
+      const batches = pending.splice(0)
+      if (!batches.length) {
+        const next = reduceLoadBatches(session.built, [], session, showHidden)
+        if (next !== session.built) {
+          session.built = next
+          if (paintLive || session.settled) setEntries(next)
+        }
+        return
+      }
+      session.built = reduceLoadBatches(session.built, batches, session, showHidden)
+      session.sawBatch = true
+      const last = batches[batches.length - 1]
+      if (typeof last?.total === 'number') session.total = last.total
+      if (batches.some((batch) => batch?.done)) session.streamDone = true
+      // 打开目录时每批都画。刷新时先攒着，扫完再换；已经提交之后迟到的一批也要补上。
+      if (paintLive || session.settled) setEntries(session.built)
+      if (!session.settled) {
+        setLoadProgress(session.streamDone ? null : { total: session.total, live: paintLive })
+      }
+    }
+    const commit = () => {
+      if (session.settled || session.cancelled || loadStateRef.current !== session) return
+      if (session.raf) cancelAnimationFrame(session.raf)
+      session.raf = 0
+      flush()
+      if (session.sawBatch) setEntries(session.built)
+      else if (paintLive) setEntries([])
+      session.settled = true
+      session.done = true
+      setLoadProgress(null)
+    }
+    const channel = hasTauri ? new Channel() : { onmessage: null }
+    channel.onmessage = (batch) => {
+      if (session.cancelled || loadStateRef.current !== session) return
+      pending.push(batch)
+      const flushNow = !session.paintStarted || !!batch?.done
+      session.paintStarted = true
+      if (flushNow) {
+        if (session.raf) cancelAnimationFrame(session.raf)
+        session.raf = 0
+        flush()
+        if (batch?.done) commit()
+        return
+      }
+      if (!session.raf) {
+        session.raf = requestAnimationFrame(() => {
+          session.raf = 0
+          flush()
+        })
+      }
+    }
+    api
+      .listDirStream(path, showHidden, id, session.sortKey, session.sortDir, channel)
+      .then(() => {
+        if (session.cancelled || loadStateRef.current !== session) return
+        if (session.raf) cancelAnimationFrame(session.raf)
+        session.raf = 0
+        flush()
+        commit()
+      })
+      .catch((err) => {
+        if (session.cancelled || loadStateRef.current !== session) return
+        if (session.raf) cancelAnimationFrame(session.raf)
+        session.raf = 0
+        flush()
+        session.settled = true
+        session.done = true
+        setLoadProgress(null)
+        if (!session.sawBatch) {
+          setError(String(err))
+          setEntries([])
+        } else {
+          setEntries(session.built)
+        }
+      })
+    return id
+  }
+  beginLoadRef.current = beginLoad
+  cancelLoadRef.current = cancelLoad
+
+  // layout 阶段就清掉上一个目录，避免画出一帧旧列表。请求本身仍然是异步的。
+  // 排序放进依赖：视图设置会在这次导航的父级 layout 里改 sortKey。扫描还没结束就改用新排序。
+  // 目录已经列完时，点表头只在前端重排，不重新读盘。
+  const tickSeenRef = useRef(tick)
+  useLayoutEffect(() => {
+    const key = `${tab.id}\0${tab.path}\0${cfg.showHidden ? 1 : 0}`
+    const folderChanged = folderKeyRef.current !== key
+    folderKeyRef.current = key
+    const tickChanged = tickSeenRef.current !== tick
+    tickSeenRef.current = tick
+    const session = loadStateRef.current
+    const inFlight =
+      !!session &&
+      !session.done &&
+      session.tabId === tab.id &&
+      session.path === tab.path &&
+      !!session.showHidden === !!cfg.showHidden
+    if (
+      !shouldRestartLoad({
+        folderChanged,
+        tickChanged,
+        hasEntries: entriesRef.current != null,
+        inFlight,
+      })
+    ) {
+      return
+    }
+    const blank = folderChanged || entriesRef.current == null
     setError(null)
     anchorRef.current = null
-    api
-      .listDir(tab.path, cfg.showHidden)
-      .then((r) => {
-        if (!live) return
-        setEntries(r.entries)
-      })
-      .catch((e) => {
-        if (!live) return
-        setError(String(e))
-        setEntries([])
-      })
-    return () => {
-      live = false
-    }
-  }, [tab.id, tab.path, cfg.showHidden, tick])
+    const id = beginLoadRef.current(tab.path, cfg.showHidden, blank, tab.id, tab.sortKey, tab.sortDir)
+    return () => cancelLoadRef.current(id)
+  }, [tab.id, tab.path, cfg.showHidden, tick, tab.sortKey, tab.sortDir])
 
   const rows = useMemo(() => {
     const base = entries || []
@@ -378,8 +531,10 @@ export default function Pane({
     onRowsCache(tab.id, rows.filter((r) => !r.isPseudo))
   }, [rows, tab.id])
 
-  // 目录活动时间：后台递归计算（限预算），完成后按活动时间重排
+  // 目录活动时间：后台递归计算（限预算），完成后按活动时间重排。
+  // 分批加载时 entries 会连着变，等这轮扫完再算，避免每一批都打一次 IPC。
   useEffect(() => {
+    if (loadProgress) return
     if (!entries?.length) return
     const dirs = entries.filter((e) => e.is_dir).map((e) => e.path).slice(0, 200)
     if (!dirs.length) return
@@ -404,7 +559,7 @@ export default function Pane({
     return () => {
       live = false
     }
-  }, [entries, tick])
+  }, [entries, tick, loadProgress])
 
   // 搜索定位：行就绪后选中目标并滚动到可见处
   useEffect(() => {
@@ -428,10 +583,13 @@ export default function Pane({
     }
     onStats(tab.id, {
       count: entries?.length ?? 0,
+      total: loadProgress?.total ?? null,
+      listing: loadProgress != null,
+      listingLive: !!loadProgress?.live,
       selCount: selection?.size || 0,
       selSize,
     })
-  }, [entryMap, selection, entries])
+  }, [entryMap, selection, entries, loadProgress])
 
 
 
@@ -484,9 +642,14 @@ export default function Pane({
   // 设置里「自动刷新目录」关闭时不登记监听（后端随之释放全部 FSEvents 流）
   const autoRefresh = cfg.autoRefresh !== false
   const watchRef = useRef({})
-  watchRef.current = { tabId: tab.id, path: tab.path, showHidden: cfg.showHidden, autoRefresh }
-  const entriesRef = useRef(entries)
-  entriesRef.current = entries
+  watchRef.current = {
+    tabId: tab.id,
+    path: tab.path,
+    showHidden: cfg.showHidden,
+    autoRefresh,
+    sortKey: tab.sortKey,
+    sortDir: tab.sortDir,
+  }
   useEffect(() => {
     if (!autoRefresh) return
     const id = `pane-${tab.id}`
@@ -500,27 +663,28 @@ export default function Pane({
         if (!cur0.autoRefresh) return
         const changes = normalizeFsChanges(payload)
         if (!changes.length) return
-        const { tabId, path, showHidden } = cur0
+        const { tabId, path, showHidden, sortKey, sortDir } = cur0
         const mine = changes.filter((c) => c.dir === path)
-        const reloadList = () => {
-          api
-            .listDir(path, showHidden)
-            .then((r) => {
-              const cur = watchRef.current
-              if (cur.tabId !== tabId || cur.path !== path || cur.showHidden !== showHidden) return
-              setError(null)
-              setEntries((prev) => (prev && entriesSig(prev) === entriesSig(r.entries) ? prev : r.entries))
-            })
-            .catch((e) => {
-              const cur = watchRef.current
-              if (cur.tabId !== tabId || cur.path !== path || cur.showHidden !== showHidden) return
-              setError(String(e))
-              setEntries([])
-            })
-        }
-        if (mine.some((c) => c.reload) || (mine.length && !entriesRef.current)) {
-          reloadList()
+        const session = loadStateRef.current
+        const loadingThis =
+          session &&
+          !session.done &&
+          !session.cancelled &&
+          session.tabId === tabId &&
+          session.path === path &&
+          session.showHidden === showHidden
+        // 整表重读走同一条分批加载。加载过程中的增量先按路径贴上，并记进 overlay，
+        // 后面的批次合并后再套一遍，避免扫描快照把刚删掉的路径加回来。
+        if (mine.some((c) => c.reload) || (mine.length && !entriesRef.current && !loadingThis)) {
+          beginLoadRef.current(path, showHidden, !entriesRef.current, tabId, sortKey, sortDir)
         } else if (mine.length) {
+          if (loadingThis) {
+            for (const change of mine) {
+              const next = noteDelta(session, change)
+              session.removes = next.removes
+              session.upserts = next.upserts
+            }
+          }
           setEntries((prev) => {
             const cur = watchRef.current
             if (cur.tabId !== tabId || cur.path !== path || cur.showHidden !== showHidden || !prev) return prev
@@ -784,6 +948,8 @@ export default function Pane({
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 30,
     overscan: 14,
+    // 路径做键：FSEvents 增删改只动对应行，虚拟列表不会按索引把可见行整表换掉。
+    getItemKey: (index) => rows[index]?.path ?? index,
   })
 
   // 重命名输入框聚焦并选中主名（不含扩展名）。新建的文件可能排在视口外，先滚进虚拟列表再等输入框挂上。
@@ -1177,6 +1343,7 @@ export default function Pane({
         ref={scrollRef}
         tabIndex={0}
         aria-label="文件列表"
+        aria-busy={loadProgress ? 'true' : undefined}
         onFocus={() => onFocus(index)}
         onMouseDown={(e) => {
           if (e.target === scrollRef.current || e.target === innerRef.current) {
@@ -1199,10 +1366,11 @@ export default function Pane({
           <div className="rows-inner" ref={innerRef} style={{ height: virt.getTotalSize() }}>
             {virt.getVirtualItems().map((vi) => {
               const entry = rows[vi.index]
+              if (!entry) return null
               const isRenaming = renamingHere?.path === entry.path
               return (
                 <div
-                  key={entry.path}
+                  key={vi.key}
                   data-path={entry.isPseudo ? undefined : entry.path}
                   data-dir={entry.is_dir && !entry.isPseudo ? '1' : undefined}
                   className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${focused && kbdCurrent === entry.path ? ' kbd-current' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${

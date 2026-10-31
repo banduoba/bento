@@ -15,6 +15,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+mod stream;
+pub use stream::{
+    begin_list_request, cancel_list_request, finish_list_request, name_sort_desc, stream_list_dir,
+    DirBatch, LIST_BATCH,
+};
+
 /// 与 `list_dir` 同一条记录。增量更新直接带上它，前端不用再为单个文件发 IPC。
 #[derive(Clone, Debug, Serialize)]
 pub struct Entry {

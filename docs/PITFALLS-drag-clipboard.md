@@ -68,7 +68,7 @@
 - 前端各窗格把「当前目录 + 展开的子目录」登记到 `src/fsWatch.js`，取并集交给后端 `set_watched`。切走、关掉自动刷新或窗格卸载时从并集拿掉，后端对不再需要的路径 `unwatch`。只监听可见窗格。根目录 `/`（canonicalize 之后仍是 `/` 的写法也不监听）。
 - macOS 上 notify 用 FSEvents。事件先等约 100ms 收成一批（持续变化时大约每 100ms 一批，不是等完全静默），再发 `fs-changed`。
 - 能确定直接子项时按路径增量更新：`removes` 删旧路径，`upserts` 是重新 stat 的条目（新增或按路径覆盖）。前端 `src/fsApply.js` 用路径做键，不整表替换。签名没变就保持原数组，避免空刷新。
-- 整表重读（`reload: true`，前端再调 `list_dir`）是这些情况的退路，用来保证列表最终正确：
+- 整表重读（`reload: true`）是这些情况的退路，用来保证列表最终正确。窗格当前目录的重读走 `list_dir_stream`（大约 500 条一批，request id 丢掉过期结果）；展开的子目录仍一次 `list_dir`：
   - 重命名只来了一侧（移入、移出，或旧名/新名被拆到下一批）。同一批里旧路径已经不存在、新路径已经存在时，才增量删旧加新。这样 Finder 重命名不会留下旧名或重复项。
   - 事件落在被监听目录自己身上（目录被删/改名）。
   - `need_rescan`（队列丢事件）时，当前所有监听目录都整表重读。
@@ -81,6 +81,7 @@
   - 不要在持有 `watched` 锁时调用 `watch`/`unwatch`，也不要在持有这把锁时再去拿 `pending`。回调和防抖线程会分别拿这两把锁。
   - 防抖结束时目录已经不在监听集合里（用户已经切走）就丢掉这批。
   - 异步重读返回时要核对 tabId + path + showHidden 再写入。展开目录缓存已被清掉（`undefined`）时丢弃过期结果。
+  - 流式加载还没结束时，增量先按路径贴进已经显示的列表，并记一份 overlay。后面的批次按路径合并后再套 overlay，避免扫描快照把刚删掉的路径加回来。切走目录会把 request id 作废，并让后端停掉还没推完的批。
 
 ## 13. 启动卡死（死锁）：save_window_state 必须在主线程跑
 - 现象：启动后窗口整个无响应 60s+（macOS 卡死报告：主线程在 run loop observer 回调里阻塞于 `pthread_mutex` → `psynch_mutexwait`，持锁线程是 tokio worker，卡在 `dispatch_semaphore_wait`）。
