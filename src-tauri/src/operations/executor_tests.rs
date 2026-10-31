@@ -2679,3 +2679,266 @@ fn fix2_restored_source_is_untouched_and_remaining_copy_stays_guarded_after_save
         }
     }
 }
+
+#[test]
+fn rereview2_batch_inverse_preserves_pending_sibling_receipt() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/a"), b"A").unwrap();
+    fs::write(d.join("source/b"), b"B").unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let copied = e.execute(
+        &Work::Operation(request(
+            OperationKind::Copy,
+            &d.join("source"),
+            &d.join("dest"),
+        )),
+        &OperationContext::detached("copy"),
+    );
+    let mut r = request(
+        OperationKind::Rename,
+        &d.join("dest/source/a"),
+        &d.join("dest/source"),
+    );
+    r.items[0].target_name = Some("renamed-a".into());
+    r.items.push(OperationItem {
+        item_id: "b".into(),
+        source: Some(display(&d.join("dest/source/b"))),
+        target_name: Some("renamed-b".into()),
+        create_kind: None,
+    });
+    let renamed = e.execute(
+        &Work::Operation(r),
+        &OperationContext::detached("rename-both"),
+    );
+    let count = Arc::new(AtomicU64::new(0));
+    let n = count.clone();
+    e.hook = Arc::new(move |p, _, _| {
+        if p == Point::UndoMoved && n.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Err(io::Error::other(
+                "first sibling post-inverse receipt failure",
+            ));
+        }
+        Ok(())
+    });
+    let undo = renamed.undo_id.unwrap();
+    let first = e.execute(
+        &Work::Undo {
+            undo_id: undo.clone(),
+        },
+        &OperationContext::detached("undo-both"),
+    );
+    assert!(!first.undo_complete);
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    assert!(
+        e.execute(
+            &Work::Undo { undo_id: undo },
+            &OperationContext::detached("retry-both")
+        )
+        .undo_complete
+    );
+    assert_eq!(fs::read(d.join("dest/source/a")).unwrap(), b"A");
+    assert_eq!(fs::read(d.join("dest/source/b")).unwrap(), b"B");
+    let c = OperationContext::detached("undo-directory");
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: copied.undo_id.unwrap()
+            },
+            &c
+        )
+        .undo_complete,
+        "continuing sibling inverses invalidated pending ancestor delta: {:?}",
+        c.recorded_outcomes()
+    );
+}
+
+#[test]
+fn fix3_batch_stops_for_pending_receipt_and_preserves_external_edit_guards() {
+    for scan_error in [false, true] {
+        for external_edit in [false, true] {
+            let d = Scratch::new();
+            fs::create_dir(d.join("dest")).unwrap();
+            fs::create_dir(d.join("source")).unwrap();
+            fs::write(d.join("source/a"), b"A").unwrap();
+            fs::write(d.join("source/b"), b"B").unwrap();
+            fs::write(d.join("source/other"), b"original").unwrap();
+            let mut e = FileExecutor::new(d.join("app")).unwrap();
+            let copied = e.execute(
+                &Work::Operation(request(
+                    OperationKind::Copy,
+                    &d.join("source"),
+                    &d.join("dest"),
+                )),
+                &OperationContext::detached("copy"),
+            );
+            let mut rename = request(
+                OperationKind::Rename,
+                &d.join("dest/source/a"),
+                &d.join("dest/source"),
+            );
+            rename.items[0].target_name = Some("renamed-a".into());
+            rename.items.push(OperationItem {
+                item_id: "b".into(),
+                source: Some(display(&d.join("dest/source/b"))),
+                target_name: Some("renamed-b".into()),
+                create_kind: None,
+            });
+            let undo = e
+                .execute(
+                    &Work::Operation(rename),
+                    &OperationContext::detached("rename"),
+                )
+                .undo_id
+                .unwrap();
+            let moves = Arc::new(AtomicU64::new(0));
+            let count = moves.clone();
+            e.hook = Arc::new(move |p, _, c| {
+                if p == Point::UndoMoved {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    if !scan_error {
+                        c.request_cancel();
+                    }
+                }
+                if scan_error && p == Point::AncestorVerify && count.load(Ordering::Relaxed) != 0 {
+                    return Err(io::Error::other("post-inverse scan unavailable"));
+                }
+                Ok(())
+            });
+            let first = OperationContext::detached("first");
+            assert!(
+                !e.execute(
+                    &Work::Undo {
+                        undo_id: undo.clone()
+                    },
+                    &first
+                )
+                .undo_complete
+            );
+            assert_eq!(moves.load(Ordering::Relaxed), 1);
+            assert_eq!(first.recorded_outcomes().len(), 1);
+            assert_eq!(first.recorded_outcomes()[0].item_id, "b");
+            assert!(d.join("dest/source/renamed-a").exists());
+            assert!(!d.join("dest/source/a").exists());
+            assert_eq!(fs::read(d.join("dest/source/b")).unwrap(), b"B");
+            // Another unavailable receipt scan still cannot let the earlier item run.
+            e.hook = Arc::new(|p, _, _| {
+                assert_ne!(p, Point::UndoCapture);
+                assert_ne!(p, Point::UndoRename);
+                if p == Point::AncestorVerify {
+                    return Err(io::Error::other("receipt still unavailable"));
+                }
+                Ok(())
+            });
+            let blocked = OperationContext::detached("blocked-retry");
+            assert!(
+                !e.execute(
+                    &Work::Undo {
+                        undo_id: undo.clone()
+                    },
+                    &blocked
+                )
+                .undo_complete
+            );
+            assert_eq!(blocked.recorded_outcomes().len(), 1);
+            assert!(blocked.recorded_outcomes().iter().all(|o| !o.published));
+            assert!(d.join("dest/source/renamed-a").exists());
+            if external_edit {
+                fs::write(d.join("dest/source/other"), b"external").unwrap();
+            }
+            e.hook = Arc::new(|p, path, _| {
+                if p == Point::UndoCapture {
+                    assert_ne!(path.file_name().unwrap(), "renamed-b");
+                }
+                if p == Point::UndoRename {
+                    assert_ne!(path.file_name().unwrap(), "b");
+                }
+                Ok(())
+            });
+            let retry = OperationContext::detached("retry");
+            assert!(
+                e.execute(&Work::Undo { undo_id: undo }, &retry)
+                    .undo_complete
+            );
+            assert_eq!(
+                retry
+                    .recorded_outcomes()
+                    .iter()
+                    .filter(|o| o.published)
+                    .count(),
+                1
+            );
+            assert_eq!(fs::read(d.join("dest/source/a")).unwrap(), b"A");
+            assert_eq!(fs::read(d.join("dest/source/b")).unwrap(), b"B");
+            e.hook = Arc::new(|_, _, _| Ok(()));
+            assert_eq!(
+                e.execute(
+                    &Work::Undo {
+                        undo_id: copied.undo_id.unwrap()
+                    },
+                    &OperationContext::detached("undo-parent")
+                )
+                .undo_complete,
+                !external_edit
+            );
+            if external_edit {
+                assert_eq!(fs::read(d.join("dest/source/other")).unwrap(), b"external");
+            }
+        }
+    }
+}
+#[test]
+fn fix3_independent_precommit_failure_still_allows_other_inverse_items() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    fs::create_dir(d.join("source")).unwrap();
+    fs::write(d.join("source/a"), b"A").unwrap();
+    fs::write(d.join("source/b"), b"B").unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let mut request = request(OperationKind::Move, &d.join("source/a"), &d.join("dest"));
+    request.items.push(OperationItem {
+        item_id: "b".into(),
+        source: Some(display(&d.join("source/b"))),
+        target_name: None,
+        create_kind: None,
+    });
+    let undo = e
+        .execute(
+            &Work::Operation(request),
+            &OperationContext::detached("move"),
+        )
+        .undo_id
+        .unwrap();
+    fs::write(d.join("source/b"), b"occupant").unwrap();
+    let c = OperationContext::detached("partial");
+    assert!(
+        !e.execute(
+            &Work::Undo {
+                undo_id: undo.clone()
+            },
+            &c
+        )
+        .undo_complete
+    );
+    assert_eq!(c.recorded_outcomes().len(), 2);
+    assert_eq!(c.recorded_outcomes()[0].item_id, "b");
+    assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Failed);
+    assert_eq!(c.recorded_outcomes()[1].status, OutcomeStatus::Succeeded);
+    assert_eq!(fs::read(d.join("source/a")).unwrap(), b"A");
+    assert_eq!(fs::read(d.join("dest/b")).unwrap(), b"B");
+    fs::write(d.join("source/a"), b"user edit after inverse").unwrap();
+    fs::remove_file(d.join("source/b")).unwrap();
+    let retry = OperationContext::detached("retry");
+    assert!(
+        e.execute(&Work::Undo { undo_id: undo }, &retry)
+            .undo_complete
+    );
+    assert_eq!(retry.recorded_outcomes().len(), 1);
+    assert_eq!(retry.recorded_outcomes()[0].item_id, "b");
+    assert_eq!(
+        fs::read(d.join("source/a")).unwrap(),
+        b"user edit after inverse"
+    );
+    assert_eq!(fs::read(d.join("source/b")).unwrap(), b"B");
+}

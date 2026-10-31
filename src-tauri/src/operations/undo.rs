@@ -185,12 +185,19 @@ impl FileExecutor {
                         .unwrap_or(&effect.destination),
                 );
             }
+            let receipt_pending = effect.pending_inverse_receipt.is_some();
             self.undo
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get_mut(id)
                 .unwrap()[index] = effect;
             c.record_outcome(out);
+            // Earlier siblings can touch the same ancestor. Settle this applied
+            // inverse's saved delta before allowing another mutation to change it.
+            // Precommit item failures have no pending receipt and still continue.
+            if receipt_pending {
+                break;
+            }
         }
         let complete = self.undo.lock().unwrap_or_else(|e| e.into_inner())[id]
             .iter()
