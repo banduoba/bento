@@ -15,6 +15,8 @@ use tauri::{AppHandle, Emitter, Manager};
 mod native_icons;
 use native_icons::file_icons;
 
+use bento_fswatch::{make_entry, Entry, FsWatcher};
+
 /// fsearch 引擎（getattrlistbulk 全盘索引 + FSEvents 实时更新 + 模糊匹配）
 /// 懒初始化：首次全局搜索时启动，首轮建索引期间查询会 Err → 回退 mdfind
 static FSEARCH: OnceLock<Option<fsearch::Engine>> = OnceLock::new();
@@ -73,45 +75,9 @@ fn fsearch_global(query: &str, limit: usize) -> Option<Vec<SearchItem>> {
     )
 }
 
-#[derive(Serialize, Clone)]
-struct Entry {
-    name: String,
-    path: String,
-    is_dir: bool,
-    size: u64,
-    mtime_ms: f64,
-    btime_ms: f64,
-    ext: String,
-}
-
 #[derive(Serialize)]
 struct ListResult {
     entries: Vec<Entry>,
-}
-
-fn make_entry(p: &Path, name: String) -> Option<Entry> {
-    let md = fs::metadata(p).or_else(|_| fs::symlink_metadata(p)).ok()?;
-    let is_dir = md.is_dir();
-    let size = if is_dir { 0 } else { md.len() };
-    let mtime_ms = md
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0);
-    let ext = p
-        .extension()
-        .map(|e| e.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    Some(Entry {
-        name,
-        path: p.to_string_lossy().into_owned(),
-        is_dir,
-        size,
-        mtime_ms,
-        btime_ms: md.created().ok().and_then(btime_ms_of).unwrap_or(0.0),
-        ext,
-    })
 }
 
 /// 并行列出目录内容（rayon 多线程 stat，大文件夹扫描快）
@@ -2178,83 +2144,10 @@ async fn save_config(app: AppHandle, config: serde_json::Value) -> Result<(), St
     .map_err(|e| e.to_string())
 }
 
-/// 目录监听：窗格当前目录 + 展开的子目录由前端登记（set_watched），文件增删改时（FSEvents，
-/// 150ms 合并）向前端发 `fs-changed`（变化所在的目录列表），窗格即时刷新，无需手动 ⌘R。
-struct FsWatcher {
-    watcher: std::sync::Mutex<notify::RecommendedWatcher>,
-    /// 规范化路径（FSEvents 报告真实路径，如 /private/tmp）→ 前端传入的原始路径
-    watched: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<PathBuf, Vec<String>>>>,
-}
-
-impl FsWatcher {
-    fn new(app: AppHandle) -> notify::Result<Self> {
-        use std::collections::{HashMap, HashSet};
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::{Arc, Mutex};
-        let watched: Arc<Mutex<HashMap<PathBuf, Vec<String>>>> = Arc::default();
-        let pending: Arc<Mutex<HashSet<String>>> = Arc::default();
-        let scheduled = Arc::new(AtomicBool::new(false));
-        let (w2, p2, s2) = (watched.clone(), pending.clone(), scheduled.clone());
-        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            let Ok(ev) = res else { return };
-            if matches!(ev.kind, notify::EventKind::Access(_)) {
-                return;
-            }
-            let mut hit = false;
-            {
-                let map = w2.lock().unwrap();
-                for p in &ev.paths {
-                    // 只关心「被监听目录的直接子项」变化；FSEvents 在 OS 层是递归的，其余事件丢弃
-                    if let Some(orig) = p.parent().and_then(|d| map.get(d)) {
-                        p2.lock().unwrap().extend(orig.iter().cloned());
-                        hit = true;
-                    }
-                }
-            }
-            if hit && !s2.swap(true, Ordering::SeqCst) {
-                let (app, p3, s3) = (app.clone(), p2.clone(), s2.clone());
-                std::thread::spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    s3.store(false, Ordering::SeqCst);
-                    let dirs: Vec<String> = p3.lock().unwrap().drain().collect();
-                    if !dirs.is_empty() {
-                        let _ = app.emit("fs-changed", dirs);
-                    }
-                });
-            }
-        })?;
-        Ok(Self { watcher: Mutex::new(watcher), watched })
-    }
-}
-
+/// 可见窗格的当前目录（含展开的子目录）。不再可见的路径会 unwatch。
 #[tauri::command]
 fn set_watched(paths: Vec<String>, state: tauri::State<'_, FsWatcher>) -> Result<(), String> {
-    use notify::{RecursiveMode, Watcher};
-    use std::collections::HashMap;
-    let mut want: HashMap<PathBuf, Vec<String>> = HashMap::new();
-    for p in paths {
-        // 根目录监听会收到整盘事件，不监听
-        if p == "/" {
-            continue;
-        }
-        if let Ok(c) = fs::canonicalize(&p) {
-            want.entry(c).or_default().push(p);
-        }
-    }
-    // 不在持锁时调用 watch/unwatch：通知线程回调里要拿 watched 锁，避免互相等待
-    let current: Vec<PathBuf> = state.watched.lock().unwrap().keys().cloned().collect();
-    {
-        let mut w = state.watcher.lock().unwrap();
-        for old in current.iter().filter(|k| !want.contains_key(*k)) {
-            let _ = w.unwatch(old);
-        }
-        for new in want.keys().filter(|k| !current.contains(k)) {
-            if let Err(e) = w.watch(new, RecursiveMode::NonRecursive) {
-                eprintln!("[watch] {} failed: {e}", new.display());
-            }
-        }
-    }
-    *state.watched.lock().unwrap() = want;
+    state.set_paths(paths);
     Ok(())
 }
 
@@ -2309,7 +2202,13 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             enable_background_drag(app);
-            app.manage(FsWatcher::new(app.handle().clone()).expect("fs watcher"));
+            let app_handle = app.handle().clone();
+            app.manage(
+                FsWatcher::new(move |changes| {
+                    let _ = app_handle.emit("fs-changed", &changes);
+                })
+                .expect("fs watcher"),
+            );
             // 自定义菜单：不带任何会与前端冲突的标准快捷键
             // （默认菜单的 ⌘W 关窗 / ⌘R 刷新 / ⌘C 拷贝 会抢先拦截按键事件）
             // 「关于」面板全英文：内容在此显式给出，面板自带标签（Version 等）的语言由 src-tauri/Info.plist 的

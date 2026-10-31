@@ -125,10 +125,10 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 name = "bento"
 version = "0.2.1"
 dependencies = [
+ "bento-fswatch",
  "block2",
  "fsearch",
  "libc",
- "notify",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
@@ -144,6 +144,14 @@ dependencies = [
  "tauri-plugin-drag",
  "tauri-plugin-window-state",
  "trash",
+]
+
+[[package]]
+name = "bento-fswatch"
+version = "0.2.1"
+dependencies = [
+ "notify",
+ "serde",
 ]
 
 [[package]]
