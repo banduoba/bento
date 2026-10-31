@@ -78,3 +78,37 @@ test('expanded-directory identity resolution preserves a real terminal space', a
   await h.update({ directoryVersions: { '/physical space': 1 } })
   assert.deepEqual(h.childRequests.map(r => r.path), ['/d/link ', '/d/link '])
 })
+
+test('expanded alias keeps a pending physical invalidation across an unrelated version update', async t => {
+  let resolveIdentity
+  const h = await mountPane(t, undefined, { resolvePath: () => new Promise(resolve => { resolveIdentity = resolve }) })
+  await h.batch(h.requests[0], [entry('link', { is_dir: true })], true, 1)
+  await h.flushFrames()
+  await h.resolve(h.requests[0])
+  await h.expand('/d/link')
+  await h.resolveKids(h.childRequests[0], [])
+  const rootReads = h.requests.length
+  await h.update({ directoryVersions: { '/physical': 1 } })
+  await h.update({ directoryVersions: { '/physical': 1, '/unrelated': 1 } })
+  resolveIdentity('/physical')
+  await h.flushFrames()
+  assert.equal(h.requests.length, rootReads)
+  assert.deepEqual(h.childRequests.map(r => r.path), ['/d/link', '/d/link'])
+  await h.update({ directoryVersions: { '/physical': 1, '/unrelated': 2 } })
+  assert.equal(h.childRequests.length, 2)
+})
+
+test('failed alias identity lookup does not consume a pending physical invalidation', async t => {
+  let lookups = 0
+  const h = await mountPane(t, undefined, { resolvePath: () => ++lookups === 1 ? Promise.reject(new Error('temporarily unavailable')) : Promise.resolve('/physical') })
+  await h.update({ directoryVersions: {} })
+  await h.batch(h.requests[0], [entry('link', { is_dir: true })], true, 1)
+  await h.flushFrames()
+  await h.resolve(h.requests[0])
+  await h.expand('/d/link')
+  await h.resolveKids(h.childRequests[0], [])
+  await h.update({ directoryVersions: { '/physical': 1 } })
+  assert.equal(h.childRequests.length, 1)
+  await h.update({ directoryVersions: { '/physical': 1, '/unrelated': 1 } })
+  assert.deepEqual(h.childRequests.map(r => r.path), ['/d/link', '/d/link'])
+})

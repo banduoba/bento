@@ -660,21 +660,30 @@ export default function Pane({
   }, [manualTick])
   const seenDirectoryVersions = useRef(directoryVersions)
   const childDirectoryIdentities = useRef(new Map())
-  useEffect(() => { childDirectoryIdentities.current.clear() }, [tab.id, tab.path])
+  // Keep the last handled snapshot per child; a cancelled identity lookup has handled nothing.
+  const childHandledVersions = useRef(new Map())
+  useEffect(() => {
+    childDirectoryIdentities.current.clear()
+    childHandledVersions.current.clear()
+  }, [tab.id, tab.path])
   useEffect(() => {
     const before = seenDirectoryVersions.current
     const cached = Object.keys(kidsRef.current)
     const paths = changedDirectories(before, directoryVersions, cached, directoryKeyFor)
     seenDirectoryVersions.current = directoryVersions
-    if (paths.length) reloadKidsRef.current(new Set(paths))
+    if (paths.length) {
+      reloadKidsRef.current(new Set(paths))
+      for (const path of paths) childHandledVersions.current.set(path, directoryVersions)
+    }
     // An expanded symlink can point outside its pane-root alias. Resolve identity only (no listing),
     // and cache it so later writes through a physical path reach that expanded directory too.
     let live = true
     const pending = cached.filter(path => !paths.includes(path)).map(path => {
+      if (!childHandledVersions.current.has(path)) childHandledVersions.current.set(path, before)
       if (!childDirectoryIdentities.current.has(path)) {
         const request = api.resolvePath(path.endsWith('/') ? path : path + '/').catch(() => {
           if (childDirectoryIdentities.current.get(path) === request) childDirectoryIdentities.current.delete(path)
-          return path
+          return null
         })
         childDirectoryIdentities.current.set(path, request)
       }
@@ -682,9 +691,12 @@ export default function Pane({
     })
     Promise.all(pending).then(resolved => {
       if (!live || seenDirectoryVersions.current !== directoryVersions) return
-      const aliased = resolved.filter(([path, key]) => Object.hasOwn(kidsRef.current, path)
-        && (before[key] || 0) !== (directoryVersions[key] || 0)).map(([path]) => path)
+      const aliased = resolved.filter(([path, key]) => key != null && Object.hasOwn(kidsRef.current, path)
+        && (childHandledVersions.current.get(path)?.[key] || 0) !== (directoryVersions[key] || 0)).map(([path]) => path)
       if (aliased.length) reloadKidsRef.current(new Set(aliased))
+      for (const [path, key] of resolved) {
+        if (key != null) childHandledVersions.current.set(path, directoryVersions)
+      }
     })
     return () => { live = false }
   }, [directoryVersions, tab.id, tab.path])
