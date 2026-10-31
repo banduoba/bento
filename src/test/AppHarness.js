@@ -14,6 +14,7 @@ const bundle = await build({ entryPoints: [fileURLToPath(new URL('../App.jsx', i
     ? `export const hasTauri=true; export const fileSrc=x=>x; export const api=new Proxy({}, {get:(_,k)=>(...a)=>globalThis.${bridgeKey}.api[k](...a)})`
     : path==='Pane'||path==='Sidebar'
       ? `import React from 'react'; export default function ${path}(props){return React.createElement('${path.toLowerCase()}-boundary',props)}`
+      : path.endsWith('/app') ? `export const getVersion=async()=>"0.2.1"`
       : path.endsWith('/window') ? `export const getCurrentWindow=()=>globalThis.${bridgeKey}.win`
       : path.endsWith('/event') ? `export const listen=(...a)=>globalThis.${bridgeKey}.listen(...a)`
       : path.endsWith('/core') ? `export const invoke=(...a)=>globalThis.${bridgeKey}.invoke(...a); export const convertFileSrc=x=>x; export class Channel{}`
