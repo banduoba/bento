@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { act } from 'react-test-renderer'
 import { mountPane, entry } from '../test/PaneHarness.js'
 import { rootRefreshKey } from '../paneFeedback.js'
 
@@ -111,4 +112,31 @@ test('failed alias identity lookup does not consume a pending physical invalidat
   assert.equal(h.childRequests.length, 1)
   await h.update({ directoryVersions: { '/physical': 1, '/unrelated': 1 } })
   assert.deepEqual(h.childRequests.map(r => r.path), ['/d/link', '/d/link'])
+})
+
+test('an unrelated cut-move event preserves rows and performs no directory-activity scan', async t => {
+  let activityReads = 0
+  const h = await mountPane(t, undefined, { dirActivity: async () => { activityReads++; return [] } })
+  await h.batch(h.requests[0], [entry('unrelated-folder', { is_dir: true })], true, 1)
+  await h.flushFrames()
+  await h.resolve(h.requests[0])
+  const rows = h.rows
+  const rootReads = h.requests.length
+  const initialActivityReads = activityReads
+  assert.equal(initialActivityReads, 1)
+  await act(async () => window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths: ['/elsewhere/moved-file'] } })))
+  assert.equal(h.requests.length, rootReads)
+  assert.equal(activityReads, initialActivityReads)
+  assert.equal(h.rows, rows)
+})
+
+test('a cut-move event immediately removes its source from an affected pane without a root reread', async t => {
+  const h = await mountPane(t)
+  await h.batch(h.requests[0], [entry('moved-file'), entry('retained-file')], true, 2)
+  await h.flushFrames()
+  await h.resolve(h.requests[0])
+  const rootReads = h.requests.length
+  await act(async () => window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths: ['/d/moved-file'] } })))
+  assert.deepEqual(h.rows.map(row => row.path), ['/d/retained-file'])
+  assert.equal(h.requests.length, rootReads)
 })
