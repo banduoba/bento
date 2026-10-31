@@ -1,0 +1,10 @@
+[package]
+name = "bento-fswatch"
+version = "0.2.1"
+edition = "2021"
+description = "Visible-folder FSEvents batching for Bento"
+publish = false
+
+[dependencies]
+notify = "8"
+serde = { version = "1", features = ["derive"] }

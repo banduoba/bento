@@ -24,7 +24,7 @@ regex = "1"
 tauri-plugin-window-state = "2"
 tauri-plugin-drag = "2"
 tauri-plugin-dialog = "2"
-notify = "8"
+bento-fswatch = { path = "fswatch" }
 
 [profile.release]
 lto = true

@@ -65,14 +65,22 @@
 - 过滤 over 噪声：`grep -v "dde over" trace.log | tail -30`。
 
 ## 12. 目录自动刷新（FSEvents）
-- 之前窗格只在导航/⌘R/自己的操作后刷新，外部新增、修改文件不会显示。
-- 现在：前端各窗格把「当前目录 + 展开的子目录」登记到 `src/fsWatch.js`，取并集交给后端 `set_watched`（notify/FSEvents）；后端只保留「被监听目录的直接子项」事件，150ms 合并后发 `fs-changed`，窗格静默重读，列表签名（路径/大小/mtime）没变就不重渲染。
+- 前端各窗格把「当前目录 + 展开的子目录」登记到 `src/fsWatch.js`，取并集交给后端 `set_watched`。切走、关掉自动刷新或窗格卸载时从并集拿掉，后端对不再需要的路径 `unwatch`。只监听可见窗格。根目录 `/`（canonicalize 之后仍是 `/` 的写法也不监听）。
+- macOS 上 notify 用 FSEvents。事件先等约 100ms 收成一批（持续变化时大约每 100ms 一批，不是等完全静默），再发 `fs-changed`。
+- 能确定直接子项时按路径增量更新：`removes` 删旧路径，`upserts` 是重新 stat 的条目（新增或按路径覆盖）。前端 `src/fsApply.js` 用路径做键，不整表替换。签名没变就保持原数组，避免空刷新。
+- 整表重读（`reload: true`，前端再调 `list_dir`）是这些情况的退路，用来保证列表最终正确：
+  - 重命名只来了一侧（移入、移出，或旧名/新名被拆到下一批）。同一批里旧路径已经不存在、新路径已经存在时，才增量删旧加新。这样 Finder 重命名不会留下旧名或重复项。
+  - 事件落在被监听目录自己身上（目录被删/改名）。
+  - `need_rescan`（队列丢事件）时，当前所有监听目录都整表重读。
+  - 单批超过 512 个路径。
+  - 符号链接的重命名：`canonicalize` 会穿过链接，对不上原来的文件名。
 - 坑：
-  - FSEvents 在 OS 层是递归的，监听大目录（如主目录）会收到整棵树的事件，所以后端必须按「父目录 ∈ 监听集合」过滤；根目录 `/` 不监听。
-  - FSEvents 报告真实路径（`/tmp` → `/private/tmp`），监听集合要用 `canonicalize` 后的路径，并回传前端传入的原始路径。
-  - 不要在持有 `watched` 锁时调用 `watch/unwatch`：通知线程回调里也要拿这把锁。
-  - 异步重读返回时标签页/目录可能已变，要核对 tabId+path 再写入；展开目录缓存已被清掉（`undefined`）时丢弃过期结果。
-  - 旧的「tick 时重读展开目录」逻辑在 Promise 回调里改 `changed` 却在回调外判断，永远不触发重渲染，已改成 `Promise.all`。
+  - FSEvents 在 OS 层是递归的。notify 的 NonRecursive 会滤掉更深的路径；后端仍只认「父目录 ∈ 监听集合」的直接子项。孙路径靠展开子目录自己的监听。
+  - FSEvents 报告真实路径（`/tmp` → `/private/tmp`）。监听集合用 canonicalize 后的路径做键，推给前端的 `dir` 和条目路径用登记时的原始前缀。前缀不对会和列表里的路径对不上，出现重复项。
+  - 大小写不敏感卷上，旧名 `a.txt` 仍可能 canonicalize 到 `A.txt`。文件名对不上就当成旧名已消失。
+  - 不要在持有 `watched` 锁时调用 `watch`/`unwatch`，也不要在持有这把锁时再去拿 `pending`。回调和防抖线程会分别拿这两把锁。
+  - 防抖结束时目录已经不在监听集合里（用户已经切走）就丢掉这批。
+  - 异步重读返回时要核对 tabId + path + showHidden 再写入。展开目录缓存已被清掉（`undefined`）时丢弃过期结果。
 
 ## 13. 启动卡死（死锁）：save_window_state 必须在主线程跑
 - 现象：启动后窗口整个无响应 60s+（macOS 卡死报告：主线程在 run loop observer 回调里阻塞于 `pthread_mutex` → `psynch_mutexwait`，持锁线程是 tokio worker，卡在 `dispatch_semaphore_wait`）。
