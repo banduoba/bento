@@ -288,6 +288,28 @@ export default function Pane({
 
   const tab = pane.tabs[pane.active] || pane.tabs[0]
 
+  // 移动成功后先从当前列表拿掉源路径，不必等目录重读返回。
+  useEffect(() => {
+    const onMoved = (event) => {
+      const gone = new Set(event.detail?.paths || [])
+      if (!gone.size) return
+      setEntries((prev) => (prev ? prev.filter((entry) => !gone.has(entry.path)) : prev))
+      let changed = false
+      for (const dir of Object.keys(kidsRef.current)) {
+        const kids = kidsRef.current[dir]
+        if (!Array.isArray(kids)) continue
+        const next = kids.filter((entry) => !gone.has(entry.path))
+        if (next.length !== kids.length) {
+          kidsRef.current[dir] = next
+          changed = true
+        }
+      }
+      if (changed) setKidsVersion((v) => v + 1)
+    }
+    window.addEventListener('bento-moved', onMoved)
+    return () => window.removeEventListener('bento-moved', onMoved)
+  }, [])
+
   useEffect(() => {
     let live = true
     setError(null)
