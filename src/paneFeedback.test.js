@@ -19,6 +19,16 @@ test('directory invalidation updates same-directory panes and affected expanded 
   assert.equal(feedback.invalidateDirectories(after, []), after)
 })
 
+test('manual refresh epochs are isolated by tab while shared directory versions remain shared', () => {
+  const versions = { '/same': 7 }
+  assert.equal(feedback.rootRefreshKey(3, versions, '/same'), '3:7')
+  assert.equal(feedback.rootRefreshKey(3, versions, '/same', 1), '3.1:7')
+  const ticks = feedback.bumpManualRefreshTick({}, 'right')
+  assert.deepEqual(ticks, { right: 1 })
+  assert.equal(feedback.bumpManualRefreshTick(ticks, 'right').right, 2)
+  assert.equal(feedback.bumpManualRefreshTick(ticks, 'left').left, 1)
+})
+
 test('toast positioning stays inside owning pane even at narrow widths and offscreen anchors', () => {
   const pane = { left: 1000, right: 1200, top: 80, bottom: 400, width: 200, height: 320 }
   for (const anchor of [null, { left: 1010, right: 1195, top: 150, height: 30 }, { left: 10, right: 40, top: 900, height: 30 }]) {
