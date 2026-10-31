@@ -391,6 +391,24 @@ fn cleanup_staging(path: &Path) {
     }
 }
 
+// Keep publication state structured across the io::Error boundary. A later deletion failure
+// must refresh changed directories and must never retry under a new destination name.
+#[derive(Debug)]
+struct PublishedDestination {
+    dest: PathBuf,
+    error: io::Error,
+}
+impl std::fmt::Display for PublishedDestination {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "已复制到「{}」，但无法删除源（请检查源是否残留）: {}", self.dest.display(), self.error)
+    }
+}
+impl std::error::Error for PublishedDestination {}
+
+fn published_destination(error: &io::Error) -> Option<&Path> {
+    error.get_ref()?.downcast_ref::<PublishedDestination>().map(|state| state.dest.as_path())
+}
+
 /// 跨卷移动：先把内容复制到目标卷的临时名，改名成功后才删除源。
 /// 复制或改名失败时删掉临时文件，源保持原样。
 fn copy_then_remove(src: &Path, dst: &Path) -> io::Result<()> {
@@ -426,10 +444,7 @@ fn copy_then_remove_with(
     if let Err(err) = remove_src(src) {
         return Err(io::Error::new(
             err.kind(),
-            format!(
-                "已复制到「{}」，但无法删除源（请检查源是否残留）: {err}",
-                dst.display()
-            ),
+            PublishedDestination { dest: dst.to_path_buf(), error: err },
         ));
     }
     Ok(())
@@ -460,12 +475,37 @@ fn do_transfer(sp: &Path, dp: &Path, mode: &str) -> io::Result<()> {
     }
 }
 
+fn failed_transfer(source: &str, error: io::Error) -> TransferItem {
+    let published = published_destination(&error);
+    let affected_directories = if let Some(dest) = published {
+        [Path::new(source).parent(), dest.parent()].into_iter().flatten()
+            .map(|path| path.to_string_lossy().into_owned()).collect()
+    } else { Vec::new() };
+    TransferItem {
+        source: source.to_string(),
+        dest: published.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default(),
+        ok: false,
+        error: Some(error.to_string()),
+        affected_directories,
+    }
+}
+
 fn transfer_one_item(source: &str, dest_dir: &Path, mode: &str) -> TransferItem {
+    transfer_one_item_with(source, dest_dir, mode, do_transfer)
+}
+
+fn transfer_one_item_with(
+    source: &str,
+    dest_dir: &Path,
+    mode: &str,
+    mut perform: impl FnMut(&Path, &Path, &str) -> io::Result<()>,
+) -> TransferItem {
     let fail = |error: String| TransferItem {
         source: source.to_string(),
         dest: String::new(),
         ok: false,
         error: Some(error),
+        affected_directories: Vec::new(),
     };
     let sp = PathBuf::from(source);
     if fs::symlink_metadata(&sp).is_err() {
@@ -478,6 +518,7 @@ fn transfer_one_item(source: &str, dest_dir: &Path, mode: &str) -> TransferItem 
             dest: source.to_string(),
             ok: true,
             error: None,
+            affected_directories: Vec::new(),
         };
     }
     let name = sp
@@ -489,17 +530,19 @@ fn transfer_one_item(source: &str, dest_dir: &Path, mode: &str) -> TransferItem 
         if dp.starts_with(&sp) {
             return fail("不能将文件夹移动到其自身内部".into());
         }
-        match do_transfer(&sp, &dp, mode) {
+        match perform(&sp, &dp, mode) {
             Ok(()) => {
                 return TransferItem {
                     source: source.to_string(),
                     dest: dp.to_string_lossy().into_owned(),
                     ok: true,
                     error: None,
+                    affected_directories: Vec::new(),
                 }
             }
+            Err(err) if published_destination(&err).is_some() => return failed_transfer(source, err),
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return fail(err.to_string()),
+            Err(err) => return failed_transfer(source, err),
         }
     }
     fail("目标重名冲突过多，请重试".into())
@@ -533,6 +576,8 @@ struct TransferItem {
     dest: String,
     ok: bool,
     error: Option<String>,
+    #[serde(rename = "affectedDirectories", skip_serializing_if = "Vec::is_empty")]
+    affected_directories: Vec<String>,
 }
 
 /// 复制/移动多个文件到目标目录，逐项上报进度事件 transfer-progress
@@ -601,6 +646,7 @@ fn restore_into(moves: &[RestoreMove]) -> Vec<TransferItem> {
                 dest: m.dest.clone(),
                 ok: result.is_ok(),
                 error: result.err().map(|e| e.to_string()),
+                affected_directories: Vec::new(),
             }
         })
         .collect()
@@ -2257,8 +2303,43 @@ mod move_items_tests {
         })
         .unwrap_err();
         assert!(err.to_string().contains("无法删除源"), "{err}");
+        let outcome = failed_transfer(src.to_str().unwrap(), err);
+        assert!(!outcome.ok);
+        let serialized = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(serialized["dest"], dst.to_str().unwrap());
+        assert_eq!(serialized["affectedDirectories"], serde_json::json!([
+            src.parent().unwrap().to_str().unwrap(), dst.parent().unwrap().to_str().unwrap()
+        ]));
         assert_eq!(fs::read(&src).unwrap(), b"hello");
         assert_eq!(fs::read(&dst).unwrap(), b"hello");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn published_failure_is_structured_and_never_retried_as_a_name_collision() {
+        let root = scratch("published-outcome");
+        let src = root.join("src/note.txt");
+        let dest_dir = root.join("dst");
+        let mut attempts = 0;
+        let outcome = transfer_one_item_with(src.to_str().unwrap(), &dest_dir, "move", |s, d, _| {
+            attempts += 1;
+            copy_then_remove_with(s, d, copy_for_move, |_| {
+                Err(io::Error::new(io::ErrorKind::AlreadyExists, "injected removal failure"))
+            })
+        });
+        assert_eq!(attempts, 1, "a published copy must never be repeated under another name");
+        assert!(!outcome.ok);
+        assert_eq!(outcome.dest, dest_dir.join("note.txt").to_str().unwrap());
+        let serialized = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(serialized["affectedDirectories"], serde_json::json!([
+            src.parent().unwrap().to_str().unwrap(), dest_dir.to_str().unwrap()
+        ]));
+        assert_eq!(fs::read(&src).unwrap(), b"hello");
+        assert_eq!(fs::read(&outcome.dest).unwrap(), b"hello");
+        assert_eq!(fs::read_dir(&dest_dir).unwrap().count(), 1);
+        let untouched = transfer_one_item(root.join("missing").to_str().unwrap(), &dest_dir, "move");
+        assert!(!untouched.ok);
+        assert!(serde_json::to_value(untouched).unwrap().get("affectedDirectories").is_none());
         let _ = fs::remove_dir_all(&root);
     }
 

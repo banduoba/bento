@@ -125,3 +125,12 @@ test('Trash undo restores the full original name and invalidates both original a
   assert.deepEqual(new Set(app.invalidated), new Set(['/', '/Trash']))
   assert.equal(app.stack.current.length, 0)
 })
+
+test('cut move refreshes published partial failures without registering undo or success', async () => {
+  const app = harness({ moveItems: async () => [{ source: '/src/a', dest: '/dst/a', ok: false, error: 'source removal failed', affectedDirectories: ['/src', '/dst'] }] })
+  await app.moveInto('/dst', ['/src/a'])
+  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
+  assert.equal(app.stack.current.length, 0)
+  assert.equal(app.toasts.length, 0)
+  assert.equal(app.alerts.length, 1)
+})
