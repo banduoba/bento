@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
 import { api } from '../api'
 import { setWatch, clearWatch, onFsChange } from '../fsWatch'
+import { applyDirDelta, normalizeFsChanges } from '../fsApply'
 import { fmtSize, fmtDate, basename, parentPath, labelOf, makeMatcher, copyText, kindOf, splitName } from '../format'
 import { COL_MIN, COL_MAX, DEFAULT_COLS, applyColVars, fitColumns, normalizeCols, normalizeVis } from '../columns'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
@@ -443,9 +444,13 @@ export default function Pane({
   // 重新拉取已展开目录的内容（手动刷新 tick / 文件系统变化）；内容没变就不触发重渲染
   const entriesSig = (list) => list.map((e) => `${e.path}|${e.size}|${e.mtime_ms}|${e.is_dir}`).join('\n')
   const reloadKids = (only) => {
-    const paths = Object.keys(kidsRef.current).filter(
-      (p) => kidsRef.current[p] !== null && (!only || only.has(p))
-    )
+    const paths = Object.keys(kidsRef.current).filter((p) => {
+      if (only && !only.has(p)) return false
+      const kids = kidsRef.current[p]
+      // 手动刷新时跳过还在载入的目录；文件系统事件点名时要再读一次，避免快照早于变更
+      if (kids === null && !only) return false
+      return kids !== undefined
+    })
     if (!paths.length) return
     Promise.all(
       paths.map((p) =>
@@ -460,8 +465,8 @@ export default function Pane({
         if (!x) continue
         const [p, list] = x
         const old = kidsRef.current[p]
-        // old 为 undefined = 期间已折叠/切换标签页，丢弃过期结果
-        if (old && entriesSig(old) !== entriesSig(list)) {
+        // undefined = 期间已折叠/切换标签页，丢弃过期结果。null = 还在载入，用这次结果补上。
+        if (old !== undefined && (!Array.isArray(old) || entriesSig(old) !== entriesSig(list))) {
           kidsRef.current[p] = list
           changed = true
         }
@@ -480,6 +485,8 @@ export default function Pane({
   const autoRefresh = cfg.autoRefresh !== false
   const watchRef = useRef({})
   watchRef.current = { tabId: tab.id, path: tab.path, showHidden: cfg.showHidden, autoRefresh }
+  const entriesRef = useRef(entries)
+  entriesRef.current = entries
   useEffect(() => {
     if (!autoRefresh) return
     const id = `pane-${tab.id}`
@@ -488,21 +495,55 @@ export default function Pane({
   }, [tab.id, tab.path, expandedDirs, autoRefresh])
   useEffect(
     () =>
-      onFsChange((dirs) => {
-        const { tabId, path, showHidden, autoRefresh: on } = watchRef.current
-        if (!on) return
-        const changed = new Set(dirs)
-        if (changed.has(path)) {
+      onFsChange((payload) => {
+        const cur0 = watchRef.current
+        if (!cur0.autoRefresh) return
+        const changes = normalizeFsChanges(payload)
+        if (!changes.length) return
+        const { tabId, path, showHidden } = cur0
+        const mine = changes.filter((c) => c.dir === path)
+        const reloadList = () => {
           api
             .listDir(path, showHidden)
             .then((r) => {
               const cur = watchRef.current
-              if (cur.tabId !== tabId || cur.path !== path) return
+              if (cur.tabId !== tabId || cur.path !== path || cur.showHidden !== showHidden) return
+              setError(null)
               setEntries((prev) => (prev && entriesSig(prev) === entriesSig(r.entries) ? prev : r.entries))
             })
-            .catch(() => {})
+            .catch((e) => {
+              const cur = watchRef.current
+              if (cur.tabId !== tabId || cur.path !== path || cur.showHidden !== showHidden) return
+              setError(String(e))
+              setEntries([])
+            })
         }
-        reloadKidsRef.current(changed)
+        if (mine.some((c) => c.reload) || (mine.length && !entriesRef.current)) {
+          reloadList()
+        } else if (mine.length) {
+          setEntries((prev) => {
+            const cur = watchRef.current
+            if (cur.tabId !== tabId || cur.path !== path || cur.showHidden !== showHidden || !prev) return prev
+            return mine.reduce((list, change) => applyDirDelta(list, change, showHidden), prev)
+          })
+        }
+        const reloadKidsDirs = new Set()
+        let kidsChanged = false
+        for (const change of changes) {
+          if (!Object.hasOwn(kidsRef.current, change.dir)) continue
+          const kids = kidsRef.current[change.dir]
+          if (!Array.isArray(kids) || change.reload) {
+            reloadKidsDirs.add(change.dir)
+            continue
+          }
+          const next = applyDirDelta(kids, change, showHidden)
+          if (next !== kids) {
+            kidsRef.current[change.dir] = next
+            kidsChanged = true
+          }
+        }
+        if (kidsChanged) setKidsVersion((v) => v + 1)
+        if (reloadKidsDirs.size) reloadKidsRef.current(reloadKidsDirs)
       }),
     []
   )

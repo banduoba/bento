@@ -2,8 +2,10 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { hasTauri } from './api'
 
-// 各窗格登记自己要监听的目录（当前目录 + 展开的子目录），这里取并集同步给后端 FSEvents 监听；
-// 后端合并 150ms 后发 `fs-changed`（变化所在目录列表），订阅者按需刷新。
+// 各窗格登记自己要监听的目录（当前目录 + 展开的子目录），这里取并集同步给后端。
+// 切走或卸载时从并集拿掉，后端 unwatch 不再可见的路径。
+// 后端把约 100ms 内的 FSEvents 收成一批，发 `fs-changed`：
+// 能对上路径时是 { dir, reload:false, removes, upserts }，否则 { reload:true } 由窗格整表重读。
 const owners = new Map() // ownerId -> string[]
 const subs = new Set()
 let pushTimer = null
