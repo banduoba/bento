@@ -1,5 +1,9 @@
 use rayon::prelude::*;
 use serde::Serialize;
+
+#[cfg(target_os = "macos")]
+mod quick_look;
+
 use std::ffi::CString;
 use std::fs;
 use std::io;
@@ -537,14 +541,23 @@ async fn open_terminal(path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// macOS 快速查看窗口
+/// macOS 快速查看：系统 QLPreviewPanel（与 Finder 空格预览同一面板）。
+/// `path` 是当前焦点文件；`paths` 可选，多选时按列表顺序预览（空格再次按下则关闭）。
 #[tauri::command]
-async fn quick_look(path: String) -> Result<(), String> {
-    std::process::Command::new("qlmanage")
-        .args(["-p", &path])
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+async fn quick_look(
+    app: AppHandle,
+    path: String,
+    paths: Option<Vec<String>>,
+) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return quick_look::present(app, path, paths).await;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, path, paths);
+        Err("Quick Look 仅支持 macOS".into())
+    }
 }
 
 /// 新建空白文本文档，返回实际路径
