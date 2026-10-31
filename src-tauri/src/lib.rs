@@ -858,6 +858,54 @@ async fn home_dir() -> Result<String, String> {
     std::env::var("HOME").map_err(|_| "无法获取主目录".into())
 }
 
+/// 把 `~` / `~/...` 展开成主目录。其他 `~user` 形式与相对路径直接拒绝，
+/// 避免 canonicalize 落到进程工作目录。
+fn expand_user_path(raw: &str) -> Result<PathBuf, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err("请输入路径".into());
+    }
+    if s == "~" || s.starts_with("~/") {
+        let home = std::env::var("HOME").map_err(|_| "无法获取主目录".to_string())?;
+        let home = home.trim_end_matches('/');
+        if s == "~" {
+            return Ok(PathBuf::from(home));
+        }
+        return Ok(PathBuf::from(format!("{home}{}", &s[1..])));
+    }
+    if s.starts_with('~') {
+        return Err("仅支持 ~ 与 ~/ 开头的路径".into());
+    }
+    if !s.starts_with('/') {
+        return Err("请输入绝对路径或以 ~ 开头的路径".into());
+    }
+    Ok(PathBuf::from(s))
+}
+
+/// 展开 `~` 并 canonicalize。目标必须存在且是文件夹，否则返回可读错误。
+fn resolve_existing_dir(raw: &str) -> Result<String, String> {
+    let path = expand_user_path(raw)?;
+    let shown = path.display().to_string();
+    match fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err(format!("不是文件夹: {shown}")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(format!("路径不存在: {shown}"));
+        }
+        Err(e) => return Err(format!("无法打开路径 {shown}: {e}")),
+    }
+    let canon = fs::canonicalize(&path).map_err(|e| format!("无法解析路径 {shown}: {e}"))?;
+    Ok(canon.to_string_lossy().into_owned())
+}
+
+/// 地址栏回车：展开 `~`、确认目录存在并返回规范路径。
+#[tauri::command]
+async fn resolve_path(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || resolve_existing_dir(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// 前端错误黑匣子：webview 的 JS 错误写入 dev 日志
 #[tauri::command]
 async fn log_debug(msg: String) {
@@ -1736,6 +1784,7 @@ pub fn run() {
             open_privacy_settings,
             disk_space,
             home_dir,
+            resolve_path,
             log_debug,
             append_trace_log,
             append_error_log,
@@ -1747,4 +1796,60 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod resolve_path_tests {
+    use super::{expand_user_path, resolve_existing_dir};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch() -> PathBuf {
+        let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let p = std::env::temp_dir().join(format!("bento-resolve-{n}"));
+        fs::create_dir_all(p.join("sub")).unwrap();
+        fs::write(p.join("file.txt"), b"hi").unwrap();
+        p
+    }
+
+    #[test]
+    fn tilde_and_absolute_rules() {
+        let home = std::env::var("HOME").unwrap();
+        let home = home.trim_end_matches('/');
+        assert_eq!(expand_user_path("~").unwrap(), PathBuf::from(home));
+        assert_eq!(
+            expand_user_path("~/Documents").unwrap(),
+            PathBuf::from(format!("{home}/Documents"))
+        );
+        assert_eq!(expand_user_path("~/").unwrap(), PathBuf::from(format!("{home}/")));
+        assert!(expand_user_path("~bob").unwrap_err().contains("仅支持"));
+        assert!(expand_user_path("Documents").unwrap_err().contains("绝对路径"));
+        assert!(expand_user_path("   ").unwrap_err().contains("请输入路径"));
+    }
+
+    #[test]
+    fn resolves_directory_and_rejects_missing_or_file() {
+        let dir = scratch();
+        let sub = dir.join("sub");
+        let resolved = resolve_existing_dir(sub.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, fs::canonicalize(&sub).unwrap().to_string_lossy());
+
+        let nested = sub.join("..");
+        let resolved_parent = resolve_existing_dir(nested.to_str().unwrap()).unwrap();
+        assert_eq!(
+            resolved_parent,
+            fs::canonicalize(&dir).unwrap().to_string_lossy()
+        );
+
+        let missing = dir.join("nope");
+        let err = resolve_existing_dir(missing.to_str().unwrap()).unwrap_err();
+        assert!(err.starts_with("路径不存在:"), "{}", err);
+
+        let file = dir.join("file.txt");
+        let err = resolve_existing_dir(file.to_str().unwrap()).unwrap_err();
+        assert!(err.starts_with("不是文件夹:"), "{}", err);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

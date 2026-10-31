@@ -67,6 +67,10 @@ export default function Pane({
   const [error, setError] = useState(null)
   const [dropTarget, setDropTarget] = useState(null) // 'bg' | 文件夹路径
   const [editingPath, setEditingPath] = useState(null) // 非空 = 地址栏编辑中
+  const [pathError, setPathError] = useState(null) // 回车跳转失败时的行内错误，保留输入
+  const [pathFocusNonce, setPathFocusNonce] = useState(0) // ⌘L / 铅笔：进入编辑后聚焦并全选
+  const editSeq = useRef(0) // 作废过期的 resolve（继续输入、Esc、再次 ⌘L）
+  const pathEditClosed = useRef(false)
   const [collapsedCount, setCollapsedCount] = useState(0) // 面包屑溢出时折叠的前置层级数
   const [copiedPath, setCopiedPath] = useState(null) // 行内复制路径反馈
   const [copyToast, setCopyToast] = useState(null) // { path, x, y, placeLeft } 锚定按钮的提示条
@@ -496,18 +500,22 @@ export default function Pane({
   }
 
   // 地址栏进入编辑模式（点击路径空白/末尾区、铅笔、⌘L 或 ⌘⇧G 信号）
-  const beginPathEdit = () => setEditingPath(tab.path)
+  const beginPathEdit = () => {
+    editSeq.current += 1
+    pathEditClosed.current = false
+    setPathError(null)
+    setEditingPath(tab.path)
+    setPathFocusNonce((n) => n + 1)
+  }
 
-  // 输入框提交后聚焦并全选（rAF 会与 React 提交赛跑，导致第一次 ⌘L 不生效）
+  // 进入编辑后再聚焦并全选。不要依赖 editingPath：每次按键都会改它，全选会把后续输入冲掉。
   useEffect(() => {
-    if (editingPath != null) {
-      const el = pathInputRef.current
-      if (el) {
-        el.focus()
-        el.select()
-      }
-    }
-  }, [editingPath])
+    if (editingPath == null || !pathFocusNonce) return
+    const el = pathInputRef.current
+    if (!el) return
+    el.focus()
+    el.select()
+  }, [pathFocusNonce])
 
   useEffect(() => {
     if (editPathSignal) beginPathEdit()
@@ -515,13 +523,52 @@ export default function Pane({
 
   // 导航后退出编辑模式
   useEffect(() => {
+    editSeq.current += 1
+    pathEditClosed.current = true
+    setPathError(null)
     setEditingPath(null)
   }, [tab.id, tab.path])
 
-  const commitPathEdit = () => {
-    const v = (editingPath || '').trim()
+  const cancelPathEdit = () => {
+    editSeq.current += 1
+    pathEditClosed.current = true
+    setPathError(null)
     setEditingPath(null)
-    if (v && v !== tab.path && v.startsWith('/')) onNav(tab.id, v)
+  }
+
+  const pathErrorText = (e) => {
+    if (typeof e === 'string' && e.trim()) return e
+    if (e && typeof e.message === 'string' && e.message.trim()) return e.message
+    return '路径不存在'
+  }
+
+  // Enter / 失焦提交。失败时留在编辑态，不清空已输入的文本。
+  const commitPathEdit = async () => {
+    if (pathEditClosed.current || editingPath == null) return
+    const v = (pathInputRef.current?.value ?? editingPath).trim()
+    if (!v) {
+      setPathError('请输入路径')
+      return
+    }
+    // 没改路径就直接回到面包屑，不必再问后端
+    if (v === tab.path) {
+      pathEditClosed.current = true
+      setPathError(null)
+      setEditingPath(null)
+      return
+    }
+    const seq = ++editSeq.current
+    try {
+      const resolved = await api.resolvePath(v)
+      if (seq !== editSeq.current || pathEditClosed.current) return
+      pathEditClosed.current = true
+      setPathError(null)
+      setEditingPath(null)
+      if (resolved !== tab.path) onNav(tab.id, resolved)
+    } catch (err) {
+      if (seq !== editSeq.current || pathEditClosed.current) return
+      setPathError(pathErrorText(err))
+    }
   }
 
   // 重命名输入框聚焦并选中主名（不含扩展名）
@@ -711,31 +758,54 @@ export default function Pane({
           </button>
         </div>
         {editingPath != null ? (
-          <input
-            ref={pathInputRef}
-            className="path-input"
-            value={editingPath}
-            title="输入路径后回车跳转，Esc 取消"
-            onChange={(e) => setEditingPath(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault()
-                e.stopPropagation()
-                commitPathEdit()
-                return
-              }
-              if (e.key === 'Escape') {
-                e.stopPropagation()
-                setEditingPath(null)
-                return
-              }
-              // 普通按键不外泄；⌘ 组合键（⌘C/⌘V/⌘A…）放行给全局文本快捷键
-              if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
-            }}
-            onFocus={(e) => e.currentTarget.select()}
-            onBlur={commitPathEdit}
-            spellCheck={false}
-          />
+          <div className={`path-edit${pathError ? ' invalid' : ''}`}>
+            <input
+              ref={pathInputRef}
+              className="path-input"
+              value={editingPath}
+              title={pathError || '输入路径后回车跳转，Esc 取消'}
+              aria-invalid={pathError ? true : undefined}
+              aria-errormessage={pathError ? `path-edit-error-${tab.id}` : undefined}
+              onChange={(e) => {
+                // 继续输入时作废尚未返回的解析，避免旧结果把窗格带走
+                editSeq.current += 1
+                setEditingPath(e.target.value)
+                if (pathError) setPathError(null)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  if (e.nativeEvent.isComposing || e.keyCode === 229) return
+                  e.preventDefault()
+                  e.stopPropagation()
+                  commitPathEdit()
+                  return
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  cancelPathEdit()
+                  return
+                }
+                // 普通按键不外泄；⌘ 组合键（⌘C/⌘V/⌘A…）放行给全局文本快捷键
+                if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
+              }}
+              onFocus={(e) => e.currentTarget.select()}
+              onBlur={commitPathEdit}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+            />
+            {pathError && (
+              <div
+                className="path-error"
+                id={`path-edit-error-${tab.id}`}
+                role="alert"
+                onMouseDown={(e) => e.preventDefault()}
+              >
+                {pathError}
+              </div>
+            )}
+          </div>
         ) : (
           <div
             className="crumbs"

@@ -26,6 +26,7 @@ export const api = hasTauri
       dirActivity: (paths) => invoke('dir_activity', { paths }),
       diskSpace: (path) => invoke('disk_space', { path }),
       homeDir: () => invoke('home_dir'),
+      resolvePath: (path) => invoke('resolve_path', { path }),
       fileIcons: (paths) => invoke('file_icons', { paths }),
       loadConfig: () => invoke('load_config'),
       saveConfig: (config) => invoke('save_config', { config }),
@@ -63,6 +64,33 @@ function mockApi() {
     ],
     '/Users/demo/项目B': [E('示例脚本.py', false, 2e3)],
     '/Users/demo/项目A_测试/示例子文件夹一': [E('示例文件.txt', false, 100)],
+  }
+  // 与 Rust resolve_path 同一套规则：展开 ~、拒绝相对路径、目录才算成功。
+  const mockResolvePath = (path) => {
+    const home = '/Users/demo'
+    const raw = (path || '').trim()
+    if (!raw) return Promise.reject('请输入路径')
+    let expanded
+    if (raw === '~') expanded = home
+    else if (raw.startsWith('~/')) expanded = home + raw.slice(1)
+    else if (raw.startsWith('~')) return Promise.reject('仅支持 ~ 与 ~/ 开头的路径')
+    else if (!raw.startsWith('/')) return Promise.reject('请输入绝对路径或以 ~ 开头的路径')
+    else expanded = raw
+    const parts = []
+    for (const seg of expanded.split('/')) {
+      if (!seg || seg === '.') continue
+      if (seg === '..') parts.pop()
+      else parts.push(seg)
+    }
+    const canonical = `/${parts.join('/')}`
+    if (TREE[canonical]) return Promise.resolve(canonical)
+    const slash = canonical.lastIndexOf('/')
+    const parent = slash <= 0 ? '/' : canonical.slice(0, slash)
+    const name = canonical.slice(slash + 1)
+    const hit = TREE[parent]?.find((e) => e.name === name)
+    if (hit?.is_dir) return Promise.resolve(canonical)
+    if (hit) return Promise.reject(`不是文件夹: ${canonical}`)
+    return Promise.reject(`路径不存在: ${canonical}`)
   }
   const fillPath = (dir, entries) => entries.map((e) => ({ ...e, path: `${dir}/${e.name}` }))
   return {
@@ -180,6 +208,7 @@ function mockApi() {
     // mock 与真实保持同签名
     diskSpace: () => Promise.resolve(500e9),
     homeDir: () => Promise.resolve('/Users/demo'),
+    resolvePath: (path) => mockResolvePath(path),
     fileIcons: (paths) =>
       Promise.resolve((paths || []).map((path) => ({ path, icon: null, template: false }))),
     // 浏览器测试视图也用 localStorage 记住工作区/布局，行为与真实 app 一致
