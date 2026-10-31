@@ -3029,6 +3029,11 @@ pub fn run() {
             }
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                session_exit::on_window_close(window.app_handle(), api);
+            }
+        })
         .on_menu_event(|app, event| {
             if event.id().0 == "close-win" {
                 if let Some(w) = app.get_webview_window("main") {
@@ -3037,25 +3042,26 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            operations::enqueue_operation,
+            operations::list_operation_jobs,
+            operations::get_operation_job,
+            operations::get_operation_outcomes,
+            operations::cancel_operation,
+            operations::ack_operation_outcomes,
+            operations::resolve_operation_conflict,
+            operations::undo_operation,
+            operations::list_operation_recoveries,
+            operations::recover_operation,
+            operations::prepare_operation_exit,
             list_dir,
             list_stream::list_dir_stream,
             list_stream::cancel_list_dir,
-            transfer,
-            move_items,
-            restore_moves,
-            trash,
-            make_dir,
-            rename,
             open_path,
             reveal_in_finder,
             open_terminal,
-            zip_paths,
             quick_look,
             update_quick_look,
-            make_file,
-            create_file,
             list_templates,
-            copy_template,
             search,
             search_content,
             read_text_preview,

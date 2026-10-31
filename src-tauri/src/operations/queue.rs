@@ -22,6 +22,7 @@ struct Job {
     answer: Option<ConflictDecision>,
     remaining: Option<(String, String, ConflictDecision)>,
     last_progress: Instant,
+    acknowledged: bool,
 }
 struct State {
     session_id: String,
@@ -32,7 +33,7 @@ struct State {
     requests: HashMap<String, String>,
     fifo: VecDeque<String>,
     running: Option<String>,
-    undo: Vec<String>,
+    undo: Vec<Option<String>>,
     accepting: bool,
     shutdown: bool,
 }
@@ -155,7 +156,7 @@ fn summary(state: &State) -> QueueSnapshot {
             .collect(),
         busy: busy(state),
         accepting: state.accepting,
-        latest_undo_id: state.undo.last().cloned(),
+        latest_undo_id: state.undo.last().cloned().flatten(),
     }
 }
 impl OperationManager {
@@ -278,7 +279,7 @@ impl OperationManager {
                 return Err("operation queue must be idle".into());
             }
             if let Work::Undo { undo_id } = &work {
-                if state.undo.last() != Some(undo_id) {
+                if state.undo.last().and_then(|id| id.as_ref()) != Some(undo_id) {
                     return Err("only latest available undo may be applied".into());
                 }
             }
@@ -286,9 +287,9 @@ impl OperationManager {
                 let oldest = state
                     .order
                     .iter()
-                    .find(|id| state.jobs[*id].snapshot.state.is_terminal())
+                    .find(|id| state.jobs[*id].snapshot.state.is_terminal() && state.jobs[*id].acknowledged)
                     .cloned()
-                    .ok_or("too many active operations; wait for queued tasks")?;
+                    .ok_or("operation history is awaiting outcome acknowledgement; retry after results sync")?;
                 state.jobs.remove(&oldest);
                 state.order.retain(|id| id != &oldest);
                 state.fifo.retain(|id| id != &oldest);
@@ -356,6 +357,7 @@ impl OperationManager {
                     answer: None,
                     remaining: None,
                     last_progress: Instant::now() - Duration::from_secs(1),
+                    acknowledged: false,
                 },
             );
             state.order.push(id.clone());
@@ -370,6 +372,25 @@ impl OperationManager {
     }
     pub fn list(&self) -> QueueSnapshot {
         summary(&self.shared.state.lock().unwrap())
+    }
+    pub fn resume_admission(&self) {
+        let mut state = self.shared.state.lock().unwrap();
+        if !state.shutdown && !state.accepting {
+            state.accepting = true;
+            state.revision += 1;
+        }
+    }
+    /// Atomic exit admission barrier: no job can start after an idle approval.
+    pub fn seal_if_idle(&self) -> bool {
+        let mut state = self.shared.state.lock().unwrap();
+        if busy(&state) {
+            return false;
+        }
+        if state.accepting {
+            state.accepting = false;
+            state.revision += 1;
+        }
+        true
     }
     pub fn is_busy(&self) -> bool {
         busy(&self.shared.state.lock().unwrap())
@@ -404,6 +425,18 @@ impl OperationManager {
             offset,
             total: job.outcomes.len(),
         })
+    }
+    pub fn acknowledge(&self, id: &str, revision: u64, outcome_count: usize) -> Result<(), String> {
+        let mut state = self.shared.state.lock().unwrap();
+        let job = state.jobs.get_mut(id).ok_or("unknown job ID")?;
+        if !job.snapshot.state.is_terminal()
+            || job.snapshot.revision != revision
+            || job.outcomes.len() != outcome_count
+        {
+            return Err("only fully retrieved terminal outcomes may be acknowledged".into());
+        }
+        job.acknowledged = true;
+        Ok(())
     }
     pub fn cancel(&self, id: &str) -> Result<JobSnapshot, String> {
         let snapshot = {
@@ -679,12 +712,16 @@ impl OperationContext {
             return ConflictDecision::Cancel;
         }
         let Some(shared) = &self.shared else {
-            return self
+            let decision = self
                 .detached_decisions
                 .lock()
                 .unwrap()
                 .pop_front()
                 .unwrap_or(ConflictDecision::Skip);
+            if decision == ConflictDecision::Cancel {
+                self.cancel.store(true, Ordering::Release);
+            }
+            return decision;
         };
         let event = {
             let mut state = shared.state.lock().unwrap();
@@ -831,14 +868,17 @@ fn worker(shared: Arc<Shared>, executor: Arc<dyn OperationExecutor>) {
             job.snapshot.undo_id = result.undo_id.clone().filter(|id| valid_id(id));
             let undo_id = job.snapshot.undo_id.clone();
             if let Work::Undo { undo_id } = &work {
-                if result.undo_complete && state.undo.last() == Some(undo_id) {
+                if result.undo_complete
+                    && !failures
+                    && state.undo.last().and_then(|id| id.as_ref()) == Some(undo_id)
+                {
                     state.undo.pop();
                 }
             } else if effects {
-                if let Some(undo_id) = undo_id {
-                    if state.undo.last() != Some(&undo_id) {
-                        state.undo.push(undo_id);
-                    }
+                // An effect without a safe inverse is a barrier, not permission
+                // to silently undo an older unrelated operation.
+                if state.undo.last() != Some(&undo_id) {
+                    state.undo.push(undo_id);
                 }
             }
             state.running = None;

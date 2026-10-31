@@ -3,6 +3,7 @@
 pub(crate) enum ExitDecision {
     Allow,
     Request(u64),
+    Drain(u64),
     Prevent,
 }
 
@@ -13,13 +14,25 @@ pub(crate) struct ExitGate {
     approved_once: bool,
 }
 impl ExitGate {
+    #[cfg(test)]
     pub(crate) fn request(&mut self, has_windows: bool, explicit: bool) -> ExitDecision {
+        self.request_with_operations(has_windows, explicit, false)
+    }
+    pub(crate) fn request_with_operations(
+        &mut self,
+        has_windows: bool,
+        explicit: bool,
+        busy: bool,
+    ) -> ExitDecision {
         let approved = std::mem::take(&mut self.approved_once);
-        if !has_windows || approved {
+        if (!has_windows || approved) && !busy {
             self.pending = None;
             return ExitDecision::Allow;
         }
-        if self.pending.is_some() {
+        if let Some(request_id) = self.pending {
+            if explicit && busy {
+                return ExitDecision::Drain(request_id);
+            }
             if explicit {
                 // A second deliberate quit is the escape hatch for an unresponsive
                 // frontend. Never silently discard unsaved state on a timer.
@@ -33,6 +46,10 @@ impl ExitGate {
         ExitDecision::Request(self.next_request)
     }
 
+    fn is_pending(&self, request_id: u64) -> bool {
+        self.pending == Some(request_id)
+    }
+
     /// Returns whether the caller should invoke app.exit after releasing the lock.
     pub(crate) fn reply(&mut self, request_id: u64, allow_exit: bool) -> bool {
         if self.pending != Some(request_id) {
@@ -44,11 +61,14 @@ impl ExitGate {
     }
 }
 
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Default)]
-pub(crate) struct ExitState(Mutex<ExitGate>);
+pub(crate) struct ExitState(Mutex<ExitGate>, AtomicU64);
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +78,8 @@ struct ExitRequest {
 
 pub(crate) fn on_exit_requested(app: &AppHandle, code: Option<i32>, api: tauri::ExitRequestApi) {
     let has_windows = !app.webview_windows().is_empty();
+    let operations = app.try_state::<crate::operations::OperationState>();
+    let busy = operations.as_ref().is_some_and(|queue| queue.is_busy());
     let decision = {
         let state = app.state::<ExitState>();
         let Ok(mut gate) = state.0.lock() else {
@@ -65,12 +87,27 @@ pub(crate) fn on_exit_requested(app: &AppHandle, code: Option<i32>, api: tauri::
             eprintln!("[session-exit] quit gate lock poisoned");
             return;
         };
-        gate.request(has_windows, code.is_some())
+        gate.request_with_operations(has_windows, code.is_some(), busy)
     };
     #[cfg(debug_assertions)]
-    eprintln!("[session-exit] runtime request code={code:?} windows={has_windows} decision={decision:?}");
+    eprintln!(
+        "[session-exit] runtime request code={code:?} windows={has_windows} decision={decision:?}"
+    );
     match decision {
-        ExitDecision::Allow => {}
+        ExitDecision::Allow => {
+            // Admission and idle check are atomic, closing the enqueue/quit race.
+            if operations
+                .as_ref()
+                .is_some_and(|queue| !queue.seal_if_idle())
+            {
+                api.prevent_exit();
+                app.exit(0);
+            }
+        }
+        ExitDecision::Drain(request_id) => {
+            api.prevent_exit();
+            drain_after_repeated_quit(app, request_id);
+        }
         ExitDecision::Prevent => api.prevent_exit(),
         ExitDecision::Request(request_id) => {
             api.prevent_exit();
@@ -83,6 +120,60 @@ pub(crate) fn on_exit_requested(app: &AppHandle, code: Option<i32>, api: tauri::
     }
 }
 
+/// A busy window must remain available to answer conflicts and the quit prompt.
+/// The frontend's existing CloseRequested handler owns the choice and final flush.
+pub(crate) fn on_window_close(app: &AppHandle, api: &tauri::CloseRequestApi) {
+    if app
+        .try_state::<crate::operations::OperationState>()
+        .is_some_and(|queue| queue.is_busy())
+    {
+        api.prevent_close();
+    }
+}
+
+fn drain_after_repeated_quit(app: &AppHandle, request_id: u64) {
+    let state = app.state::<ExitState>();
+    if state.1.swap(request_id, Ordering::AcqRel) == request_id {
+        return;
+    }
+    let Some(queue) = app.try_state::<crate::operations::OperationState>() else {
+        let _ = state
+            .1
+            .compare_exchange(request_id, 0, Ordering::AcqRel, Ordering::Acquire);
+        return;
+    };
+    let queue = queue.inner().clone();
+    queue.prepare_exit(true);
+    {
+        let gate = state.0.lock().unwrap();
+        if !gate.is_pending(request_id) {
+            if gate.pending.is_none() {
+                queue.resume_admission();
+            }
+            let _ = state
+                .1
+                .compare_exchange(request_id, 0, Ordering::AcqRel, Ordering::Acquire);
+            return;
+        }
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let drained = tauri::async_runtime::spawn_blocking(move || queue.wait_idle()).await;
+        let state = app.state::<ExitState>();
+        let _ = state
+            .1
+            .compare_exchange(request_id, 0, Ordering::AcqRel, Ordering::Acquire);
+        let still_pending = state
+            .0
+            .lock()
+            .map(|gate| gate.is_pending(request_id))
+            .unwrap_or(false);
+        if drained.is_ok() && still_pending {
+            let _ = app.emit("bento-operation-exit-drained", ExitRequest { request_id });
+        }
+    });
+}
+
 #[tauri::command]
 pub(crate) fn session_exit_reply(
     app: AppHandle,
@@ -90,8 +181,26 @@ pub(crate) fn session_exit_reply(
     request_id: u64,
     allow_exit: bool,
 ) -> Result<(), String> {
+    let operations = app.try_state::<crate::operations::OperationState>();
     let exit = {
         let mut gate = state.0.lock().map_err(|e| e.to_string())?;
+        // This lock order is gate -> queue, and neither operation emits or does IO.
+        // Native request processing releases the queue lock before taking gate.
+        if !gate.is_pending(request_id) {
+            return Ok(());
+        }
+        if allow_exit {
+            if operations
+                .as_ref()
+                .is_some_and(|queue| !queue.seal_if_idle())
+            {
+                return Err(
+                    "file operations are still finishing; drain before session exit".into(),
+                );
+            }
+        } else if let Some(queue) = operations.as_ref() {
+            queue.resume_admission();
+        }
         gate.reply(request_id, allow_exit)
     };
     if exit {
@@ -220,5 +329,44 @@ mod tests {
         assert_eq!(gate.request(true, true), ExitDecision::Request(1));
         assert_eq!(gate.request(false, false), ExitDecision::Allow);
         assert!(!gate.reply(1, true));
+    }
+    #[test]
+    fn busy_repeat_quit_drains_same_request_without_escape() {
+        let mut gate = ExitGate::default();
+        assert_eq!(
+            gate.request_with_operations(true, true, true),
+            ExitDecision::Request(1)
+        );
+        assert_eq!(
+            gate.request_with_operations(true, false, true),
+            ExitDecision::Prevent
+        );
+        assert_eq!(
+            gate.request_with_operations(true, true, true),
+            ExitDecision::Drain(1)
+        );
+        assert_eq!(
+            gate.request_with_operations(true, true, true),
+            ExitDecision::Drain(1)
+        );
+        assert!(gate.is_pending(1));
+        assert!(!gate.reply(99, true));
+        assert!(gate.reply(1, true));
+        assert_eq!(
+            gate.request_with_operations(true, true, false),
+            ExitDecision::Allow
+        );
+    }
+    #[test]
+    fn windowless_busy_queue_still_requires_drain() {
+        let mut gate = ExitGate::default();
+        assert_eq!(
+            gate.request_with_operations(false, false, true),
+            ExitDecision::Request(1)
+        );
+        assert_eq!(
+            gate.request_with_operations(false, true, true),
+            ExitDecision::Drain(1)
+        );
     }
 }

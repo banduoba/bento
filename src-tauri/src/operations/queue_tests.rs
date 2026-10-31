@@ -391,9 +391,15 @@ fn terminal_history_eviction_preserves_request_tombstones_and_undo() {
     let q = OperationManager::new(Arc::new(Success), Arc::new(|_| {}));
     let first = q.enqueue(request("r-0")).unwrap();
     q.wait_idle();
+    let terminal = q.get(&first.job_id).unwrap();
+    q.acknowledge(&terminal.job_id, terminal.revision, terminal.outcome_count)
+        .unwrap();
     for i in 1..270 {
-        q.enqueue(request(&format!("r-{i}"))).unwrap();
+        let job = q.enqueue(request(&format!("r-{i}"))).unwrap();
         q.wait_idle();
+        let terminal = q.get(&job.job_id).unwrap();
+        q.acknowledge(&terminal.job_id, terminal.revision, terminal.outcome_count)
+            .unwrap();
     }
     assert_eq!(q.list().jobs.len(), 256);
     assert!(q.get(&first.job_id).is_err());
@@ -402,4 +408,145 @@ fn terminal_history_eviction_preserves_request_tombstones_and_undo() {
         .unwrap_err()
         .contains("history evicted"));
     assert_eq!(q.list().latest_undo_id.as_deref(), Some("undo-1"));
+}
+#[test]
+fn missed_events_cannot_evict_unacknowledged_outcomes() {
+    let q = OperationManager::new(Arc::new(Success), Arc::new(|_| {}));
+    let first = q.enqueue(request("first")).unwrap();
+    q.wait_idle();
+    for i in 1..256 {
+        q.enqueue(request(&format!("r-{i}"))).unwrap();
+        q.wait_idle();
+    }
+    assert!(q
+        .enqueue(request("new"))
+        .unwrap_err()
+        .contains("acknowledgement"));
+    let terminal = q.get(&first.job_id).unwrap();
+    assert!(q
+        .acknowledge(&first.job_id, terminal.revision - 1, terminal.outcome_count)
+        .is_err());
+    assert!(q.acknowledge(&first.job_id, terminal.revision, 0).is_err());
+    assert_eq!(q.outcomes(&first.job_id, 0, 200).unwrap().outcomes.len(), 1);
+    q.acknowledge(&first.job_id, terminal.revision, terminal.outcome_count)
+        .unwrap();
+    q.enqueue(request("new")).unwrap();
+    q.wait_idle();
+    assert!(q
+        .enqueue(request("first"))
+        .unwrap_err()
+        .contains("history evicted"));
+}
+#[test]
+fn seal_if_idle_rejects_busy_and_prevents_enqueue_after_approval() {
+    let (executor, entered, release) = blocking();
+    let q = OperationManager::new(executor, Arc::new(|_| {}));
+    q.enqueue(request("r")).unwrap();
+    entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(!q.seal_if_idle());
+    release.send(()).unwrap();
+    q.wait_idle();
+    assert!(q.seal_if_idle());
+    assert!(q.enqueue(request("late")).is_err());
+}
+struct Finishing {
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+impl OperationExecutor for Finishing {
+    fn execute(&self, _: &Work, ctx: &OperationContext) -> ExecutionResult {
+        ctx.set_phase(Phase::Publishing, Cancelability::Finishing);
+        self.entered.send(()).unwrap();
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(3))
+            .unwrap();
+        // Publication/source cleanup is indivisible. A late cancel cannot undo it.
+        let mut outcome = ItemOutcome::new("i-1", OutcomeStatus::Succeeded);
+        outcome.published = true;
+        ctx.record_outcome(outcome);
+        ExecutionResult::default()
+    }
+}
+#[test]
+fn finishing_cancel_waits_for_real_publication_and_preserves_success() {
+    let (tx, rx) = mpsc::channel();
+    let (release, wait) = mpsc::channel();
+    let q = OperationManager::new(
+        Arc::new(Finishing {
+            entered: tx,
+            release: Mutex::new(wait),
+        }),
+        Arc::new(|_| {}),
+    );
+    let j = q.enqueue(request("r")).unwrap();
+    rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(
+        q.cancel(&j.job_id).unwrap().cancelability,
+        Cancelability::Finishing
+    );
+    assert!(q.is_busy());
+    release.send(()).unwrap();
+    q.wait_idle();
+    let terminal = q.get(&j.job_id).unwrap();
+    assert_eq!(terminal.state, JobState::Completed);
+    assert!(terminal.cancel_requested);
+}
+#[test]
+fn undo_admission_is_rejected_while_another_writer_runs() {
+    let (executor, entered, release) = blocking();
+    let q = OperationManager::new(executor, Arc::new(|_| {}));
+    q.enqueue(request("r")).unwrap();
+    entered.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(q
+        .undo("undo-1".into(), "u".into())
+        .unwrap_err()
+        .contains("idle"));
+    release.send(()).unwrap();
+    q.wait_idle();
+}
+struct TwoConflicts;
+impl OperationExecutor for TwoConflicts {
+    fn execute(&self, _: &Work, ctx: &OperationContext) -> ExecutionResult {
+        assert_eq!(
+            ctx.wait_for_conflict(conflict()),
+            ConflictDecision::KeepBoth
+        );
+        assert_eq!(
+            ctx.wait_for_conflict(conflict()),
+            ConflictDecision::KeepBoth
+        );
+        let mut different = conflict();
+        different.destination_kind = "directory".into();
+        assert_eq!(ctx.wait_for_conflict(different), ConflictDecision::Skip);
+        ctx.record_outcome(ItemOutcome::new("i-1", OutcomeStatus::Skipped));
+        ExecutionResult::default()
+    }
+}
+#[test]
+fn apply_remaining_is_scoped_to_matching_conflict_kinds() {
+    let q = OperationManager::new(Arc::new(TwoConflicts), Arc::new(|_| {}));
+    let j = q.enqueue(request("r")).unwrap();
+    let c = wait_conflict(&q, &j.job_id);
+    q.resolve(
+        &j.job_id,
+        &c.conflict_id,
+        c.revision,
+        ConflictDecision::KeepBoth,
+        true,
+    )
+    .unwrap();
+    let d = wait_conflict(&q, &j.job_id);
+    assert_eq!(d.destination_kind, "directory");
+    q.resolve(
+        &j.job_id,
+        &d.conflict_id,
+        d.revision,
+        ConflictDecision::Skip,
+        false,
+    )
+    .unwrap();
+    q.wait_idle();
+    assert_eq!(q.get(&j.job_id).unwrap().state, JobState::Completed);
 }
