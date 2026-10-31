@@ -171,6 +171,10 @@ Bento is young software (`0.2.1`). Know before you use it:
 - Local files only — there is no SFTP / SMB / cloud connection support.
 - Archive passwords use traditional ZipCrypto (readable by macOS and `unzip`, but a weak cipher), and they are passed to `zip` on the command line while compressing. The *Keep* option stores the password in plain text in the config file.
 
+## Performance baseline
+
+Fixture generators and a headless bench live in [`scripts/bench/README.md`](./scripts/bench/README.md) (简体中文). One command builds a 10k-file folder, another builds 100k, and a third times a directory scan plus deleting three small files without opening the GUI. Cold-open first paint and new-tab timing are manual steps recorded into the same JSON report. The scripts do not change how the app lists, watches, or draws files.
+
 ## Contributing
 
 Issues and pull requests are welcome. Please run `npm run build` and, for Rust changes, `cargo test` in `src-tauri/` before submitting. For UI changes, a screenshot or short clip helps a lot.

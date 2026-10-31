@@ -3,3 +3,10 @@ dist
 src-tauri/target
 src-tauri/gen
 .DS_Store
+
+# 本地性能夹具和报告（体积大，在各自机器上重新生成）
+scripts/bench/fixtures/*
+!scripts/bench/fixtures/.gitkeep
+scripts/bench/reports/*
+!scripts/bench/reports/.gitkeep
+scripts/bench/scan-rs/target/
