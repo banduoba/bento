@@ -5,7 +5,7 @@ import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativ
 import { api, hasTauri } from '../api'
 import { setWatch, clearWatch, onFsChange } from '../fsWatch'
 import { applyDirDelta, normalizeFsChanges } from '../fsApply'
-import { nextLoadRequestId, noteDelta, reduceLoadBatches, shouldRestartLoad } from '../dirLoad'
+import { applyOverlay, nextLoadRequestId, noteDelta, reduceLoadBatches, shouldRestartLoad } from '../dirLoad'
 import { fmtSize, fmtDate, basename, parentPath, labelOf, makeMatcher, copyText, kindOf, splitName } from '../format'
 import { COL_MIN, COL_MAX, DEFAULT_COLS, applyColVars, fitColumns, normalizeCols, normalizeVis } from '../columns'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
@@ -93,6 +93,7 @@ export default function Pane({
   const [kidsVersion, setKidsVersion] = useState(0)
   const [activity, setActivity] = useState({}) // dirPath -> 递归活动时间(ms)，后台懒加载
   const kidsRef = useRef({}) // dirPath -> 子条目数组（null=载入中）
+  const kidsLoadsRef = useRef({}) // 每个展开目录只接收最新请求，并重放等待期间的增量
   const copyTimer = useRef(null)
   const toastTimer = useRef(null)
   completionsRef.current = completions
@@ -333,6 +334,7 @@ export default function Pane({
   // 打开目录：第一批先画出来，其余约 500 条一批补上。刷新同一目录时先留着旧列表，扫完再换。
   // request id 对不上、或这次加载已取消，就丢掉批次。切走时再通知后端停掉还没扫完的批。
   const cancelLoad = (id) => {
+    if (id == null) return
     const session = loadStateRef.current
     if (session && session.id === id) {
       session.cancelled = true
@@ -343,7 +345,7 @@ export default function Pane({
   }
   const beginLoad = (path, showHidden, blank, tabId, sortKey, sortDir) => {
     const prev = loadStateRef.current
-    if (prev && !prev.done && !prev.cancelled) {
+    if (prev && !prev.settled && !prev.cancelled) {
       prev.cancelled = true
       if (prev.raf) cancelAnimationFrame(prev.raf)
       prev.raf = 0
@@ -361,6 +363,7 @@ export default function Pane({
       cancelled: false,
       done: false,
       settled: false,
+      commandFinished: false,
       sawBatch: false,
       streamDone: false,
       paintStarted: false,
@@ -394,14 +397,14 @@ export default function Pane({
       const last = batches[batches.length - 1]
       if (typeof last?.total === 'number') session.total = last.total
       if (batches.some((batch) => batch?.done)) session.streamDone = true
-      // 打开目录时每批都画。刷新时先攒着，扫完再换；已经提交之后迟到的一批也要补上。
-      if (paintLive || session.settled) setEntries(session.built)
+      // 打开目录时每批都画。刷新时先攒着，最终批次提交时再换。
+      if (paintLive) setEntries(session.built)
       if (!session.settled) {
-        setLoadProgress(session.streamDone ? null : { total: session.total, live: paintLive })
+        setLoadProgress(session.streamDone ? null : { total: session.total, live: paintLive, waiting: session.commandFinished })
       }
     }
     const commit = () => {
-      if (session.settled || session.cancelled || loadStateRef.current !== session) return
+      if (!session.streamDone || session.settled || session.cancelled || loadStateRef.current !== session) return
       if (session.raf) cancelAnimationFrame(session.raf)
       session.raf = 0
       flush()
@@ -413,7 +416,7 @@ export default function Pane({
     }
     const channel = hasTauri ? new Channel() : { onmessage: null }
     channel.onmessage = (batch) => {
-      if (session.cancelled || loadStateRef.current !== session) return
+      if (session.settled || session.cancelled || loadStateRef.current !== session) return
       pending.push(batch)
       const flushNow = !session.paintStarted || !!batch?.done
       session.paintStarted = true
@@ -434,31 +437,37 @@ export default function Pane({
     api
       .listDirStream(path, showHidden, id, session.sortKey, session.sortDir, channel)
       .then(() => {
-        if (session.cancelled || loadStateRef.current !== session) return
+        if (session.settled || session.cancelled || loadStateRef.current !== session) return
+        session.commandFinished = true
         if (session.raf) cancelAnimationFrame(session.raf)
         session.raf = 0
         flush()
-        commit()
+        // invoke 和 Channel 的大包 fetch 独立结束。只有最终批次已提交才算完成。
+        if (session.streamDone) commit()
+        else setLoadProgress({ total: session.total, live: paintLive, waiting: true })
       })
       .catch((err) => {
-        if (session.cancelled || loadStateRef.current !== session) return
+        if (session.settled || session.cancelled || loadStateRef.current !== session) return
         if (session.raf) cancelAnimationFrame(session.raf)
         session.raf = 0
         flush()
         session.settled = true
-        session.done = true
+        session.done = false
         setLoadProgress(null)
-        if (!session.sawBatch) {
-          setError(String(err))
-          setEntries([])
-        } else {
-          setEntries(session.built)
-        }
+        setError(String(err))
+        if (session.sawBatch) setEntries(session.built)
+        else if (paintLive) setEntries([])
       })
     return id
   }
   beginLoadRef.current = beginLoad
   cancelLoadRef.current = cancelLoad
+
+  // watcher 可在同一目录里替换请求；卸载必须取消此刻活动的请求，而不是初次打开时的 id。
+  useLayoutEffect(() => () => {
+    kidsLoadsRef.current = {}
+    cancelLoadRef.current(loadStateRef.current?.id)
+  }, [])
 
   // layout 阶段就清掉上一个目录，避免画出一帧旧列表。请求本身仍然是异步的。
   // 排序放进依赖：视图设置会在这次导航的父级 layout 里改 sortKey。扫描还没结束就改用新排序。
@@ -473,7 +482,7 @@ export default function Pane({
     const session = loadStateRef.current
     const inFlight =
       !!session &&
-      !session.done &&
+      !session.settled &&
       session.tabId === tab.id &&
       session.path === tab.path &&
       !!session.showHidden === !!cfg.showHidden
@@ -490,8 +499,7 @@ export default function Pane({
     const blank = folderChanged || entriesRef.current == null
     setError(null)
     anchorRef.current = null
-    const id = beginLoadRef.current(tab.path, cfg.showHidden, blank, tab.id, tab.sortKey, tab.sortDir)
-    return () => cancelLoadRef.current(id)
+    beginLoadRef.current(tab.path, cfg.showHidden, blank, tab.id, tab.sortKey, tab.sortDir)
   }, [tab.id, tab.path, cfg.showHidden, tick, tab.sortKey, tab.sortDir])
 
   const rows = useMemo(() => {
@@ -586,21 +594,45 @@ export default function Pane({
       total: loadProgress?.total ?? null,
       listing: loadProgress != null,
       listingLive: !!loadProgress?.live,
+      incomplete: !!error,
       selCount: selection?.size || 0,
       selSize,
     })
-  }, [entryMap, selection, entries, loadProgress])
+  }, [entryMap, selection, entries, loadProgress, error])
 
 
 
-  // 切换标签页时重置展开状态与缓存
-  useEffect(() => {
+  // 切换目录/标签或隐藏规则时作废子目录请求，避免旧响应写入新视图。
+  useLayoutEffect(() => {
     setExpandedDirs(new Set())
     kidsRef.current = {}
-  }, [tab.id])
+    kidsLoadsRef.current = {}
+  }, [tab.id, tab.path, cfg.showHidden])
 
   // 重新拉取已展开目录的内容（手动刷新 tick / 文件系统变化）；内容没变就不触发重渲染
   const entriesSig = (list) => list.map((e) => `${e.path}|${e.size}|${e.mtime_ms}|${e.is_dir}`).join('\n')
+  const loadKids = (path) => {
+    const request = { removes: new Set(), upserts: new Map() }
+    kidsLoadsRef.current[path] = request
+    if (kidsRef.current[path] === undefined) kidsRef.current[path] = null
+    api.listDir(path, cfg.showHidden).then((result) => {
+      if (kidsLoadsRef.current[path] !== request) return
+      delete kidsLoadsRef.current[path]
+      const list = applyOverlay(result.entries, request, cfg.showHidden)
+      const old = kidsRef.current[path]
+      if (!Array.isArray(old) || entriesSig(old) !== entriesSig(list)) {
+        kidsRef.current[path] = list
+        setKidsVersion((v) => v + 1)
+      }
+    }).catch(() => {
+      if (kidsLoadsRef.current[path] !== request) return
+      delete kidsLoadsRef.current[path]
+      if (kidsRef.current[path] === null) {
+        kidsRef.current[path] = applyOverlay([], request, cfg.showHidden)
+        setKidsVersion((v) => v + 1)
+      }
+    })
+  }
   const reloadKids = (only) => {
     const paths = Object.keys(kidsRef.current).filter((p) => {
       if (only && !only.has(p)) return false
@@ -609,28 +641,7 @@ export default function Pane({
       if (kids === null && !only) return false
       return kids !== undefined
     })
-    if (!paths.length) return
-    Promise.all(
-      paths.map((p) =>
-        api
-          .listDir(p, cfg.showHidden)
-          .then((r) => [p, r.entries])
-          .catch(() => null)
-      )
-    ).then((res) => {
-      let changed = false
-      for (const x of res) {
-        if (!x) continue
-        const [p, list] = x
-        const old = kidsRef.current[p]
-        // undefined = 期间已折叠/切换标签页，丢弃过期结果。null = 还在载入，用这次结果补上。
-        if (old !== undefined && (!Array.isArray(old) || entriesSig(old) !== entriesSig(list))) {
-          kidsRef.current[p] = list
-          changed = true
-        }
-      }
-      if (changed) setKidsVersion((v) => v + 1)
-    })
+    paths.forEach(loadKids)
   }
   const reloadKidsRef = useRef(reloadKids)
   reloadKidsRef.current = reloadKids
@@ -668,7 +679,7 @@ export default function Pane({
         const session = loadStateRef.current
         const loadingThis =
           session &&
-          !session.done &&
+          !session.settled &&
           !session.cancelled &&
           session.tabId === tabId &&
           session.path === path &&
@@ -696,10 +707,17 @@ export default function Pane({
         for (const change of changes) {
           if (!Object.hasOwn(kidsRef.current, change.dir)) continue
           const kids = kidsRef.current[change.dir]
-          if (!Array.isArray(kids) || change.reload) {
+          const request = kidsLoadsRef.current[change.dir]
+          if (request && !change.reload) {
+            const overlay = noteDelta(request, change)
+            request.removes = overlay.removes
+            request.upserts = overlay.upserts
+          }
+          if (change.reload || (!Array.isArray(kids) && !request)) {
             reloadKidsDirs.add(change.dir)
             continue
           }
+          if (!Array.isArray(kids)) continue
           const next = applyDirDelta(kids, change, showHidden)
           if (next !== kids) {
             kidsRef.current[change.dir] = next
@@ -723,17 +741,7 @@ export default function Pane({
       return next
     })
     if (kidsRef.current[p] === undefined) {
-      kidsRef.current[p] = null // 载入中
-      api
-        .listDir(p, cfg.showHidden)
-        .then((r) => {
-          kidsRef.current[p] = r.entries
-          setKidsVersion((v) => v + 1)
-        })
-        .catch(() => {
-          kidsRef.current[p] = []
-          setKidsVersion((v) => v + 1)
-        })
+      loadKids(p)
     }
   }
 
@@ -1338,6 +1346,19 @@ export default function Pane({
         </div>
       </div>
 
+      {error && (
+        <div className="error" role="alert">
+          读取未完成：{error}
+          <br />
+          <button onClick={() => onNav(tab.id, tab.path, true)}>重试</button>
+        </div>
+      )}
+      {loadProgress?.waiting && (
+        <div className="loading" role="status">
+          正在等待目录数据…{' '}
+          <button onClick={() => onNav(tab.id, tab.path, true)}>重试</button>
+        </div>
+      )}
       <div
         className="rows"
         ref={scrollRef}
@@ -1352,15 +1373,9 @@ export default function Pane({
           }
         }}
       >
-        {error ? (
-          <div className="error">
-            {error}
-            <br />
-            <button onClick={() => onNav(tab.id, tab.path, true)}>重试</button>
-          </div>
-        ) : entries === null ? (
+        {entries === null ? (
           <div className="loading">载入中…</div>
-        ) : rows.length === 0 ? (
+        ) : rows.length === 0 && !error ? (
           <div className="empty">{filter ? '没有匹配的项目' : '文件夹为空'}</div>
         ) : (
           <div className="rows-inner" ref={innerRef} style={{ height: virt.getTotalSize() }}>
