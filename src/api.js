@@ -25,6 +25,7 @@ export const api = hasTauri
       dirActivity: (paths) => invoke('dir_activity', { paths }),
       diskSpace: (path) => invoke('disk_space', { path }),
       homeDir: () => invoke('home_dir'),
+      fileIcons: (paths) => invoke('file_icons', { paths }),
       loadConfig: () => invoke('load_config'),
       saveConfig: (config) => invoke('save_config', { config }),
     }
@@ -178,6 +179,8 @@ function mockApi() {
     // mock 与真实保持同签名
     diskSpace: () => Promise.resolve(500e9),
     homeDir: () => Promise.resolve('/Users/demo'),
+    fileIcons: (paths) =>
+      Promise.resolve((paths || []).map((path) => ({ path, icon: null, template: false }))),
     // 浏览器测试视图也用 localStorage 记住工作区/布局，行为与真实 app 一致
     loadConfig: () => {
       try {

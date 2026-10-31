@@ -8,6 +8,9 @@ use std::sync::OnceLock;
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 
+mod native_icons;
+use native_icons::file_icons;
+
 /// fsearch 引擎（getattrlistbulk 全盘索引 + FSEvents 实时更新 + 模糊匹配）
 /// 懒初始化：首次全局搜索时启动，首轮建索引期间查询会 Err → 回退 mdfind
 static FSEARCH: OnceLock<Option<fsearch::Engine>> = OnceLock::new();
@@ -1726,7 +1729,8 @@ pub fn run() {
             save_window_state,
             fsearch_status,
             load_config,
-            save_config
+            save_config,
+            file_icons
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

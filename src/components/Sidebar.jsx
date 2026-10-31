@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { api } from '../api'
 import { labelOf } from '../format'
 import { IconDrive, IconFolder, IconHouse } from '../icons'
+import { getCachedIcon, requestSystemIcons, subscribeSystemIcons } from '../systemIcons'
 import homeIcon from '../assets/sidebar/Home.png'
 import desktopIcon from '../assets/sidebar/Desktop.png'
 import documentsIcon from '../assets/sidebar/Documents.png'
@@ -10,6 +11,7 @@ import downloadsIcon from '../assets/sidebar/Downloads.png'
 import moviesIcon from '../assets/sidebar/Movies.png'
 import musicIcon from '../assets/sidebar/Music.png'
 import picturesIcon from '../assets/sidebar/Pictures.png'
+import applicationsIcon from '../assets/sidebar/Applications.png'
 
 const favoriteIcons = {
   Desktop: desktopIcon,
@@ -18,15 +20,29 @@ const favoriteIcons = {
   Movies: moviesIcon,
   Music: musicIcon,
   Pictures: picturesIcon,
+  // 只有收藏里已经有「应用程序」时才会命中，不新增侧边栏分区
+  Applications: applicationsIcon,
 }
 
-function FavoriteIcon({ favorite }) {
-  const tail = favorite.path.split('/').filter(Boolean).pop()
-  const src = Object.hasOwn(favoriteIcons, favorite.name) ? favoriteIcons[favorite.name]
-    : Object.hasOwn(favoriteIcons, tail) ? favoriteIcons[tail] : null
-  return src
-    ? <img className="sb-system-icon" src={src} width={16} height={16} alt="" draggable={false} />
-    : <IconFolder size={15} />
+function SystemIcon({ src, template }) {
+  const kind = template ? 'sb-template-icon' : 'sb-color-icon'
+  return <img className={`sb-system-icon ${kind}`} src={src} width={16} height={16} alt="" draggable={false} />
+}
+
+// Finder / QSpace 侧边栏用独立彩色字形。iconForFile 对 Desktop、Downloads 等
+// 返回的是蓝文件夹加角标，不能用于这些已知目录。自定义收藏才用系统图标。
+function bundledFavoriteSrc(favorite) {
+  if (favorite?.name && Object.hasOwn(favoriteIcons, favorite.name)) return favoriteIcons[favorite.name]
+  const tail = String(favorite?.path || '').split('/').filter(Boolean).pop()
+  if (tail && Object.hasOwn(favoriteIcons, tail)) return favoriteIcons[tail]
+  return null
+}
+
+function FavoriteIcon({ favorite, native }) {
+  const src = bundledFavoriteSrc(favorite)
+  if (src) return <SystemIcon src={src} template={false} />
+  if (native?.icon) return <SystemIcon src={native.icon} template={!!native.template} />
+  return <IconFolder size={15} />
 }
 
 const trace = (m) => invoke('log_debug', { msg: m }).catch(() => {})
@@ -135,6 +151,7 @@ export default function Sidebar({
   const ref = useRef(null)
   const [vols, setVols] = useState([])
   const [dropKey, setDropKey] = useState(null)
+  const [, setIconTick] = useState(0)
 
   useEffect(() => {
     let live = true
@@ -146,6 +163,25 @@ export default function Sidebar({
       live = false
     }
   }, [tick])
+
+  // 列表、自定义收藏和卷需要 iconForFile（特殊目录在列表里仍是文件夹角标）。
+  // 侧边栏展示时，已知特殊目录改用内置彩色字形，不读这份缓存。
+  useEffect(() => {
+    const paths = []
+    if (home) paths.push(home)
+    for (const f of favorites || []) if (f?.path) paths.push(f.path)
+    for (const v of vols) if (v?.path) paths.push(v.path)
+    const want = new Set(paths)
+    requestSystemIcons(want)
+    return subscribeSystemIcons((updated) => {
+      for (const p of updated || []) {
+        if (want.has(p)) {
+          setIconTick((n) => n + 1)
+          return
+        }
+      }
+    })
+  }, [home, favorites, vols])
 
   // 原生事件探针：确认 DOM 是否收到点击（与 React 合成事件无关）
   useEffect(() => {
@@ -160,7 +196,9 @@ export default function Sidebar({
     <div className="sidebar" ref={ref}>
       <div className="sb-title">个人收藏</div>
       <FavItem
-        icon={home ? <img className="sb-system-icon" src={homeIcon} width={16} height={16} alt="" draggable={false} /> : <IconHouse size={15} />}
+        icon={home
+          ? <SystemIcon src={homeIcon} template={false} />
+          : <IconHouse size={15} />}
         label="主目录"
         path={home}
         removable={false}
@@ -174,7 +212,7 @@ export default function Sidebar({
       {favorites.map((f) => (
         <FavItem
           key={f.path}
-          icon={<FavoriteIcon favorite={f} />}
+          icon={<FavoriteIcon favorite={f} native={getCachedIcon(f.path)} />}
           label={labelOf(f.path, home)}
           path={f.path}
           removable
@@ -193,7 +231,9 @@ export default function Sidebar({
           {vols.map((v) => (
             <FavItem
               key={v.path}
-              icon={<IconDrive size={15} />}
+              icon={getCachedIcon(v.path)?.icon
+                ? <SystemIcon src={getCachedIcon(v.path).icon} template={!!getCachedIcon(v.path).template} />
+                : <IconDrive size={15} />}
               label={v.name}
               path={v.path}
               removable={false}

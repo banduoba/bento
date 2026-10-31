@@ -140,7 +140,8 @@
     --dialog-shadow: 0 8px 20px rgba(0, 0, 0, 0.36), 0 24px 64px rgba(0, 0, 0, 0.55);
   }
 
-  .sb-system-icon { filter: invert(0.88) hue-rotate(180deg); }
+  /* 只反色单色模板图。内置彩色侧边栏图和 NSWorkspace 彩色图标带 .sb-color-icon，保持原色。 */
+  .sb-system-icon.sb-template-icon { filter: invert(0.88) hue-rotate(180deg); }
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -380,6 +381,7 @@ input, textarea {
 .sb-item.active:hover { background: var(--sidebar-active); }
 .sb-item svg { flex: none; color: var(--accent); }
 .sb-system-icon { flex: none; border-radius: 3px; object-fit: contain; }
+.sb-system-icon.sb-color-icon { border-radius: 0; }
 .sb-item.drive svg { color: var(--muted-icon); }
 
 /* ---------- 窗格区 ---------- */
@@ -858,33 +860,34 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .row-kind, .row-date { text-align: left; }
 
 .fileicon {
-  width: 22px;
-  height: 22px;
+  width: 16px;
+  height: 16px;
   flex: none;
   display: flex;
   align-items: center;
   justify-content: center;
 }
+.fileicon .sb-system-icon { width: 16px; height: 16px; }
 .thumb {
-  width: 20px;
-  height: 20px;
+  width: 16px;
+  height: 16px;
   object-fit: cover;
-  border-radius: 6px;
+  border-radius: 3px;
   border: 0.5px solid var(--hairline);
   background: var(--icon-bg);
 }
 .exttile {
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
   color: #fff;
-  font-size: 8px;
-  font-weight: 700;
+  font-size: 7px;
+  font-weight: 650;
   display: flex;
   align-items: center;
   justify-content: center;
   text-transform: uppercase;
-  letter-spacing: 0.2px;
+  letter-spacing: 0;
 }
 
 /* 复制成功提示条（含复制内容） */
@@ -1476,7 +1479,7 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .search-item {
   position: relative;
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: 16px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   min-height: 46px;
@@ -1489,8 +1492,8 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .search-item, .search-history-item { margin: 1px 0; }
 .search-item:hover { background: var(--row-hover); }
 .search-item.on, .search-item.on:hover { background: var(--row-sel-focus); }
-.search-item .fileicon { width: 22px; height: 22px; margin: 0; }
-.search-item .thumb, .search-item .exttile { width: 20px; height: 20px; }
+.search-item .fileicon { width: 16px; height: 16px; margin: 0; }
+.search-item .thumb, .search-item .exttile { width: 16px; height: 16px; }
 .search-file { display: contents; }
 .search-actions {
   position: absolute;

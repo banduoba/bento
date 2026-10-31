@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
-import { api, fileSrc } from '../api'
+import { api } from '../api'
 import { setWatch, clearWatch, onFsChange } from '../fsWatch'
-import { fmtSize, fmtDate, isImage, extColor, basename, parentPath, labelOf, makeMatcher, copyText, kindOf, splitName } from '../format'
+import { fmtSize, fmtDate, basename, parentPath, labelOf, makeMatcher, copyText, kindOf, splitName } from '../format'
 import { COL_MIN, COL_MAX, DEFAULT_COLS, applyColVars, fitColumns, normalizeCols, normalizeVis } from '../columns'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
+import FileIcon from './FileIcon'
 
 const MIME = 'application/x-bento'
 
@@ -21,18 +22,6 @@ function sortEntries(list, key, dir) {
     else c = a.name.localeCompare(b.name, 'zh-CN', { numeric: true })
     return c * f
   })
-}
-
-function FileIcon({ entry }) {
-  if (entry.is_dir) return <IconFolder size={24} />
-  if (isImage(entry.ext)) {
-    return <img className="thumb" src={fileSrc(entry.path)} loading="lazy" alt="" draggable={false} />
-  }
-  return (
-    <span className="exttile" style={{ background: extColor(entry.ext) }}>
-      {(entry.ext || 'file').slice(0, 4)}
-    </span>
-  )
 }
 
 export default function Pane({
@@ -929,7 +918,9 @@ export default function Pane({
                       <span className="disclosure-spacer" />
                     )}
                     <span className="fileicon">
-                      {entry.isPseudo ? null : <FileIcon entry={entry} />}
+                      {entry.isPseudo ? null : (
+                        <FileIcon path={entry.path} name={entry.name} isDir={entry.is_dir} ext={entry.ext} />
+                      )}
                     </span>
                     {isRenaming ? (
                       <input
