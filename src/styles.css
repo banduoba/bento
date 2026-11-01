@@ -1926,5 +1926,9 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .zip-checks { display: flex; flex-direction: column; gap: 8px; }
 .zip-actions { display: flex; gap: 8px; }
 
+/* Search completeness is separate from the result count. */
+.search-notice { padding: 9px 18px; border-bottom: 1px solid var(--border); font-size: 12px; color: var(--text-2); line-height: 1.6; }
+.search-error { display: flex; align-items: center; gap: 12px; color: #c44536; }
+.search-error button { margin-left: auto; padding: 3px 10px; border: 1px solid currentColor; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
 .batch-rename-regex { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .batch-rename-preview .preview-line .new.invalid { color: var(--danger, #c0392b); }
