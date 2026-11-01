@@ -60,12 +60,12 @@ test('keyboard adjusts effective bounds once per action and isolates file keys w
     const e = await h.send('onKeyDown', { key: 'ArrowRight', [modifier]: true }); assert.equal(e.stopped, undefined); assert.equal(e.prevented, undefined)
   }
   assert.equal(h.commits.length, 4)
-  await h.send('onDoubleClick'); assert.deepEqual(h.commits, [268, 236, 520, 180, 260])
+  await h.send('onDoubleClick'); assert.deepEqual(h.commits, [268, 236, 520, 180, 220])
 })
 test('narrow viewport keyboard bounds and double-click reset use distinct display and saved widths', async t => {
-  const h = await mountLayout(t, 500, 650)
+  const h = await mountLayout(t, 500, 620)
   await h.send('onKeyDown', { key: 'End' }); assert.deepEqual(h.commits, [])
-  await h.send('onDoubleClick'); assert.deepEqual(h.commits, [260])
-  await h.update(260); assert.equal(h.value, 230)
-  await h.resize(1200); assert.equal(h.value, 260)
+  await h.send('onDoubleClick'); assert.deepEqual(h.commits, [220])
+  await h.update(220); assert.equal(h.value, 200)
+  await h.resize(1200); assert.equal(h.value, 220)
 })

@@ -16,9 +16,9 @@ const sanitizeConfig = new Function('normalizeSidebarWidth', 'normalizeEnterActi
 
 test('App config supplies a usable default and rejects malformed persisted widths', () => {
   for (const input of [undefined, null, NaN, Infinity, -Infinity, '300', {}, [], true]) {
-    assert.equal(sanitizeConfig({ sidebarWidth: input }, '/home').sidebarWidth, 260)
+    assert.equal(sanitizeConfig({ sidebarWidth: input }, '/home').sidebarWidth, 220)
   }
-  assert.equal(sanitizeConfig(null, '/home').sidebarWidth, 260)
+  assert.equal(sanitizeConfig(null, '/home').sidebarWidth, 220)
 })
 test('App config bounds and rounds finite widths, and real preference serialization preserves them', () => {
   for (const [input, expected] of [[0, 180], [-5, 180], [900, 520], [300.6, 301], [260, 260]]) {
