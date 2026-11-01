@@ -52,7 +52,14 @@ export function createFolderTree({ list, setWatch, clearWatch, onFsChange, showH
         watch(); emit()
       }, error => {
         if (!live || nodes.get(id) !== node || node.revision !== revision) return
-        node.status = 'error'; node.error = String(error?.message || error); emit()
+        node.entries = []; node.truncated = false
+        node.status = 'error'; node.error = String(error?.message || error)
+        for (const child of [...nodes.values()]) if (child.parent === id) remove(child.id)
+        watch(); emit()
+        // A self-directory removal event may name only this failed branch. Recheck
+        // its known expanded parent so a deleted entry can be pruned. Parent
+        // success never retries children; failures travel only upward to the root.
+        if (node.parent !== null && nodes.has(node.parent)) refresh(node.parent)
       }).finally(() => {
         node.running = false; activeReads--
         admitWaitingReads()
