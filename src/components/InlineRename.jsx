@@ -18,6 +18,7 @@ export default function InlineRename({ value, inputRef, viewportRef, onChange, o
     if (!input || !mirror || !container) return
     const win = input.ownerDocument.defaultView
     let previousHeight = 0
+    let horizontalOffset = 0
     let active = true
     const refresh = () => {
       if (!active) return
@@ -26,7 +27,22 @@ export default function InlineRename({ value, inputRef, viewportRef, onChange, o
       const horizontal = number('paddingLeft') + number('paddingRight') + number('borderLeftWidth') + number('borderRightWidth')
       const borders = number('borderTopWidth') + number('borderBottomWidth')
       const containerCss = win.getComputedStyle(container)
-      const available = Math.max(1, Math.floor(container.getBoundingClientRect().right - input.getBoundingClientRect().left - (parseFloat(containerCss.paddingRight) || 0)))
+      const naturalLeft = input.getBoundingClientRect().left - horizontalOffset
+      const columnRight = container.getBoundingClientRect().right - (parseFloat(containerCss.paddingRight) || 0)
+      let visibleLeft = naturalLeft
+      let visibleRight = columnRight
+      if (viewport) {
+        const viewportCss = win.getComputedStyle(viewport)
+        // clientWidth excludes borders and the vertical scrollbar; clientLeft also
+        // handles a left-side scrollbar. Keep the editor inside the visible list.
+        const clientLeft = viewport.getBoundingClientRect().left + viewport.clientLeft
+        visibleLeft = Math.max(visibleLeft, clientLeft + (parseFloat(viewportCss.paddingLeft) || 0))
+        visibleRight = Math.min(visibleRight, clientLeft + viewport.clientWidth - (parseFloat(viewportCss.paddingRight) || 0))
+      }
+      const hasIntersection = visibleRight > visibleLeft
+      horizontalOffset = hasIntersection ? visibleLeft - naturalLeft : 0
+      if (input.style.marginLeft !== `${horizontalOffset}px`) input.style.marginLeft = `${horizontalOffset}px`
+      const available = hasIntersection ? Math.max(1, Math.floor(visibleRight - visibleLeft)) : 1
       const width = Math.min(available, Math.max(48, Math.ceil(mirror.getBoundingClientRect().width + horizontal + 2)))
       if (input.style.width !== `${width}px`) input.style.width = `${width}px`
       // scrollHeight measures actual browser soft wraps, including CJK and spaces.
@@ -52,11 +68,19 @@ export default function InlineRename({ value, inputRef, viewportRef, onChange, o
     observer.observe(container)
     if (viewport) observer.observe(viewport)
     win.addEventListener('resize', refresh)
+    let scrollLeft = viewport?.scrollLeft
+    const onScroll = () => {
+      if (viewport.scrollLeft === scrollLeft) return
+      scrollLeft = viewport.scrollLeft
+      refresh()
+    }
+    viewport?.addEventListener('scroll', onScroll, { passive: true })
     return () => {
       active = false
       refreshRef.current = null
       observer.disconnect()
       win.removeEventListener('resize', refresh)
+      viewport?.removeEventListener('scroll', onScroll)
     }
   }, [inputRef, viewportRef])
 

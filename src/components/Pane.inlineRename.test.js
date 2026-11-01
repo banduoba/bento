@@ -34,7 +34,7 @@ async function mount(t, renameIndex=0) {
   const nodeFor=el=>{
     const name=el.type==='textarea'?'textarea':el.props.className
     if(nodes.has(name))return nodes.get(name)
-    const node={...target(),tagName:el.type.toUpperCase(),value:el.props.value||'',style:{setProperty(){}},ownerDocument:doc,scrollTop:0,scrollLeft:0,scrollWidth:600,clientWidth:600,scrollHeight:3000,isConnected:true,get clientHeight(){return geometry.viewport},getBoundingClientRect:()=>({left:100,right:100+geometry.available,top:0,width:name==='rename-measure'?geometry.glyphs:600,height:180}),focus(){doc.activeElement=this;this.focusCount=(this.focusCount||0)+1},setSelectionRange(a,b){this.selection=[a,b]},scrollTo({top}){this.scrollTop=top}}
+    const node={...target(),tagName:el.type.toUpperCase(),value:el.props.value||'',style:{setProperty(){}},ownerDocument:doc,scrollTop:0,scrollLeft:0,clientLeft:0,scrollWidth:600,clientWidth:600,scrollHeight:3000,isConnected:true,get clientHeight(){return geometry.viewport},getBoundingClientRect:()=>({left:100,right:100+geometry.available,top:0,width:name==='rename-measure'?geometry.glyphs:600,height:180}),focus(){doc.activeElement=this;this.focusCount=(this.focusCount||0)+1},setSelectionRange(a,b){this.selection=[a,b]},scrollTo({top}){this.scrollTop=top}}
     if(name==='textarea'){node.parentElement=nodeFor({type:'div',props:{className:'row-name'}});Object.defineProperty(node,'scrollHeight',{get:()=>Math.ceil(geometry.glyphs/Math.max(1,parseFloat(node.style.width)-15))*22+2})}
     nodes.set(name,node);return node
   }
