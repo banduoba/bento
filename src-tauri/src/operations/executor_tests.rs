@@ -3405,3 +3405,144 @@ fn copy_reloaded_journal_receipts_undo_only_the_created_target() {
         assert_copy_journal_reload_undo_preserves_source(&source, clone_files);
     }
 }
+
+#[test]
+fn undo_post_rename_guard_failure_retains_changed_target_despite_empty_private_root() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("dest")).unwrap();
+    let source = d.join("source");
+    fs::write(&source, b"original").unwrap();
+    let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    let copied = e.execute(
+        &Work::Operation(request(OperationKind::Copy, &source, &d.join("dest"))),
+        &OperationContext::detached("copy"),
+    );
+    let parent = d.join("dest");
+    e.hook = Arc::new(move |point, _, _| {
+        if point == Point::UndoRename {
+            let root = fs::read_dir(&parent)?
+                .collect::<io::Result<Vec<_>>>()?
+                .into_iter()
+                .find(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".bento-operation-")
+                })
+                .expect("owned inverse capture root");
+            fs::write(root.path().join("undo"), b"modified")?;
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("undo");
+    let undo_id = copied.undo_id.unwrap();
+    let undone = e.execute(
+        &Work::Undo {
+            undo_id: undo_id.clone(),
+        },
+        &c,
+    );
+    assert!(!undone.undo_complete);
+    let out = &c.recorded_outcomes()[0];
+    assert_eq!(out.status, OutcomeStatus::Partial);
+    assert_eq!(
+        out.error.as_ref().unwrap().message,
+        identity::changed().to_string()
+    );
+    assert!(!d.join("dest/source").exists());
+    assert_eq!(
+        fs::read(out.actual_destination.as_ref().unwrap()).unwrap(),
+        b"modified"
+    );
+    assert!(original.matches(&source));
+    let records = e.journal.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].phase, "undoMoving");
+    assert!(records[0].protected.is_empty());
+    assert!(records[0].roots[0].valid());
+    assert_eq!(fs::read_dir(&records[0].roots[0].path).unwrap().count(), 0);
+    e.hook = Arc::new(|_, _, _| Ok(()));
+    assert!(
+        !e.execute(
+            &Work::Undo { undo_id },
+            &OperationContext::detached("retry")
+        )
+        .undo_complete
+    );
+    assert_eq!(
+        fs::read(out.actual_destination.as_ref().unwrap()).unwrap(),
+        b"modified"
+    );
+    assert_eq!(e.recoveries().unwrap().len(), 1);
+    assert!(original.matches(&source));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn trash_rename_exception_still_rejects_mode_mtime_acl_and_custom_xattr_edits() {
+    for mutation in ["mode", "mtime", "acl", "xattr"] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("dest")).unwrap();
+        let source = d.join("source");
+        fs::write(&source, b"original").unwrap();
+        let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+        let mut e = FileExecutor::new(d.join("app")).unwrap();
+        let copied = e.execute(
+            &Work::Operation(request(OperationKind::Copy, &source, &d.join("dest"))),
+            &OperationContext::detached("copy"),
+        );
+        let parent = d.join("dest");
+        e.hook = Arc::new(move |point, _, _| {
+            if point == Point::UndoRename {
+                let root = fs::read_dir(&parent)?
+                    .collect::<io::Result<Vec<_>>>()?
+                    .into_iter()
+                    .find(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".bento-operation-")
+                    })
+                    .expect("owned inverse capture root");
+                let held = root.path().join("undo");
+                match mutation {
+                    "mode" => fs::set_permissions(&held, fs::Permissions::from_mode(0o600))?,
+                    "mtime" => {
+                        fs::File::open(&held)?.set_times(fs::FileTimes::new().set_modified(
+                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(42),
+                        ))?
+                    }
+                    "acl" => assert!(std::process::Command::new("chmod")
+                        .args(["+a", "everyone deny write"])
+                        .arg(&held)
+                        .status()?
+                        .success()),
+                    "xattr" => assert!(std::process::Command::new("xattr")
+                        .args(["-w", "com.bento.u1", "user edit"])
+                        .arg(&held)
+                        .status()?
+                        .success()),
+                    _ => unreachable!(),
+                }
+            }
+            Ok(())
+        });
+        let c = OperationContext::detached("undo");
+        let undone = e.execute(
+            &Work::Undo {
+                undo_id: copied.undo_id.unwrap(),
+            },
+            &c,
+        );
+        assert!(!undone.undo_complete, "{mutation}");
+        let out = &c.recorded_outcomes()[0];
+        assert_eq!(out.status, OutcomeStatus::Partial, "{mutation}");
+        assert_eq!(
+            fs::read(out.actual_destination.as_ref().unwrap()).unwrap(),
+            b"original"
+        );
+        assert!(original.matches(&source));
+        assert_eq!(e.recoveries().unwrap().len(), 1);
+    }
+}

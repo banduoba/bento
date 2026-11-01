@@ -71,6 +71,10 @@ pub(crate) struct Manifest {
     // keep their original schema and digest, including every extended attribute.
     #[serde(skip)]
     copy_digests: Vec<Vec<u8>>,
+    // macOS rebinds the root's MACL when it is renamed into Trash. This cache is
+    // usable only across that controlled rename, never as a persisted guard.
+    #[serde(skip)]
+    trash_root_digest: Option<Vec<u8>>,
 }
 impl PartialEq for Manifest {
     fn eq(&self, other: &Self) -> bool {
@@ -82,10 +86,19 @@ impl Manifest {
     pub fn capture(path: &Path, checkpoint: &dyn Fn() -> io::Result<()>) -> io::Result<Self> {
         let mut entries = vec![];
         let mut copy_digests = vec![];
-        Self::walk(path, path, &mut entries, &mut copy_digests, checkpoint)?;
+        let mut trash_root_digest = None;
+        Self::walk(
+            path,
+            path,
+            &mut entries,
+            &mut copy_digests,
+            &mut trash_root_digest,
+            checkpoint,
+        )?;
         Ok(Self {
             entries,
             copy_digests,
+            trash_root_digest,
         })
     }
     fn walk(
@@ -93,6 +106,7 @@ impl Manifest {
         path: &Path,
         entries: &mut Vec<Entry>,
         copy_digests: &mut Vec<Vec<u8>>,
+        trash_root_digest: &mut Option<Vec<u8>>,
         checkpoint: &dyn Fn() -> io::Result<()>,
     ) -> io::Result<()> {
         checkpoint()?;
@@ -125,7 +139,11 @@ impl Manifest {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "不支持此类文件"));
         }
         let mut copy_hasher = hasher.clone();
-        metadata_digest(path, &mut hasher, &mut copy_hasher)?;
+        let mut trash_hasher = hasher.clone();
+        metadata_digest(path, &mut hasher, &mut copy_hasher, &mut trash_hasher)?;
+        if path == root {
+            *trash_root_digest = Some(trash_hasher.finalize().to_vec());
+        }
         copy_digests.push(copy_hasher.finalize().to_vec());
         entries.push(Entry {
             relative: path
@@ -145,7 +163,14 @@ impl Manifest {
             let mut children = fs::read_dir(path)?.collect::<io::Result<Vec<_>>>()?;
             children.sort_by_key(|e| e.file_name());
             for child in children {
-                Self::walk(root, &child.path(), entries, copy_digests, checkpoint)?;
+                Self::walk(
+                    root,
+                    &child.path(),
+                    entries,
+                    copy_digests,
+                    trash_root_digest,
+                    checkpoint,
+                )?;
             }
         }
         let after = fs::symlink_metadata(path)?;
@@ -198,6 +223,40 @@ impl Manifest {
         other.entries[0].ctime = self.entries[0].ctime;
         other == *self
     }
+    /// Only for a successful rename of a freshly verified captured object into
+    /// Trash. Preserve inode, contents, mode, mtime, ACL and every other xattr;
+    /// descendants remain entirely strict. Source/Undo-entry/recovery guards
+    /// must continue using the full captured comparison above.
+    pub fn same_trashed_root(&self, other: &Self) -> bool {
+        let mut other = other.clone();
+        other.entries[0].ctime = self.entries[0].ctime;
+        if self
+            .trash_root_digest
+            .as_ref()
+            .zip(other.trash_root_digest.as_ref())
+            .is_some_and(|(before, after)| before == after)
+        {
+            other.entries[0].digest = self.entries[0].digest.clone();
+        }
+        other == *self
+    }
+    /// The first metadata read in Trash can itself lazily bind MACL and invalidate
+    /// its scan. Retry that specific unstable-snapshot error once, then prove the
+    /// final object against the pre-rename guard. Never retry permission/IO errors
+    /// or accept other metadata/content changes, and never use this before rename.
+    pub fn capture_trashed_root(&self, path: &Path) -> io::Result<Self> {
+        let actual = Self::capture(path, &|| Ok(())).or_else(|err| {
+            if err.get_ref().is_some_and(|inner| inner.is::<FileChanged>()) {
+                Self::capture(path, &|| Ok(()))
+            } else {
+                Err(err)
+            }
+        })?;
+        if !self.same_trashed_root(&actual) {
+            return Err(changed());
+        }
+        Ok(actual)
+    }
     /// Apply only proven subtree changes and their ancestor directory timestamps.
     /// Every other entry (including content, ACLs, and unrelated timestamps) must match.
     pub fn amended(
@@ -214,6 +273,7 @@ impl Manifest {
         fn subtree(entries: &[Entry], prefix: &[u8]) -> Manifest {
             Manifest {
                 copy_digests: vec![],
+                trash_root_digest: None,
                 entries: entries
                     .iter()
                     .filter(|e| within(&e.relative, prefix))
@@ -325,8 +385,16 @@ impl Manifest {
                 })
     }
 }
+#[derive(Debug)]
+struct FileChanged;
+impl std::fmt::Display for FileChanged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("文件已被修改或替换，保留数据以供恢复")
+    }
+}
+impl std::error::Error for FileChanged {}
 pub(crate) fn changed() -> io::Error {
-    io::Error::new(io::ErrorKind::Other, "文件已被修改或替换，保留数据以供恢复")
+    io::Error::other(FileChanged)
 }
 #[cfg(test)]
 mod tests {
@@ -341,7 +409,8 @@ mod tests {
             let mut full = Sha256::new();
             full.update(b"unchanged file bytes");
             let mut portable = full.clone();
-            hash_xattr(&mut full, &mut portable, name, value);
+            let mut trash = full.clone();
+            hash_xattr(&mut full, &mut portable, &mut trash, name, value);
             Manifest {
                 entries: vec![Entry {
                     relative: vec![],
@@ -353,6 +422,7 @@ mod tests {
                     digest: full.finalize().to_vec(),
                 }],
                 copy_digests: vec![portable.finalize().to_vec()],
+                trash_root_digest: Some(trash.finalize().to_vec()),
             }
         }
         for name in [
@@ -372,14 +442,27 @@ mod tests {
             assert_ne!(before, after);
             assert!(!before.same_captured_manifest(&after));
             assert!(!before.remaining_agrees(&after));
+            assert_eq!(before.same_trashed_root(&after), name == b"com.apple.macl");
+            let mut replaced = after.clone();
+            replaced.entries[0].identity.ino += 1;
+            assert!(!before.same_trashed_root(&replaced));
+            let mut with_child = before.clone();
+            let mut child = before.entries[0].clone();
+            child.relative = b"child".to_vec();
+            with_child.entries.push(child);
+            let mut changed_child = with_child.clone();
+            changed_child.entries[1].digest = after.entries[0].digest.clone();
+            assert!(!with_child.same_trashed_root(&changed_child));
 
             let stored = serde_json::to_value(&before).unwrap();
             assert_eq!(stored.as_object().unwrap().len(), 1);
             let restored: Manifest = serde_json::from_value(stored).unwrap();
             assert_eq!(restored, before);
+            assert!(restored.same_trashed_root(&before));
             assert!(restored.same_contents(&before));
             assert!(!restored.same_contents(&after));
             assert!(!restored.same_captured_manifest(&after));
+            assert!(!restored.same_trashed_root(&after));
         }
     }
 
@@ -438,7 +521,12 @@ mod metadata_tests {
 }
 
 #[cfg(target_os = "macos")]
-fn metadata_digest(path: &Path, hasher: &mut Sha256, copy_hasher: &mut Sha256) -> io::Result<()> {
+fn metadata_digest(
+    path: &Path,
+    hasher: &mut Sha256,
+    copy_hasher: &mut Sha256,
+    trash_hasher: &mut Sha256,
+) -> io::Result<()> {
     use std::ffi::CString;
     let path = CString::new(path.as_os_str().as_bytes())?;
     let length =
@@ -494,7 +582,7 @@ fn metadata_digest(path: &Path, hasher: &mut Sha256, copy_hasher: &mut Sha256) -
         {
             return Err(changed());
         }
-        hash_xattr(hasher, copy_hasher, name, &value);
+        hash_xattr(hasher, copy_hasher, trash_hasher, name, &value);
     }
     unsafe extern "C" {
         fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
@@ -513,6 +601,7 @@ fn metadata_digest(path: &Path, hasher: &mut Sha256, copy_hasher: &mut Sha256) -
         if e.raw_os_error() == Some(libc::ENOENT) {
             hasher.update(b"no extended acl");
             copy_hasher.update(b"no extended acl");
+            trash_hasher.update(b"no extended acl");
             return Ok(());
         }
         return Err(e);
@@ -530,6 +619,7 @@ fn metadata_digest(path: &Path, hasher: &mut Sha256, copy_hasher: &mut Sha256) -
     }
     hasher.update(&data[..copied as usize]);
     copy_hasher.update(&data[..copied as usize]);
+    trash_hasher.update(&data[..copied as usize]);
     Ok(())
 }
 #[cfg(not(target_os = "macos"))]
@@ -537,18 +627,26 @@ fn metadata_digest(
     _path: &Path,
     _hasher: &mut Sha256,
     _copy_hasher: &mut Sha256,
+    _trash_hasher: &mut Sha256,
 ) -> io::Result<()> {
     Ok(())
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn hash_xattr(hasher: &mut Sha256, copy_hasher: &mut Sha256, name: &[u8], value: &[u8]) {
+fn hash_xattr(
+    hasher: &mut Sha256,
+    copy_hasher: &mut Sha256,
+    trash_hasher: &mut Sha256,
+    name: &[u8],
+    value: &[u8],
+) {
     // macOS assigns provenance for the creating process; copyfile can succeed
     // without transferring this kernel-owned value. Exclude it only from copy
     // equivalence; same-object source/Undo/recovery checks still fingerprint it.
     for digest in [
         Some(hasher),
         (name != b"com.apple.provenance").then_some(copy_hasher),
+        (name != b"com.apple.macl").then_some(trash_hasher),
     ]
     .into_iter()
     .flatten()
