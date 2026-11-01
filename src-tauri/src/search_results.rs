@@ -366,7 +366,11 @@ fn local_scan(
 ) -> Result<SearchResponse> {
     cancelled(cancel)?;
     let content = request.mode == "content";
-    let filters = parse_query(&request.query, content)?;
+    let filters = if content {
+        Some(parse_query(&request.query, true)?)
+    } else {
+        None
+    };
     let matcher = build_matcher(&request.query).map_err(|e| SearchError::new("invalidQuery", e))?;
     let line_matcher = LineMatcher::new(&request.query);
     let rd = fs::read_dir(root).map_err(|e| {
@@ -431,7 +435,7 @@ fn local_scan(
                 .to_string_lossy()
                 .to_lowercase();
             if content {
-                if md.is_file() && query_accepts(&filters, &path, &md) {
+                if md.is_file() && query_accepts(filters.as_ref().unwrap(), &path, &md) {
                     if let Some((lines, hits)) = scan_file(
                         &path,
                         line_matcher.as_ref().unwrap(),
@@ -981,7 +985,13 @@ pub async fn search_query(
         {
             return Err(SearchError::new("invalidRequest", "无效搜索参数"));
         }
-        parse_query(&request.query, request.mode == "content")?;
+        if request.scope == "global" || request.mode == "content" {
+            parse_query(&request.query, request.mode == "content")?;
+        } else {
+            // Local names use the existing literal/glob grammar, including literal brackets.
+            let _ =
+                build_matcher(&request.query).map_err(|e| SearchError::new("invalidQuery", e))?;
+        }
         if request.query.is_empty() {
             return Ok(SearchResponse::new(if request.scope == "global" {
                 "fsearch"
@@ -1240,6 +1250,44 @@ mod tests {
             assert_eq!(r.items[0].name, "report 2026.txt");
         }
     }
+    #[test]
+    fn command_local_names_preserve_literal_brackets_and_reject_invalid_regex() {
+        let fixture = Fixture::new();
+        fixture.file("report [2026-11-01].txt", "fixture");
+        fixture.file("report 2026-11-01.txt", "decoy");
+        let root = fixture.0.to_string_lossy().into_owned();
+        let search = |query: &str, request_id: &str| {
+            tauri::async_runtime::block_on(search_query(
+                query.into(),
+                "pane".into(),
+                Some(root.clone()),
+                false,
+                None,
+                None,
+                Some("name".into()),
+                request_id.into(),
+                None,
+            ))
+        };
+
+        for (query, request_id) in [
+            ("report [2026-11-01]", "literal_bracket_name"),
+            ("*[2026-11-01]*", "glob_literal_bracket_name"),
+        ] {
+            let response = search(query, request_id).unwrap();
+            assert_eq!(response.items.len(), 1, "{query}");
+            assert_eq!(response.items[0].name, "report [2026-11-01].txt");
+            assert!(!response.incomplete);
+        }
+        assert_eq!(
+            search("re:[", "invalid_local_name_regex")
+                .err()
+                .unwrap()
+                .code,
+            "invalidQuery"
+        );
+    }
+
     #[test]
     fn cancellation_before_admission_is_honored_and_ids_are_bounded() {
         cancel_search("cancel_before".into()).unwrap();
