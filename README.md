@@ -40,21 +40,23 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | | |
 | --- | --- |
 | **Multi-pane layouts** | 10 presets — single, side-by-side, stacked, 2×2, and several 3-pane arrangements. Switch with <kbd>⌘1</kbd> <kbd>⌘2</kbd> <kbd>⌘4</kbd> or the layout picker. |
-| **Tabs & workspaces** | Every pane has its own Finder-style tabs. Save whole layouts (panes, tabs, paths) as named workspaces in the sidebar. |
-| **Sidebar folder tree** | Expand Home, favorites and volumes one folder level at a time; folder names open in the focused pane. Only expanded branches are watched, with retry and a full-folder link for limited results. |
+| **Tabs & workspaces** | Every pane has its own Finder-style tabs. Current pane tabs appear below all workspaces; click one to switch to that existing tab. Save whole layouts (panes, tabs, paths) as named workspaces in the sidebar. |
+| **Sidebar folder tree** | Expand Home, favorites and volumes one folder level at a time. The tree starts collapsed; only expanded branches are read and watched. Folder names open in the focused pane; failed or limited reads can be retried or opened as a full folder. |
 | **Instant search** | Global file-name search backed by the [fsearch](https://github.com/noahdunnagan/fsearch) index — fuzzy matching, `*` / `?` wildcards, `ext:` filters and `re:` regular expressions — plus **content search** with a side preview that highlights matching lines. |
 | **Native drag & drop** | Drag files out to Finder or any other app, drop files in from anywhere, or move them between panes. It works even when Bento sits behind other windows, and drop targets are highlighted as you hover. |
 | **Real clipboard** | <kbd>⌘C</kbd> puts real file URLs on the system pasteboard, so <kbd>⌘V</kbd> in Finder and other apps pastes the files themselves. |
-| **Fast file operations** | APFS `clonefile` makes same-volume copies instant. Undo with <kbd>⌘Z</kbd>, duplicates are named `name copy.ext`, `name copy 1.ext`, `name copy 2.ext`, and deletions go to the Trash. |
+| **Native file operations** | Copy, move, duplicate and Trash use macOS Finder operations for progress, conflicts and duplicate naming. Basic file-operation undo is available with <kbd>⌘Z</kbd> during the current session. |
 | **Create Archive** | A QSpace-style dialog: choose location and name, speed / size / custom compression level, optional password, one-click mode and per-item archives. |
 | **Batch rename** | Replace (including regex captures such as $1), add, format (with counters and dates) and change case, with a live before/after preview. |
 | **New file** | Right-click empty space in a pane and choose **新建**: Text (`未命名.txt`), Markdown (`未命名.md`), or any file you drop in `~/Library/Application Support/com.bento.app/templates/` (for example a `.docx`). The new item is renamed immediately. A clash becomes `未命名 2.txt` and never overwrites. |
-| **Flexible columns** | Name · Modified · Created · Size · Kind. Drag column borders to resize, right-click the header to choose columns — settings are **per pane**. Long names are shortened in the middle (`Product…admap.pptx`) and secondary columns hide automatically in narrow panes. |
+| **Flexible columns** | Name · Modified · Created · Size · Kind. Drag column borders to resize and right-click the header to choose columns. View settings have global defaults with per-folder overrides. The default name column is 260px; long names keep their extension visible and wider columns can scroll horizontally. |
 | **Live folders** | FSEvents updates panes and expanded sub-folders as files change. File operations refresh only affected directories, even with automatic refresh disabled. Interrupted reads retain available rows and offer Retry. |
 | **Keyboard-first** | Editable address bar (<kbd>⌘L</kbd>, <kbd>Tab</kbd> completes while editing), copy paths (<kbd>⌥⌘C</kbd>), <kbd>Tab</kbd> switches panes, <kbd>F5</kbd> / <kbd>F6</kbd> copy or move to the other pane, arrow-key navigation, inline folder expansion, Quick Look on <kbd>Space</kbd>, always-on-top pin (<kbd>⌥⌘T</kbd>). |
 | **Remembers everything** | Window frame, layout, tabs, paths, sort order, column widths and preferences are restored on launch. Follows the system light / dark appearance. |
 
 Name and content search both support Current Folder, Home and Global. Click a result or press Enter to open its containing folder and locate/select it in the focused pane. Hover or use the arrow keys to select or preview; the context menu’s Open action opens the item itself. Current Folder/Home scan only when you submit a search, include new unindexed files, skip directory links, and apply scope, visibility and format filters before the result cap (200 by default). Large or inaccessible trees show partial-result notices; errors offer Retry. Local scans have a 2-second soft budget, 100,000 entries, depth 64, 16 MiB per file and 64 KiB per line. Global results use the existing index/system sources and disclose uncertain coverage. Replacing a search cancels local work; an opaque index call may finish in the background while only the latest replacement waits.
+
+The sidebar starts at 220px wide (drag range 180–520px; double-click its divider to reset). Bento remembers the width. The main pane reserves space for a 420px sidebar when the window allows it. Inline rename grows to fit the name, wraps within the 260px default name column and visible pane, and uses an 18px line height; Enter confirms, while Escape cancels. The compact copy-path button copies the selected item's path. Top-bar back and forward follow the current pane's history. Settings can show a Full Disk Access shortcut when search lacks access to protected locations. About can check the latest version and open its download page; it does not silently install updates.
 
 <table>
   <tr>
@@ -155,14 +157,14 @@ Move and Trash undo restore the original full filename. If restoration fails, th
 ```mermaid
 flowchart LR
     UI["React 19 UI<br/>panes · tabs · dialogs"] -- "Tauri IPC" --> CMD["Rust commands<br/>src-tauri/src/lib.rs"]
-    CMD --> FS["File operations<br/>clonefile · zip · trash"]
+    CMD --> FS["File operations<br/>Finder operations · zip · trash"]
     CMD --> IDX["fsearch index<br/>name + content search"]
     CMD --> WATCH["FSEvents watcher<br/>live folder refresh"]
     CMD --> MAC["AppKit bridge<br/>NSPasteboard · native drag"]
 ```
 
 - **Frontend** — React 19, Vite 7, [@tanstack/react-virtual](https://tanstack.com/virtual). Opening a folder streams entries in batches of about 500 over a Tauri channel, and the list mounts only the visible rows, keyed by path.
-- **Backend** — Rust on Tauri 2: parallel directory scans (rayon), APFS `clonefile`, the fsearch engine, `notify` (FSEvents) for live updates, and `objc2` for the native pasteboard and window behaviour.
+- **Backend** — Rust on Tauri 2: parallel directory scans (rayon), native macOS file operations, the fsearch engine, `notify` (FSEvents) for live updates, and `objc2` for the native pasteboard and window behaviour.
 - **Drag & drop** — a native `NSDraggingSession` via [tauri-plugin-drag](https://github.com/crabnebula-dev/drag-rs) for dragging out, and Tauri's window drag-drop events for dragging in.
 
 ```text
@@ -176,7 +178,7 @@ Hard-won implementation notes — coordinate systems for native drops, a window-
 
 ## Status & limitations
 
-Bento is young software (`0.2.1`). Know before you use it:
+Bento is young software (`0.3.0`). Know before you use it:
 
 - The interface is currently **Simplified Chinese only**.
 - Apple Silicon on a recent macOS is the tested configuration; Intel Macs are untested.
@@ -185,7 +187,7 @@ Bento is young software (`0.2.1`). Know before you use it:
 
 ## Performance baseline
 
-Fixture generators and a headless bench live in [`scripts/bench/README.md`](./scripts/bench/README.md) (简体中文). One command builds a 10k-file folder, another builds 100k, and a third times a directory scan plus deleting three small files without opening the GUI. Cold-open first paint and new-tab timing are manual steps recorded into the same JSON report. The scripts do not change how the app lists, watches, or draws files.
+Fixture generators and a headless bench live in [`scripts/bench/README.md`](./scripts/bench/README.md) (简体中文). The scripts build 10k- and 100k-file folders and measure a directory-scan plus rename/restore proxy; they do not measure native Finder file operations or React first paint. Cold-open first paint and new-tab timing are manual steps recorded into the same JSON report. The scripts do not change how the app lists, watches, or draws files.
 
 ## Contributing
 
