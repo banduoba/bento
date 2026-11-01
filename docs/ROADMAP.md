@@ -6,7 +6,7 @@
 
 | 项目 | 当前状态 | 后续 |
 |---|---|---|
-| 搜索：当前列表过滤、递归搜索、结果定位、格式过滤、取消 | 搜索（3b32f4c）与正则捕获替换（59aad98）已通过源码审查和最终组合安装验收；PR #25、#26 开放等待 Bai 确认，尚未合入 main（当前 main 为 f9c344c） | 等待 Bai 确认 |
+| 搜索：当前列表过滤、递归搜索、结果定位、格式过滤、取消 | 搜索（3b32f4c）与正则捕获替换（59aad98）已通过源码审查和最终组合安装验收；PR #25、#26 已合入 main（当前 main 为 a1b951e） | — |
 | M4：窗格/标签历史与会话恢复 | 已合入 main（PR #18，be219ad） | — |
 | About / 检查更新 | 已合入 main（PR #19，128d0be） | — |
 | 原生文件操作与整批基础 Undo | 已合入 main（PR #23，d2486da）；权限快捷方式已合入（PR #24，f9c344c） | — |
@@ -19,9 +19,9 @@
 | 阶段 | 计划项 | 当前边界 |
 |---|---|---|
 | Phase 2A | 文件夹大小后台计算、缓存和排序 | 用户明确暂缓，不排期 |
-| Phase 2B | 标签/工作区；可展开文件夹树侧栏 | 标签/工作区已有实现；侧栏是独立于现有行内展开的功能，尚未标记实现 |
+| Phase 2B | 标签/工作区；可展开文件夹树侧栏 | 标签/工作区已有实现；侧栏已在 `feat/sidebar-folder-tree` 完成源码审查与原生验收，待 Bai 确认，尚未合入 main |
 | Phase 2C | Drop Stack；压缩包按文件夹浏览及解压进度；Finder 接管/对话框导航 | 依反馈选择；Finder 相关先做技术调研 |
 | Phase 3 | 性能、刷新、图标、键盘、信任与验收 | 详见本地计划；不据此推断未确认项目已完成 |
 | Phase 4 | 尚未排期 | Phase 1–2 稳定后再考虑；AI 搜索、完整 Finder 替代、远程协议和同步当前不在范围内 |
 
-最终组合版本 `5b0db2a` 已安装至 `/Applications/Bento.app`。验收确认正常 4 pane 加载、0 loading、0 errors，session/config/view-settings 字节一致，默认与 work 工作区保留，无 app backup。搜索默认点击/Enter 定位父文件夹、滚动并选中；明确选择上下文菜单“打开”才打开文件。正则双文件捕获重命名后，单次 ⌘Z 恢复原文件名和内容。PR #25、#26 开放等待 Bai 确认，尚未合入 main；不据此推断 Home/global/volumes/drag 已穷尽测试。
+最终组合版本 `5b0db2a` 已安装至 `/Applications/Bento.app`。验收确认正常 4 pane 加载、0 loading、0 errors，session/config/view-settings 字节一致，默认与 work 工作区保留，无 app backup。搜索默认点击/Enter 定位父文件夹、滚动并选中；明确选择上下文菜单“打开”才打开文件。正则双文件捕获重命名后，单次 ⌘Z 恢复原文件名和内容。PR #25、#26 已合入 main；不据此推断 Home/global/volumes/drag 已穷尽测试。可展开文件夹树侧栏已在 `feat/sidebar-folder-tree` 通过原生验收并待 Bai 确认；205 文件夹完整视图，10k/100k debug QA 自动化观察 852/4172ms（含按键与 AX 采集，不是纯首屏时间或速度对比）。
