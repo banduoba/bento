@@ -23,6 +23,7 @@ export const api = hasTauri
       trash: (paths, expected) => invoke('trash', { paths, expected: expected || null }),
       makeDirWithReceipt: (path) => invoke('make_dir_with_receipt', { path }),
       makeDir: async (path) => (await invoke('make_dir_with_receipt', { path })).path,
+      previewRegexRename: (names, pattern, replacement) => invoke('regex_rename_preview', { names, pattern, replacement }),
       renameWithReceipt: (oldPath, newName) => invoke('rename_with_receipt', { oldPath, newName }),
       rename: async (oldPath, newName) => (await invoke('rename_with_receipt', { oldPath, newName })).path,
       openPath: (path) => invoke('open_path', { path }),
@@ -563,6 +564,7 @@ function mockApi() {
     mock[name + 'WithReceipt'] = mutate
     mock[name] = async (...args) => (await mutate(...args)).path
   }
+  mock.previewRegexRename = () => Promise.reject(new Error('请在Bento中使用正则预览'))
   mock.makeFile = dir => mock.createFile(dir, 'text')
   const zip = mock.zipPaths
   mock.zipPathsWithReceipt = zip
