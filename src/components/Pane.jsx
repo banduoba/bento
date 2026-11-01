@@ -226,7 +226,7 @@ export default function Pane({
   }
   const resetCol = (key) => {
     const cur = normalizeCols(pane.colWidths)
-    onColWidths?.({ ...cur, [key]: key === 'name' ? null : DEFAULT_COLS[key] })
+    onColWidths?.({ ...cur, [key]: DEFAULT_COLS[key] })
   }
   useEffect(() => {
     const el = scrollRef.current

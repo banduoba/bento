@@ -1,14 +1,14 @@
-// 文件列表列：名称列默认自适应（剩余空间，最小 NAME_MIN），其余列固定像素，可在表头拖动调整宽度、
+// 文件列表列：名称列默认固定 260px，其余列也固定像素，可在表头拖动调整宽度、
 // 右键表头勾选显示哪些列。窗格上的 colWidths / colVisible 是当前文件夹的有效视图
 // （全局默认，或 view-settings.json 里该路径的覆盖），不是窗格私有配置。
-// 窗格太窄放不下时，按优先级自动隐藏次要列（而不是横向滚动藏起来或把文件名挤成「A…」）。
+// 名称列为自适应（保存值为 null）时，窗格太窄会按优先级自动隐藏次要列；固定宽度时使用横向滚动。
 // 宽度/模板以 CSS 变量写在窗格根元素上，拖动时直接改变量（不触发 React 渲染/写盘）。
 export const NAME_MIN = 160
 export const COL_MIN = 48
 export const COL_MAX = 600
 export const COL_GAP = 8
 export const COL_PAD = 24
-export const DEFAULT_COLS = { name: null, size: 72, kind: 104, mtime: 130, btime: 130 }
+export const DEFAULT_COLS = { name: 260, size: 72, kind: 104, mtime: 130, btime: 130 }
 // 默认显示 修改日期/大小/种类（与 QSpace 一致），创建日期按需右键勾选
 export const DEFAULT_VIS = { mtime: true, btime: false, size: true, kind: true }
 // 表头/行里的显示顺序：名称 | 修改日期 | 创建日期 | 大小 | 种类
@@ -31,7 +31,8 @@ export function normalizeCols(saved) {
     if (Number.isFinite(v)) out[k] = clamp(Math.round(v), COL_MIN, COL_MAX)
   }
   const n = Number(saved?.name)
-  out.name = saved?.name != null && Number.isFinite(n) ? clamp(Math.round(n), 120, 1600) : null
+  if (saved?.name === null) out.name = null
+  else if (saved?.name != null && Number.isFinite(n)) out.name = clamp(Math.round(n), 120, 1600)
   return out
 }
 
