@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import { api } from '../api'
+import { isTextEditingElement } from '../textEditing.js'
 
 const MODES = [
   { id: 'replace', label: '替换文本' },
@@ -104,6 +105,10 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   // Native events must use the committed render before passive preview effects run.
   useLayoutEffect(() => {
     const onKey = (e) => {
+      const key = e.key.toLowerCase()
+      // App's bubble listener owns text editing; keep file shortcuts isolated here.
+      if (isTextEditingElement(e.target) && e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey &&
+          !e.isComposing && ['a', 'c', 'x', 'v'].includes(key)) return
       e.stopPropagation()
       if (e.key === 'Escape' && !busy) onCancel()
       if (e.key === 'Enter' && !e.target?.closest?.('button') && valid && !busy) apply()

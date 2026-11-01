@@ -17,7 +17,19 @@ export const item = (name, is_dir = false) => ({ name, is_dir, path: `/fixture/$
 export async function mountBatch(t, items = [item('sample_1.txt'), item('sample_2.md')]) {
   const previous = Object.fromEntries(['window', '__batchIPC', 'IS_REACT_ACT_ENVIRONMENT'].map(k => [k, globalThis[k]]))
   const requests = [], applied = []
-  globalThis.window = new EventTarget()
+  // Node's single EventTarget does not model capture -> target -> bubble.
+  // Separate phase targets preserve the public stopPropagation boundary.
+  const capture = new EventTarget(), bubble = new EventTarget()
+  const phase = options => (options === true || options?.capture) ? capture : bubble
+  globalThis.window = {
+    addEventListener: (type, listener, options) => phase(options).addEventListener(type, listener),
+    removeEventListener: (type, listener, options) => phase(options).removeEventListener(type, listener),
+    dispatchEvent(event) {
+      capture.dispatchEvent(event)
+      if (!event.cancelBubble) bubble.dispatchEvent(event)
+      return !event.defaultPrevented
+    },
+  }
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
   globalThis.__batchIPC = (...args) => new Promise((resolve, reject) => requests.push({ args, resolve, reject }))
   const mod = { exports: {} }
@@ -34,7 +46,7 @@ export async function mountBatch(t, items = [item('sample_1.txt'), item('sample_
   const oldError = console.error
   try {
     console.error = (...args) => { if (!String(args[0]).startsWith('react-test-renderer is deprecated.')) oldError(...args) }
-    await act(async () => { renderer = create(React.createElement(CommitProbe, { dialogProps: props })) })
+    await act(async () => { renderer = create(React.createElement(CommitProbe, { dialogProps: props }), { createNodeMock: node => ({ tagName: node.type.toUpperCase(), type: node.props.type || 'text' }) }) })
   } finally { console.error = oldError }
   let mounted = true
   const unmount = async () => { if (mounted) { await act(async () => renderer.unmount()); mounted = false } }
@@ -57,6 +69,12 @@ export async function mountBatch(t, items = [item('sample_1.txt'), item('sample_
       commitProbe = duringCommit
       try { await act(async () => renderer.update(React.createElement(CommitProbe, { dialogProps: props }))) }
       finally { commitProbe = null }
+    },
+    key: async (key, target, modifiers = {}) => {
+      const event = new Event('keydown', { bubbles: true, cancelable: true })
+      for (const [name, value] of Object.entries({ key, target, ...modifiers })) Object.defineProperty(event, name, { value })
+      await act(async () => window.dispatchEvent(event))
+      return event
     },
     enter: async () => { const e = new Event('keydown'); Object.defineProperty(e, 'key', { value: 'Enter' }); await act(async () => window.dispatchEvent(e)) },
   }
