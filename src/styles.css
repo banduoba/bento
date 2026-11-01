@@ -1925,3 +1925,6 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 }
 .zip-checks { display: flex; flex-direction: column; gap: 8px; }
 .zip-actions { display: flex; gap: 8px; }
+
+.batch-rename-regex { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.batch-rename-preview .preview-line .new.invalid { color: var(--danger, #c0392b); }
