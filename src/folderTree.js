@@ -1,10 +1,21 @@
 import { normalizeFsChanges } from './fsApply.js'
 
+// Native reads cannot be cancelled on unmount. Admission therefore outlives each
+// Sidebar controller; old promises keep their slots until they actually settle.
+let activeReads = 0
+const waitingControllers = new Set()
+function admitWaitingReads() {
+  for (const pump of [...waitingControllers]) {
+    if (activeReads >= 2) break
+    pump()
+  }
+}
+
 // Only expanded branches live here. Outstanding native IO keeps its slot even after close.
 export function createFolderTree({ list, setWatch, clearWatch, onFsChange, showHidden = false, autoRefresh = true }) {
   const owner = Symbol('sidebar-tree')
   const nodes = new Map(), listeners = new Set(), queue = new Set()
-  let active = 0, live = false, unsubscribe = null
+  let live = false, unsubscribe = null
   const snapshot = () => new Map([...nodes].map(([id, node]) => [id, {
     id, path: node.path, parent: node.parent, entries: node.entries,
     truncated: node.truncated, status: node.status, error: node.error,
@@ -16,15 +27,16 @@ export function createFolderTree({ list, setWatch, clearWatch, onFsChange, showH
     else clearWatch(owner)
   }
   function pump() {
+    waitingControllers.delete(pump)
     if (!live) return
     for (const id of queue) {
-      if (active >= 2) break
+      if (activeReads >= 2) break
       const node = nodes.get(id)
       if (!node) { queue.delete(id); continue }
       if (node.running) continue
       queue.delete(id)
       const revision = node.revision, hidden = showHidden
-      node.running = true; active++
+      node.running = true; activeReads++
       // Invocation is immediate; Promise.resolve handles both IPC and synchronous boundary errors.
       let request
       try { request = list(node.path, hidden) } catch (error) { request = Promise.reject(error) }
@@ -42,10 +54,11 @@ export function createFolderTree({ list, setWatch, clearWatch, onFsChange, showH
         if (!live || nodes.get(id) !== node || node.revision !== revision) return
         node.status = 'error'; node.error = String(error?.message || error); emit()
       }).finally(() => {
-        node.running = false; active--
-        pump()
+        node.running = false; activeReads--
+        admitWaitingReads()
       })
     }
+    if (queue.size) waitingControllers.add(pump)
   }
   function refresh(id) {
     const node = nodes.get(id)
@@ -72,6 +85,7 @@ export function createFolderTree({ list, setWatch, clearWatch, onFsChange, showH
     },
     stop() {
       live = false; unsubscribe?.(); unsubscribe = null
+      waitingControllers.delete(pump)
       nodes.clear(); queue.clear(); clearWatch(owner); emit()
     },
     open(id, path, parent = null) {

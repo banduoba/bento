@@ -10,7 +10,12 @@ function harness(t, options = {}) {
     setWatch: (owner, paths) => watches.set(owner, paths), clearWatch: owner => watches.delete(owner),
     onFsChange: cb => { change = cb; listening++; return () => { listening--; change = null } }, ...options,
   })
-  tree.start(); t.after(() => tree.stop())
+  tree.start(); t.after(async () => {
+    tree.stop()
+    // Admission survives controllers: every owned IO promise must settle between tests.
+    for (const request of requests) request.resolve({ entries: [], truncated: false })
+    await flush()
+  })
   return { tree, requests, watches, emit: p => change?.(p), listening: () => listening, resolve: async (i, entries = [], truncated = false) => { requests[i].resolve({ entries, truncated }); await flush() } }
 }
 
@@ -107,4 +112,68 @@ test('setting replacement blocks late errors and coalesces repeated changes whil
   assert.equal(h.requests.length, 2)
   await h.resolve(1, [entry('/a/stale')]); assert.equal(h.requests.length, 3)
   await h.resolve(2, [entry('/a/new')]); assert.equal(h.tree.snapshot().get('a').entries[0].name, 'new')
+})
+
+
+test('actual read slots survive new controller mounts while stopped queues and old results are discarded', async t => {
+  const pending = [], trees = [], watches = new Map()
+  let running = 0, peak = 0
+  const createMount = () => {
+    const tree = createFolderTree({
+      list: path => {
+        running++; peak = Math.max(peak, running)
+        return new Promise((resolve, reject) => pending.push({ path, resolve, reject }))
+          .finally(() => { running-- })
+      },
+      setWatch: (owner, paths) => watches.set(owner, paths), clearWatch: owner => watches.delete(owner),
+      onFsChange: () => () => {},
+    })
+    trees.push(tree); tree.start(); return tree
+  }
+  t.after(async () => {
+    for (const tree of trees) tree.stop()
+    for (const request of pending) request.resolve({ entries: [], truncated: false })
+    await flush()
+    assert.equal(running, 0)
+  })
+  const first = createMount()
+  first.open('a', '/a'); first.open('b', '/b'); first.open('queued', '/never-start')
+  assert.equal(running, 2)
+  first.stop(); assert.equal(watches.size, 0)
+  const second = createMount()
+  second.open('a', '/a'); second.open('b', '/b')
+  assert.equal(running, 2, 'new mount must wait for the old actual IO slots')
+  assert.equal(pending.length, 2)
+  pending[0].resolve({ entries: [entry('/a/old')], truncated: false }); await flush()
+  assert.deepEqual(pending.map(r => r.path), ['/a', '/b', '/a'])
+  assert.equal(first.snapshot().size, 0)
+  assert.equal(second.snapshot().get('a').entries.length, 0)
+  assert.equal(running, 2)
+  // Stop another controller while its admitted read remains active; a third mount
+  // must still wait, and the second mount's queued /b must never start.
+  second.stop(); const third = createMount(); third.open('a', '/a'); third.open('b', '/b')
+  assert.equal(pending.length, 3)
+  pending[1].reject('old failure'); await flush()
+  assert.deepEqual(pending.map(r => r.path), ['/a', '/b', '/a', '/a'])
+  pending[2].resolve({ entries: [entry('/a/also-old')], truncated: false }); await flush()
+  assert.deepEqual(pending.map(r => r.path), ['/a', '/b', '/a', '/a', '/b'])
+  assert.equal(second.snapshot().size, 0)
+  assert.equal(third.snapshot().get('a').entries.length, 0)
+  assert.equal(third.snapshot().get('b').error, '')
+  pending[3].resolve({ entries: [entry('/a/current')], truncated: false })
+  pending[4].resolve({ entries: [], truncated: false }); await flush()
+  assert.equal(third.snapshot().get('a').entries[0].name, 'current')
+  assert.equal(peak, 2)
+  assert.equal(running, 0)
+})
+
+test('separate stopped controllers release all admission slots for the next fresh controller', async t => {
+  const first = harness(t); first.tree.open('a', '/a'); first.tree.open('b', '/b')
+  first.tree.stop()
+  const waiting = harness(t); waiting.tree.open('c', '/c'); waiting.tree.stop()
+  await first.resolve(0); await first.resolve(1)
+  assert.equal(waiting.requests.length, 0, 'stopped queued mount must not be revived by old settlement')
+  const latest = harness(t); latest.tree.open('d', '/d'); latest.tree.open('e', '/e')
+  assert.equal(latest.requests.length, 2, 'all shared slots are reusable after settlement')
+  await latest.resolve(0); await latest.resolve(1)
 })
