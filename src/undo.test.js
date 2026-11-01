@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mountApp, deferred } from './test/AppHarness.js'
 import { operationBoundary, outcome, key } from './test/OperationBoundary.js'
+const openQueue=async h=>{const toggle=h.root.findAllByType('button').find(n=>n.props['aria-expanded']!==undefined);if(!toggle.props['aria-expanded'])await h.run(()=>toggle.props.onClick())}
 
 async function completedMove(t,extra={}) {
   const b=operationBoundary(),h=await mountApp(t,{...b.api,...extra})
@@ -40,6 +41,7 @@ test('rejected undo remains retryable and overlapping key presses admit one undo
   await key(h,'z',{metaKey:true});await key(h,'z',{metaKey:true})
   assert.equal(calls.length,1)
   await h.run(async()=>{gate.resolve();await new Promise(r=>setImmediate(r))})
+  await openQueue(h)
   await h.run(()=>h.root.findAllByType('button').find(n=>n.children.join('')==='同步并重试提交').props.onClick())
   assert.equal(calls.length,2)
   assert.deepEqual(calls.map(c=>c[0]),['u-exact','u-exact']);assert.equal(calls[0][1],calls[1][1])
@@ -65,6 +67,9 @@ test('missing inverse outcome pages do not acknowledge results or announce undo 
   await h.run(()=>new Promise(r=>setImmediate(r)))
   assert.equal(b.calls.some(c=>c[0]==='ack'&&c[1]===inverse.jobId),false)
   assert.equal(h.panes[0].props.operationToast,null)
+  const task=h.root.findAllByType('button').find(n=>n.props['aria-expanded']!==undefined)
+  assert.match(task.children.join(''),/操作异常/)
+  await openQueue(h)
   assert.ok(h.root.findAll(n=>n.props.role==='alert').length)
 })
 test('copy undo is a dedicated backend job and never bypasses the queue with direct trash',async t=>{

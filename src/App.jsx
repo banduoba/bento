@@ -944,7 +944,6 @@ export default function App() {
   const submitOperation = async (kind, items, destination, ownerTabId, intent, options = {}, extra = {}, onSuccess) => {
     const request = { requestId: operationId(), kind, items: items.map((item, i) => ({ itemId: `i${i}`, ...item })), destination: destination || null, options, ownerTabId: ownerTabId || null, intent, ...extra }
     if (onSuccess) completionCallbacks.current.set(request.requestId, onSuccess)
-    setQueueOpen(true)
     try { return await operations.current.enqueue(request) }
     catch (error) { setOperationNotice(String(error)); return null }
   }
@@ -960,7 +959,7 @@ export default function App() {
       return job
     })
   }
-  const undoLast = () => operations.current.undo().catch(error => { setOperationNotice(String(error)); setQueueOpen(true) })
+  const undoLast = () => operations.current.undo().catch(error => setOperationNotice(String(error)))
   const doTrash = (tabId, paths) => {
     const list = paths?.length ? paths : selArr(tabId)
     if (list.length) return submitOperation('trash', list.map(source => ({ source })), null, tabId, 'trash')
@@ -1772,17 +1771,18 @@ export default function App() {
         </div>
       </div>
 
-      <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]} />
-      <Suspense fallback={null}>
-        <OperationQueue state={operationState} client={operations.current} open={queueOpen}
-          onToggle={() => setQueueOpen(open => !open)}
-          onConflict={job => setHiddenConflicts(current => {
-            const next = new Set(current)
-            next.delete(conflictKey(job))
-            return next
-          })}
-          onUndo={undoLast} onRetry={retryOperation} onError={error => setOperationNotice(String(error))} reveal={api.reveal} />
-      </Suspense>
+      <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]}>
+        <Suspense fallback={null}>
+          <OperationQueue state={operationState} client={operations.current} open={queueOpen}
+            onToggle={() => setQueueOpen(open => !open)} onClose={() => setQueueOpen(false)} notice={operationNotice}
+            onConflict={job => setHiddenConflicts(current => {
+              const next = new Set(current)
+              next.delete(conflictKey(job))
+              return next
+            })}
+            onUndo={undoLast} onRetry={retryOperation} onError={error => setOperationNotice(String(error))} reveal={api.reveal} />
+        </Suspense>
+      </StatusBar>
       {operationNotice && <div className="operation-notice" role="alert">
         {operationNotice} <button className="btn" onClick={() => setOperationNotice(null)}>知道了</button>
       </div>}

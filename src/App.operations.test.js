@@ -4,6 +4,7 @@ import { mountApp, deferred } from './test/AppHarness.js'
 import { operationBoundary, outcome, key } from './test/OperationBoundary.js'
 const paneId=p=>p.props.pane.tabs[p.props.pane.active].id
 const button=(h,label)=>h.root.findAllByType('button').find(n=>n.props['data-label']===label||n.children.join('')===label)
+const openQueue=async h=>{const toggle=h.root.findAllByType('button').find(n=>n.props['aria-expanded']!==undefined);if(!toggle.props['aria-expanded'])await h.run(()=>toggle.props.onClick())}
 
 test('App enqueues drag copies while browsing; partial results refresh only affected directories with no success toast',async t=>{
   const b=operationBoundary(),h=await mountApp(t,b.api),p=h.panes[0].props,id=paneId(h.panes[0])
@@ -15,6 +16,7 @@ test('App enqueues drag copies while browsing; partial results refresh only affe
   assert.equal(h.panes[0].props.operationToast,null)
   assert.equal(h.panes[0].props.directoryVersions['/dest'],1)
   assert.equal(h.panes[0].props.directoryVersions['/src'],undefined)
+  await openQueue(h)
   assert.ok(h.root.findAll(n=>n.props['data-job-id']==='j1').length)
 })
 test('cut revision prevents duplicate paste and an old completed move cannot clear a newer cut',async t=>{
@@ -72,11 +74,15 @@ test('conflict Escape leaves job waiting; queue reopens it and Enter safely choo
   const b=operationBoundary(),h=await mountApp(t,b.api)
   await h.run(()=>h.panes[0].props.onDropTransfer('/dest',['/src/a'],'copy'))
   await b.emit(h,'j1',{state:'waitingConflict',conflict:conflict()})
+  const task=h.root.findAllByType('button').find(n=>n.props['aria-expanded']!==undefined)
+  assert.match(task.children.join(''),/等待处理/)
+  assert.equal(task.props['aria-expanded'],false)
   assert.ok(h.root.findAllByProps({role:'dialog'}).length)
   await key(h,'Escape')
   assert.equal(h.root.findAllByProps({role:'dialog'}).length,0)
   assert.equal(b.calls.filter(c=>c[0]==='resolve').length,0)
   assert.equal(b.jobs.get('j1').state,'waitingConflict')
+  await openQueue(h)
   await h.run(()=>button(h,'处理冲突').props.onClick())
   await key(h,'Enter')
   const answer=b.calls.find(c=>c[0]==='resolve')
@@ -112,6 +118,7 @@ test('recovery exposes only server actions and passes opaque ID rather than back
   const h=await mountApp(t,{...b.api,listOperationRecoveries:async()=>recoveries,recoverOperation:async(...args)=>{b.calls.push(['recover',...args]);return{...b.jobs.get('j1'),jobId:'recover1',requestId:args[2],kind:'recovery',state:'queued',revision:1,outcomeCount:0}}})
   await h.run(()=>h.panes[0].props.onDropTransfer('/dest',['/src/a'],'copy'))
   await b.emit(h,'j1',{state:'failed',phase:'finished'})
+  await openQueue(h)
   await h.run(()=>button(h,'恢复受保护的原文件').props.onClick())
   const call=b.calls.find(c=>c[0]==='recover')
   assert.equal(call[1],'safe1');assert.equal(call[2],'restoreBackup')
@@ -187,6 +194,7 @@ test('queue byte progress preserves decimal u64 precision and unknown totals are
   await h.run(()=>h.panes[0].props.onDropTransfer('/dest',['/src/a'],'copy'))
   const j=b.jobs.get('j1')
   await b.emit(h,'j1',{state:'running',phase:'copying',progress:{...j.progress,bytesDone:'9007199254740993',bytesTotal:null}})
+  await openQueue(h)
   assert.equal(h.root.findByType('progress').props.value,undefined)
   await b.emit(h,'j1',{state:'cancelling',phase:'publishing',cancelability:'finishing',cancelRequested:true})
   const row=h.root.findByProps({'data-job-id':'j1'})
@@ -201,6 +209,7 @@ test('retrying an encrypted ZIP requires fresh password entry and never silently
   await h.run(()=>button(h,'压缩').props.onClick())
   assert.equal(b.requests[0].options.password,'original-secret')
   await b.emit(h,'j1',{state:'failed',phase:'finished'},[outcome({source:'/home/a',status:'failed',actualDestination:null,published:false,effectId:null,retry:'retryItem',affectedDirectories:[],error:{code:'zip',message:'archive failed',phase:'archiving'}})])
+  await openQueue(h)
   await h.run(()=>button(h,'重新压缩…').props.onClick())
   assert.equal(h.root.findByProps({type:'password'}).props.value,'')
   assert.equal(h.root.findByProps({type:'password'}).props.disabled,false)
@@ -219,6 +228,7 @@ test('retry of a retained partial cut reserves its current revision and completi
   ])
   const retained=h.clipboard.getClip()
   assert.deepEqual(retained.paths,['/src/b'])
+  await openQueue(h)
   await h.run(()=>button(h,'重试未完成项目').props.onClick())
   await key(h,'v',{metaKey:true})
   assert.equal(b.requests.length,2)
@@ -236,6 +246,7 @@ test('retrying an older partial cut does not associate or clear a newer cut with
   ])
   await h.run(()=>h.clipboard.setClip({mode:'cut',paths:['/src/b']}))
   const newer=h.clipboard.getClip()
+  await openQueue(h)
   await h.run(()=>button(h,'重试未完成项目').props.onClick())
   assert.equal(b.requests[1].clipRevision,null)
   await b.emit(h,'j2',{state:'completed',phase:'finished'},[outcome({itemId:'i1',source:'/src/b',sourceDisposition:'removed',effectId:'retry-b'})])
@@ -269,6 +280,7 @@ test('multi-page partial cut settlement preserves retry lineage and keeps clipId
   assert.deepEqual(retained.paths,['/src/file-200'])
   assert.equal(retained.clipId,initial.clipId)
   assert.notEqual(retained.revision,initial.revision)
+  await openQueue(h)
   await h.run(()=>button(h,'重试未完成项目').props.onClick())
   await key(h,'v',{metaKey:true})
   assert.equal(b.requests.length,2)
@@ -291,6 +303,7 @@ test('a cut retry stays reserved across an unknown reply and releases only on de
     if(definitive)throw{code:'admissionRejected',message:'invalid destination',phase:'preparing'}
     throw{code:'admissionUnknown',message:'reply unavailable',phase:'preparing'}
   }
+  await openQueue(h)
   await h.run(()=>button(h,'重试未完成项目').props.onClick())
   await key(h,'v',{metaKey:true})
   assert.equal(attempts.length,1)

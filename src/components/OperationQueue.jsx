@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { terminal } from '../operations/store.js'
 
 const operationNames = { copy: '拷贝', move: '移动', trash: '移到废纸篓', rename: '重命名', create: '新建', zip: '压缩', undo: '撤销', recovery: '恢复' }
@@ -74,25 +74,44 @@ function OperationJob({ job, client, onConflict, onRetry, run }) {
   )
 }
 
-export default function OperationQueue({ state, client, open, onToggle, onConflict, onUndo, onRetry, onError, reveal }) {
+export default function OperationQueue({ state, client, open, onToggle, onClose, notice, onConflict, onUndo, onRetry, onError, reveal }) {
   const [historyCount, setHistoryCount] = useState(20)
   const [recoveryCount, setRecoveryCount] = useState(20)
   const active = state.jobs.filter(job => !terminal(job.state))
+  const syncing = state.jobs.filter(job => terminal(job.state) && job.resultsPending)
+  const attention = state.jobs.filter(job => ['failed', 'partial', 'waitingConflict'].includes(job.state) || job.error || job.detailError)
+  const needsAttention = !!(attention.length || state.recoveries.length || state.pendingSubmissions.length || state.error || notice)
+  const wasBusy = useRef(state.busy)
+  useEffect(() => {
+    if (wasBusy.current && !state.busy && !needsAttention) onClose()
+    wasBusy.current = state.busy
+  }, [state.busy, needsAttention, onClose])
+  const summary = []
+  if (active.length) {
+    const waiting = active.filter(job => job.state === 'waitingConflict').length
+    const progress = active.length === 1 ? progressValue(active[0].progress) : undefined
+    summary.push(waiting ? `${waiting} 项等待处理` : `${active.length} 个进行中${progress == null ? '' : ` ${Math.floor(progress / 10)}%`}`)
+  }
+  if (syncing.length) summary.push(`${syncing.length} 项同步中`)
+  if (state.pendingSubmissions.length) summary.push(`${state.pendingSubmissions.length} 项提交待确认`)
+  if (state.error || notice) summary.push('操作异常')
+  else if (attention.length && !active.some(job => job.state === 'waitingConflict')) summary.push(`${attention.length} 项待处理`)
+  if (state.recoveries.length) summary.push(`${state.recoveries.length} 项待恢复`)
   const history = state.jobs.filter(job => terminal(job.state)).slice(-historyCount).reverse()
   const run = fn => Promise.resolve().then(fn).catch(onError)
   return (
     <div className="operations">
-      <button className={`operation-toggle${active.length ? ' active' : ''}`} onClick={onToggle} aria-expanded={open}>
-        文件操作{active.length ? ` · ${active.length} 个任务` : state.jobs.length ? ` · ${states[state.jobs.at(-1).state]}` : ''}
-        {state.recoveries.length ? ` · ${state.recoveries.length} 项待恢复` : ''}
+      <button className={`operation-toggle${state.busy ? ' active' : ''}${needsAttention ? ' attention' : ''}`}
+        onClick={onToggle} aria-expanded={open} aria-controls="operation-queue" title={open ? '收起任务详情' : '查看任务与历史'}>
+        任务{summary.length ? ` · ${summary.join(' · ')}` : ''}
       </button>
-      {open && <section className="operation-queue" aria-label="文件操作队列">
+      {open && <section id="operation-queue" className="operation-queue" aria-label="文件操作队列">
         <header>
           <b>文件操作</b>
           <button className="btn" disabled={state.busy || !state.latestUndoId}
             title={state.busy ? '当前任务结束后可撤销' : '撤销最近一次文件操作 (⌘Z)'} onClick={onUndo}>撤销</button>
           <button className="btn" onClick={() => run(() => client.resync())}>同步</button>
-          <button className="btn" onClick={onToggle} aria-label="收起文件操作">收起</button>
+          <button className="btn" onClick={onClose} aria-label="收起文件操作">收起</button>
         </header>
         {state.busy && <p className="operation-note">当前任务结束后可撤销。取消会保留已经完成的文件。</p>}
         {state.error && <p role="alert" className="operation-error">{state.error}</p>}

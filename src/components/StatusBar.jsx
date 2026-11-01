@@ -3,7 +3,7 @@ import { api } from '../api'
 import { fmtSize } from '../format'
 import { listCountLabel } from '../dirLoad'
 
-export default function StatusBar({ path, stats }) {
+export default function StatusBar({ path, stats, children }) {
   const [free, setFree] = useState(null)
 
   useEffect(() => {
@@ -25,9 +25,10 @@ export default function StatusBar({ path, stats }) {
   return (
     <div className="statusbar">
       <span>{parts.join('，')}</span>
-      <span>
-        {free != null ? `可用空间 ${fmtSize(free)}` : ''}
-      </span>
+      <div className="statusbar-right">
+        <span>{free != null ? `可用空间 ${fmtSize(free)}` : ''}</span>
+        {children}
+      </div>
     </div>
   )
 }

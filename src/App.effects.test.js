@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mountApp, deferred } from './test/AppHarness.js'
 import { operationBoundary, outcome, key } from './test/OperationBoundary.js'
+const openQueue=async h=>{const toggle=h.root.findAllByType('button').find(n=>n.props['aria-expanded']!==undefined);if(!toggle.props['aria-expanded'])await h.run(()=>toggle.props.onClick())}
 import { manualClock } from './test/ManualClock.js'
 const id=pane=>pane.props.pane.tabs[pane.props.pane.active].id
 
@@ -86,6 +87,7 @@ test('undo unknown totals are explicit and private executor progress paths are o
   await key(h,'z',{metaKey:true})
   const undo=[...b.jobs.values()].find(job=>job.kind==='undo'),privatePath='/tmp/.bento-operation-owned/undo'
   await b.emit(h,undo.jobId,{state:'running',phase:'undoing',progress:{...undo.progress,itemsFinished:0,itemsTotal:null,currentPath:privatePath}})
+  await openQueue(h)
   const row=h.root.findByProps({'data-job-id':undo.jobId})
   const phase=row.findByProps({className:'operation-phase'}).children.join('')
   assert.ok(phase.includes('总数待确定'))
@@ -96,6 +98,7 @@ test('undo unknown totals are explicit and private executor progress paths are o
   await h.run(()=>h.panes[0].props.onDropTransfer('/dest',['/src/user'],'copy'))
   const ordinary=b.jobs.get('j2')
   await b.emit(h,'j2',{state:'running',phase:'copying',progress:{...ordinary.progress,currentPath:privatePath}})
+  await openQueue(h)
   assert.equal(h.root.findByProps({'data-job-id':'j2'}).findAllByProps({title:privatePath}).length,1)
 })
 
@@ -108,6 +111,7 @@ test('held create alias keeps Undo button and CmdZ blocked until settlement, wit
   b.setUndo('u1');hold=true
   await b.emit(h,'j1',{state:'completed',phase:'finished',undoId:'u1'},[outcome({source:null,actualDestination:'/home/new',affectedDirectories:['/home']})])
   const undoButton=()=>h.root.findAllByType('button').find(node=>node.children.join('')==='撤销')
+  await openQueue(h)
   const disabledWhilePending=undoButton().props.disabled
   await key(h,'z',{metaKey:true})
   assert.equal(disabledWhilePending,true)
@@ -115,6 +119,7 @@ test('held create alias keeps Undo button and CmdZ blocked until settlement, wit
   assert.equal(b.calls.some(call=>call[0]==='ack'),false)
   assert.equal(h.panes[0].props.renaming,null)
   await h.run(async()=>{gate.resolve();await new Promise(resolve=>setImmediate(resolve))})
+  await openQueue(h)
   assert.equal(undoButton().props.disabled,false)
   assert.equal(h.panes[0].props.renaming.path,'/home/new')
   await h.run(()=>h.panes[0].props.onRenameCancel())
