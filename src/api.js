@@ -1,10 +1,12 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core'
 import { LIST_BATCH } from './dirLoad.js'
+import { searchApi, demoSearch, searchRequestId } from './search/model.js'
 
 export const hasTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__
 
 export const api = hasTauri
   ? {
+      ...searchApi(invoke),
       listDir: (path, showHidden) => invoke('list_dir', { path, showHidden }),
       // 当前目录分批推送。onBatch 是 Tauri Channel；约 500 条一批，最后一批 done=true。
       listDirStream: (path, showHidden, requestId, sortKey, sortDir, onBatch) =>
@@ -44,8 +46,6 @@ export const api = hasTauri
       listTemplates: () => invoke('list_templates'),
       copyTemplateWithReceipt: (dir, template) => invoke('copy_template_with_receipt', { dir, template }),
       copyTemplate: async (dir, template) => (await invoke('copy_template_with_receipt', { dir, template })).path,
-      search: (query, scope, root, showHidden, roots, mode) =>
-        invoke('search', { query, scope, root: root || null, showHidden, roots: roots || [], mode: mode || 'name' }),
       copyFilesToClipboard: (paths) => invoke('copy_files_to_clipboard', { paths }),
       readTextPreview: (path, query, maxBytes) =>
         invoke('read_text_preview', { path, query, maxBytes: maxBytes || 262144 }),
@@ -483,34 +483,12 @@ function mockApi() {
     },
     quickLook: () => Promise.resolve(),
     updateQuickLook: () => Promise.resolve(),
-    search: (q, scope, root, showHidden, roots, mode) => {
-      if (mode === 'content') {
-        // 模拟内容命中：返回带行号与文本的结果（供两栏内容框验收）
-        return Promise.resolve(
-          Object.entries(TREE)
-            .flatMap(([dir, es]) => fillPath(dir, es))
-            .filter((e) => !e.is_dir && e.name.toLowerCase().includes((q || '').toLowerCase()))
-            .slice(0, 20)
-            .map((e, i) => ({
-              ...e,
-              dir: e.path.slice(0, e.path.length - e.name.length - 1),
-              btime_ms: e.mtime_ms,
-              lines: [
-                { no: 3 + (i % 5), text: `... 示例内容包含「${q}」的匹配行，用于预览高亮 ...` },
-                { no: 4 + (i % 5), text: `    another line mentioning ${q} inside the file body` },
-              ],
-              matches: 2 + (i % 3),
-            }))
-        )
-      }
-      return Promise.resolve(
-        Object.entries(TREE)
-          .flatMap(([dir, es]) => fillPath(dir, es))
-          .filter((e) => e.name.toLowerCase().includes((q || '').toLowerCase()))
-          .map((e) => ({ ...e, dir: e.path.slice(0, e.path.length - e.name.length - 1), btime_ms: e.mtime_ms }))
-          .slice(0, 100)
-      )
+    searchQuery: async (q, scope, root, showHidden, roots, mode, requestId, format = 'all') => {
+      if (scope === 'pane' && !TREE[root]) throw {code:'invalidRoot',message:`无法读取目录 ${root}`}
+      return demoSearch(Object.entries(TREE).flatMap(([dir, es]) => fillPath(dir, es)), q, scope, root, showHidden, roots, mode, format)
     },
+    cancelSearch: async () => {},
+    search: async (...args) => (await mock.searchQuery(...args, searchRequestId())).items,
     fsearchStatus: () => Promise.resolve({ ready: true, entries: 0, full_disk_access: true }),
     dirActivity: (paths) =>
       Promise.resolve(paths.map((p) => ({ path: p, mtime_ms: Date.now() - Math.random() * 1e8 }))),
