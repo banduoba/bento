@@ -10,7 +10,8 @@ use objc2::{
 };
 use objc2_app_kit::NSWorkspace;
 use objc2_core_services::{
-    kAECanInteract, kAEWaitReply, kNoTimeOut, typeNull, AEDesc, AEDisposeDesc, AESendMessage,
+    kAEAlwaysInteract, kAECanSwitchLayer, kAEWaitReply, kNoTimeOut, typeNull, AEDesc, AEDisposeDesc,
+    AESendMessage,
 };
 use objc2_foundation::{
     NSAppleEventDescriptor as Descriptor, NSArray, NSDictionary, NSError, NSFileManager, NSString,
@@ -24,6 +25,10 @@ const DIRECT: u32 = u32::from_be_bytes(*b"----");
 const INSERT_HERE: u32 = u32::from_be_bytes(*b"insh");
 const FILE_URL: u32 = u32::from_be_bytes(*b"furl");
 const LIST: u32 = u32::from_be_bytes(*b"list");
+// AEDataModel.h: request interaction where appropriate, and permit Finder to
+// come forward for it. CanInteract alone only says the receiver may try.
+// Finder still decides which UI its scripting command supports.
+const FINDER_SEND_MODE: i32 = (kAEWaitReply | kAEAlwaysInteract | kAECanSwitchLayer) as i32;
 
 #[derive(Default, Debug)]
 struct Completion {
@@ -214,7 +219,7 @@ fn send(event: &Descriptor) -> Result<Retained<Descriptor>, Completion> {
         AESendMessage(
             event.aeDesc(),
             &mut reply.0,
-            (kAEWaitReply | kAECanInteract) as i32,
+            FINDER_SEND_MODE,
             kNoTimeOut as _,
         )
     };
@@ -539,6 +544,19 @@ pub(super) fn restore(moves: &[RestoreMove]) -> Vec<TransferItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finder_send_allows_foreground_interaction_and_waits_for_completion() {
+        use objc2_core_services::{kAECanInteract, kAENeverInteract};
+
+        // Interaction is an enum field, not independent flags. Request appropriate
+        // interaction as well as permission to bring Finder forward for it.
+        let interaction_mask = (kAENeverInteract | kAECanInteract) as i32;
+        assert_eq!(FINDER_SEND_MODE & interaction_mask, kAEAlwaysInteract as i32);
+        assert_ne!(FINDER_SEND_MODE & kAECanSwitchLayer as i32, 0);
+        // A queued/no-reply send would lose exact completion and Undo receipts.
+        assert_eq!(FINDER_SEND_MODE & 0x3, kAEWaitReply as i32);
+    }
 
     #[test]
     fn owned_reply_adopts_a_descriptor_without_borrowing_the_original_storage() {
