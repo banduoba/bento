@@ -119,13 +119,13 @@ function FolderBranch({ id, tree, branches, parent = null, leaf = false, depth =
       <FavItem {...row} depth={depth} expandable={!leaf} expanded={!!node} onToggle={toggle} />
       {limited && <div className="sb-tree-note" role="status">
         已展开 64 个文件夹，请先收起部分分支。
-        <button onClick={() => row.onOpen(row.path)}>在文件夹中查看全部</button>
+        <button onKeyDown={(e) => e.stopPropagation()} onClick={() => row.onOpen(row.path)}>在文件夹中查看全部</button>
       </div>}
       {node && <div className="sb-tree-children">
         {node.status === 'loading' && <div className="sb-tree-note" role="status">正在加载 {row.label}…</div>}
         {node.status === 'error' && <div className="sb-tree-note" role="status">
           {row.label}：{node.error}
-          <button onClick={() => tree.retry(id)}>重试</button>
+          <button onKeyDown={(e) => e.stopPropagation()} onClick={() => tree.retry(id)}>重试</button>
         </div>}
         {node.entries.map(entry => <FolderBranch
           key={entry.path}
@@ -150,7 +150,7 @@ function FolderBranch({ id, tree, branches, parent = null, leaf = false, depth =
         {node.status === 'ready' && node.entries.length === 0 && !node.truncated && <div className="sb-tree-note">没有子文件夹</div>}
         {node.truncated && <div className="sb-tree-note" role="status">
           此层文件夹较多，仅显示部分。
-          <button onClick={() => row.onOpen(row.path)}>在文件夹中查看全部</button>
+          <button onKeyDown={(e) => e.stopPropagation()} onClick={() => row.onOpen(row.path)}>在文件夹中查看全部</button>
         </div>}
       </div>}
     </>

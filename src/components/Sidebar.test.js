@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mountSidebar, event } from '../test/SidebarHarness.js'
+import { mountSidebar, event, createAppShortcutBoundary } from '../test/SidebarHarness.js'
 const e = (name, path = `/home/${name}`, is_symlink = false) => ({ name, path, is_symlink })
 test('initial collapse, disclosure and text navigation isolate mouse/keyboard while root callbacks survive', async t => {
   const h = await mountSidebar(t); assert.equal(h.requests.length, 0)
@@ -56,4 +56,57 @@ test('expanded branch budget shows direct navigation and workspace rename keeps 
   await h.run(() => input.props.onKeyDown(key)); assert.equal(key.stopped, true)
   await h.run(() => h.disclosure('收起 主目录').props.onClick(event()))
   await h.run(() => h.disclosure('展开 d63').props.onClick(event())); assert.ok(h.disclosure('收起 d63'))
+})
+
+
+test('real App boundary would rename/preview a selected file when Enter/Space is unguarded', () => {
+  const app = createAppShortcutBoundary()
+  for (const key of ['Enter', ' ']) {
+    const event = new Event('keydown', { cancelable: true })
+    Object.defineProperty(event, 'key', { value: key })
+    app.handle(event)
+    assert.equal(event.defaultPrevented, true)
+  }
+  assert.deepEqual(app.actions, [
+    ['rename', 'pane-tab', '/pane/selected.txt', 'selected.txt'],
+    ['preview', 'pane-tab', '/pane', '/pane/selected.txt', ['/pane/selected.txt']],
+  ])
+})
+
+test('Retry Enter/Space stays ahead of App file shortcuts and preserves button default activation', async t => {
+  const h = await mountSidebar(t), app = createAppShortcutBoundary()
+  await h.run(() => h.disclosure('展开 主目录').props.onClick(event()))
+  await h.reject(0, 'denied')
+  for (const [i, key] of ['Enter', ' '].entries()) {
+    const button = h.root.findAllByType('button').find(b => b.children.join('') === '重试')
+    const keydown = await h.buttonKey(button, key, app)
+    assert.equal(keydown.defaultPrevented, false, 'native activation remains available')
+    assert.deepEqual(app.actions, [], 'underlying pane file was not renamed or previewed')
+    assert.equal(h.requests.length, i + 2, 'uncancelled activation retries this branch')
+    await h.reject(i + 1, 'denied')
+  }
+})
+
+test('truncated full-folder Enter/Space opens the folder without reaching App selected-file actions', async t => {
+  const h = await mountSidebar(t), app = createAppShortcutBoundary()
+  await h.run(() => h.disclosure('展开 主目录').props.onClick(event())); await h.resolve(0, [], true)
+  for (const key of ['Enter', ' ']) {
+    const button = h.root.findAllByType('button').find(b => b.children.join('') === '在文件夹中查看全部')
+    assert.equal((await h.buttonKey(button, key, app)).defaultPrevented, false)
+    assert.deepEqual(app.actions, [])
+  }
+  assert.deepEqual(h.opens, ['/home', '/home'])
+})
+
+test('open-limit full-folder Enter/Space opens the limited folder without invoking App file actions', async t => {
+  const favorites = Array.from({ length: 64 }, (_, n) => ({ name: `d${n}`, path: `/d${n}` }))
+  const h = await mountSidebar(t, { favorites }), app = createAppShortcutBoundary()
+  await h.run(() => h.disclosure('展开 主目录').props.onClick(event()))
+  for (let n = 0; n < 64; n++) await h.run(() => h.disclosure(`展开 d${n}`).props.onClick(event()))
+  for (const key of ['Enter', ' ']) {
+    const button = h.root.findAllByType('button').find(b => b.children.join('') === '在文件夹中查看全部')
+    assert.equal((await h.buttonKey(button, key, app)).defaultPrevented, false)
+    assert.deepEqual(app.actions, [])
+  }
+  assert.deepEqual(h.opens, ['/d63', '/d63'])
 })
