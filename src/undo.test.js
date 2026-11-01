@@ -1,136 +1,85 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { parentPath } from './format.js'
-import { directoryKey } from './paneFeedback.js'
+import { mountApp, key } from './test/AppHarness.js'
+const identity={dev:'12',ino:'9876543210987654321'}
+const moved=(source,dest,extra={})=>({source,dest,ok:true,error:null,identity,...extra})
+const drop=(h,resultsMode='move')=>h.run(()=>h.panes[1].props.onDropTransfer('/dst',['/src/a'],resultsMode))
 
-// Execute the App's actual operation callbacks against the IPC boundary.
-// This catches a wiring regression even if a standalone undo helper stays correct.
-function harness(api) {
-  const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
-  const callbacks = source.slice(source.indexOf('  const reportErrors ='), source.indexOf('  // 描述一组条目'))
-  const stack = { current: [] }, toasts = [], alerts = [], invalidated = []
-  const noop = () => {}
-  const build = new Function('api', 'undoStackRef', 'setUndoToast', 'alert', 'refresh', 'basename', 'setTimeout', 'clearTimeout', 'window', 'CustomEvent', 'modeRef', 'setSel', 'getClip', 'setClip', 'retainCut', 'toastTimer', 'rowToastTimer', 'setRowToast', 'cfgRef', 'visibleCount', 'activeTabOf', 'focusIdx', 'directoryKeyFor', 'parentPath', 'refreshDirectories', `${callbacks}; return { moveInto, transferInto, undoLast, doTrash }`)
-  const actions = build(api, stack, t => toasts.push(t), e => alerts.push(e), noop, p => p.slice(p.lastIndexOf('/') + 1), noop, noop, { dispatchEvent: noop }, class {}, { current: null }, noop, () => null, noop, noop, {}, {}, noop, { current: { panes: [] } }, 2, noop, 0, directoryKey, parentPath, paths => invalidated.push(...paths))
-  return { ...actions, stack, toasts, alerts, invalidated }
+test('file Undo restores exact collision-renamed paths with actual source identity and no success UI',async t=>{
+  const restores=[],h=await mountApp(t,{transfer:async()=>[moved('/src/a','/dst/a copy')],restoreMoves:async moves=>{restores.push(moves);return moves.map(m=>({...m,ok:true,error:null}))}})
+  await drop(h);await key(h,'z',{metaKey:true})
+  assert.deepEqual(restores,[[{source:'/dst/a copy',dest:'/src/a',identity}]])
+  assert.deepEqual(h.alerts,[]);assert.equal(h.root.findAll(n=>n.props.className==='undo-toast').length,0)
+  await key(h,'z',{metaKey:true});assert.equal(restores.length,1)
+})
+
+test('copy Undo trashes only identified actual destinations using guarded expected receipts',async t=>{
+  const trash=[],h=await mountApp(t,{transfer:async()=>[moved('/src/a','/dst/a 2')],trash:async(paths,expected)=>{trash.push([paths,expected]);return{entries:[{original:paths[0],trashed:'/Trash/a 2',identity}],error:null,cancelled:false}}})
+  await drop(h,'copy');await key(h,'z',{metaKey:true})
+  assert.deepEqual(trash,[[['/dst/a 2'],[{path:'/dst/a 2',...identity}]]]);assert.deepEqual(h.alerts,[])
+})
+
+for(const unknown of ['missing-destination','missing-identity','error','rejected']) {
+  test(`unknown native effects (${unknown}) block older unrelated file Undo`,async t=>{
+    let calls=0;const restores=[],h=await mountApp(t,{transfer:async()=>{
+      if(++calls===1)return[moved('/src/a','/dst/a')]
+      if(unknown==='rejected')throw Error('reply unavailable')
+      if(unknown==='error')return[{source:'/new/b',dest:'',ok:false,error:'partial native failure'}]
+      return[moved('/new/b',unknown==='missing-destination'?'':'/dst/b',{identity:unknown==='missing-identity'?undefined:identity})]
+    },restoreMoves:async m=>{restores.push(m);return[]}})
+    await drop(h);await drop(h);await key(h,'z',{metaKey:true});assert.deepEqual(restores,[])
+  })
 }
 
-test('App undo restores complete original pathname after collision, in reverse order', async () => {
-  const calls = []
-  const moved = [{ source: '/note.txt', dest: '/dest/note copy.txt', ok: true }, { source: '/src/b', dest: '/dest/b', ok: true }]
-  const api = { moveItems: async (sources, dest) => { calls.push({ sources, dest }); return moved }, restoreMoves: async moves => { calls.push(moves); return moves.map(m => ({ ...m, ok: true })) } }
-  const app = harness(api)
-  await app.moveInto('/dest', ['/note.txt', '/src/b'])
-  assert.deepEqual(app.alerts, [])
-  app.invalidated.length = 0
-  await app.undoLast()
-  assert.deepEqual(new Set(app.invalidated), new Set(['/', '/src', '/dest']))
-  assert.deepEqual(calls[1], [{ source: '/dest/b', dest: '/src/b' }, { source: '/dest/note copy.txt', dest: '/note.txt' }])
-  assert.equal(app.stack.current.length, 0)
-  assert.equal(app.toasts.at(-1).undone, true)
+test('partial Trash preserves known receipts, clears only completed selection and surfaces the real error',async t=>{
+  const restores=[],h=await mountApp(t,{trash:async()=>({entries:[{original:'/home/a',trashed:'/Trash/a renamed',identity}],error:'b: denied',cancelled:false}),restoreMoves:async m=>{restores.push(m);return m.map(x=>({...x,ok:true,error:null}))}})
+  const id=h.panes[0].props.pane.tabs[0].id
+  await h.run(()=>h.panes[0].props.onSelect(id,new Set(['/home/a','/home/b'])))
+  await key(h,'Backspace',{metaKey:true})
+  assert.deepEqual([...h.panes[0].props.selection],['/home/b']);assert.deepEqual(h.alerts,['b: denied'])
+  await key(h,'z',{metaKey:true});assert.deepEqual(restores,[[{source:'/Trash/a renamed',dest:'/home/a',identity}]])
 })
 
-test('App partial undo retains only failed items for retry and never shows full success', async () => {
-  const moved = [{ source: '/src/a', dest: '/dst/a', ok: true }, { source: '/src/b', dest: '/dst/b', ok: true }]
-  const calls = []
-  const api = { moveItems: async () => moved, restoreMoves: async moves => { calls.push(moves); return moves.map(m => ({ ...m, ok: m.source.endsWith('/b') || calls.length > 1, error: 'occupied' })) } }
-  const app = harness(api)
-  await app.moveInto('/dst', moved.map(m => m.source))
-  app.invalidated.length = 0
-  await app.undoLast()
-  assert.equal(app.stack.current.length, 1)
-  assert.notEqual(app.toasts.at(-1)?.undone, true)
-  assert.equal(app.alerts.length, 1)
-  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
-  assert.deepEqual(app.stack.current[0].directories, ['/src', '/dst'])
-  app.invalidated.length = 0
-  await app.undoLast()
-  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
-  assert.deepEqual(calls[1], [{ source: '/dst/a', dest: '/src/a' }])
-  assert.equal(app.stack.current.length, 0)
+test('cancelled Trash stays quiet and preserves the untouched selection',async t=>{
+  const h=await mountApp(t,{trash:async()=>({entries:[],error:null,cancelled:true})})
+  const id=h.panes[0].props.pane.tabs[0].id;await h.run(()=>h.panes[0].props.onSelect(id,new Set(['/home/a'])))
+  await key(h,'Backspace',{metaKey:true});assert.deepEqual([...h.panes[0].props.selection],['/home/a']);assert.deepEqual(h.alerts,[])
 })
 
-test('App rejected undo remains retryable; overlapping undo executes once', async () => {
-  let release
-  let attempts = 0
-  const api = { moveItems: async () => [{ source: '/src/a', dest: '/dst/a', ok: true }], restoreMoves: async () => { attempts++; return new Promise((_, reject) => { release = () => reject(new Error('IPC failed')) }) } }
-  const app = harness(api)
-  await app.moveInto('/dst', ['/src/a'])
-  app.invalidated.length = 0
-  const pending = app.undoLast()
-  await app.undoLast()
-  // Legacy implementation never calls restoreMoves; report an assertion, never hang.
-  assert.equal(attempts, 1)
-  release(); await pending
-  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
-  assert.equal(app.stack.current.length, 1)
-  assert.notEqual(app.toasts.at(-1)?.undone, true)
+test('file Undo waits while a native operation has not replied',async t=>{
+  let resolve,calls=0;const restores=[]
+  const h=await mountApp(t,{transfer:async()=>++calls===1?[moved('/src/a','/dst/a')]:new Promise(r=>{resolve=r}),restoreMoves:async m=>{restores.push(m);return m.map(x=>({...x,ok:true,error:null}))}})
+  await drop(h);let pending;await h.run(()=>{pending=h.panes[1].props.onDropTransfer('/dst',['/src/b'],'move')})
+  await key(h,'z',{metaKey:true});assert.deepEqual(restores,[])
+  await h.run(async()=>{resolve([{source:'/src/b',dest:'',ok:false,error:null,cancelled:true}]);await pending})
+  await key(h,'z',{metaKey:true});assert.deepEqual(restores,[])
 })
 
-test('legacy transfer move undo also restores exact paths and retains item failures', async () => {
-  const moved = [{ source: '/src/original', dest: '/dst/original copy', ok: true }]
-  const app = harness({ transfer: async () => moved, restoreMoves: async () => [{ source: '/dst/original copy', dest: '/src/original', ok: false, error: 'missing source' }] })
-  await app.transferInto('/dst', ['/src/original'], 'move')
-  await app.undoLast()
-  assert.equal(app.stack.current.length, 1)
-  assert.notEqual(app.toasts.at(-1)?.undone, true)
+test('explicit partial Undo retries only identity-guarded unfinished items and overlapping CmdZ runs once',async t=>{
+  const restores=[];let release
+  const h=await mountApp(t,{transfer:async()=>[moved('/src/a','/dst/a'),moved('/src/b','/dst/b')],restoreMoves:async m=>{
+    restores.push(m)
+    if(restores.length===1)return new Promise(r=>{release=()=>r([{...m[0],ok:true,error:null},{...m[1],ok:false,error:'occupied'}])})
+    return m.map(x=>({...x,ok:true,error:null}))
+  }})
+  await h.run(()=>h.panes[1].props.onDropTransfer('/dst',['/src/a','/src/b'],'move'))
+  await key(h,'z',{metaKey:true});await key(h,'z',{metaKey:true});assert.equal(restores.length,1)
+  await h.run(()=>release());assert.equal(h.alerts.length,1)
+  await key(h,'z',{metaKey:true})
+  assert.deepEqual(restores[1],[{source:'/dst/a',dest:'/src/a',identity}])
+  await key(h,'z',{metaKey:true});assert.equal(restores.length,2)
 })
 
-test('missing undo outcomes retain retry data and cannot count as success', async () => {
-  const app = harness({ moveItems: async () => [{ source: '/src/a', dest: '/dst/a', ok: true }], restoreMoves: async () => [] })
-  await app.moveInto('/dst', ['/src/a'])
-  await app.undoLast()
-  assert.equal(app.stack.current.length, 1)
-  assert.notEqual(app.toasts.at(-1)?.undone, true)
+test('cancelled native Undo is quiet and leaves guarded items for an explicit subsequent CmdZ',async t=>{
+  let calls=0
+  const h=await mountApp(t,{transfer:async()=>[moved('/src/a','/dst/a')],restoreMoves:async m=>{calls++;return m.map(x=>({...x,ok:false,error:null,cancelled:true}))}})
+  await drop(h);await key(h,'z',{metaKey:true});assert.equal(calls,1);assert.deepEqual(h.alerts,[])
+  await key(h,'z',{metaKey:true});assert.equal(calls,2);assert.deepEqual(h.alerts,[])
 })
 
-test('copy undo retains failed trash items without deleting successful items twice', async () => {
-  const calls = [], removed = new Set()
-  let failed = false
-  const app = harness({
-    transfer: async () => [{ source: '/src/a', dest: '/dst/a', ok: true }, { source: '/src/b', dest: '/dst/b', ok: true }],
-    trash: async ([path]) => {
-      calls.push(path)
-      if (path === '/dst/a' && !failed) { failed = true; throw new Error('read only') }
-      assert.equal(removed.has(path), false)
-      removed.add(path)
-    },
-  })
-  // A DOM row is unnecessary for these undo checks; skip toast rendering.
-  globalThis.document = { querySelectorAll: () => [] }
-  try {
-    await app.transferInto('/dst', ['/src/a', '/src/b'], 'copy')
-    await app.undoLast()
-    assert.equal(app.stack.current.length, 1)
-    await app.undoLast()
-    assert.deepEqual(calls, ['/dst/b', '/dst/a', '/dst/a'])
-    assert.equal(app.stack.current.length, 0)
-  } finally { delete globalThis.document }
-})
-
-test('Trash undo restores the full original name and invalidates both original and Trash directories', async () => {
-  const restores = []
-  const app = harness({
-    trash: async () => [{ original: '/note.txt', trashed: '/Trash/note collision.txt' }],
-    restoreMoves: async moves => { restores.push(moves); return moves.map(move => ({ ...move, ok: true })) },
-  })
-  app.doTrash('a', ['/note.txt'])
-  await new Promise(resolve => setImmediate(resolve))
-  assert.deepEqual(app.alerts, [])
-  assert.equal(app.stack.current.length, 1)
-  app.invalidated.length = 0
-  await app.undoLast()
-  assert.deepEqual(restores, [[{ source: '/Trash/note collision.txt', dest: '/note.txt' }]])
-  assert.deepEqual(new Set(app.invalidated), new Set(['/', '/Trash']))
-  assert.equal(app.stack.current.length, 0)
-})
-
-test('cut move refreshes published partial failures without registering undo or success', async () => {
-  const app = harness({ moveItems: async () => [{ source: '/src/a', dest: '/dst/a', ok: false, error: 'source removal failed', affectedDirectories: ['/src', '/dst'] }] })
-  await app.moveInto('/dst', ['/src/a'])
-  assert.deepEqual(new Set(app.invalidated), new Set(['/src', '/dst']))
-  assert.equal(app.stack.current.length, 0)
-  assert.equal(app.toasts.length, 0)
-  assert.equal(app.alerts.length, 1)
+test('native Trash cancellation text is not surfaced as an application error',async t=>{
+  const h=await mountApp(t,{trash:async()=>({entries:[],error:'The user canceled the operation.',cancelled:true})})
+  const id=h.panes[0].props.pane.tabs[0].id
+  await h.run(()=>h.panes[0].props.onSelect(id,new Set(['/home/a'])))
+  await key(h,'Backspace',{metaKey:true});assert.deepEqual(h.alerts,[])
 })

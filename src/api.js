@@ -20,7 +20,7 @@ export const api = hasTauri
       transfer: (sources, dest, mode) => invoke('transfer', { sources, dest, mode }),
       moveItems: (sources, dest) => invoke('move_items', { sources, dest }),
       restoreMoves: (moves) => invoke('restore_moves', { moves }),
-      trash: (paths) => invoke('trash', { paths }),
+      trash: (paths, expected) => invoke('trash', { paths, expected: expected || null }),
       makeDir: (path) => invoke('make_dir', { path }),
       rename: (oldPath, newName) => invoke('rename', { oldPath, newName }),
       openPath: (path) => invoke('open_path', { path }),
@@ -61,8 +61,11 @@ export const api = hasTauri
 // 浏览器直开（无 Tauri）时的假后端：用于 UI 自动化测试
 function mockApi() {
   const now = Date.now()
+  let nextInode = 1
+  const newIdentity = () => ({ dev: '1', ino: String(nextInode++) })
   const E = (name, isDir, size = 0) => ({
     name,
+    identity: newIdentity(),
     path: '',
     is_dir: isDir,
     size: isDir ? 0 : size,
@@ -272,7 +275,7 @@ function mockApi() {
         continue
       }
       if (parent === dest) {
-        results.push({ source: p, dest: p, ok: true, error: null })
+        results.push({ source: p, dest: p, ok: true, error: null, identity: entry.identity })
         continue
       }
       if (dest === p || dest.startsWith(`${p}/`)) {
@@ -290,7 +293,7 @@ function mockApi() {
       TREE[parent] = list.filter((e) => e.name !== name)
       ;(TREE[dest] = TREE[dest] || []).push({ ...entry, name: n })
       if (entry.is_dir) rekeyMockTree(p, `${dest}/${n}`)
-      results.push({ source: p, dest: `${dest}/${n}`, ok: true, error: null })
+      results.push({ source: p, dest: `${dest}/${n}`, ok: true, error: null, identity: entry.identity })
     }
     return Promise.resolve(results)
   }
@@ -336,12 +339,13 @@ function mockApi() {
       cancelledStreams.add(requestId)
       return Promise.resolve()
     },
-    restoreMoves: (moves) => Promise.resolve(moves.map(({ source, dest }) => {
+    restoreMoves: (moves) => Promise.resolve(moves.map(({ source, dest, identity }) => {
       const split = (p) => { const i = p.lastIndexOf('/'); return [i <= 0 ? '/' : p.slice(0, i), p.slice(i + 1)] }
       const [from, name] = split(source), [to, restoredName] = split(dest)
       const entry = TREE[from]?.find((e) => e.name === name)
       const fail = (error) => ({ source, dest, ok: false, error })
       if (!entry) return fail('源不存在')
+      if (identity && (entry.identity?.dev !== identity.dev || entry.identity?.ino !== identity.ino)) return fail('项目已被替换')
       if (source === dest) return { source, dest, ok: true, error: null }
       if (!TREE[to]) return fail('目标不是文件夹')
       if (TREE[to].some((e) => e.name === restoredName)) return fail('原路径已被占用')
@@ -353,35 +357,49 @@ function mockApi() {
     })),
     moveItems: (sources, dest) => mockMoveItems(sources, dest),
     transfer: (sources, dest, mode) => {
-      for (const p of sources) {
-        const parent = p.slice(0, p.lastIndexOf('/'))
-        const name = p.slice(p.lastIndexOf('/') + 1)
-        const entry = (TREE[parent] || []).find((e) => e.name === name)
-        if (!entry) continue
-        if (mode === 'move') {
-          TREE[parent] = TREE[parent].filter((e) => e.name !== name)
-          ;(TREE[dest] = TREE[dest] || []).push(entry)
-        } else {
-          const list = (TREE[dest] = TREE[dest] || [])
-          let n = name
-          let i = 2
-          const dot = name.lastIndexOf('.')
-          while (list.some((e) => e.name === n)) {
-            n = dot > 0 ? `${name.slice(0, dot)} ${i++}${name.slice(dot)}` : `${name} ${i++}`
+      if (mode === 'move') return mockMoveItems(sources, dest)
+      if (!TREE[dest]) return Promise.reject(`目标不是文件夹: ${dest}`)
+      return Promise.resolve(sources.map(source => {
+        const slash = source.lastIndexOf('/')
+        const parent = slash <= 0 ? '/' : source.slice(0, slash)
+        const name = source.slice(slash + 1)
+        const entry = TREE[parent]?.find(e => e.name === name)
+        if (!entry) return { source, dest: '', ok: false, error: '源不存在' }
+        if (dest === source || dest.startsWith(`${source}/`)) return { source, dest: '', ok: false, error: '不能拷贝到自身内部' }
+        const copiedName = uniqueName(TREE[dest], name)
+        const actual = `${dest}/${copiedName}`
+        const identity = newIdentity()
+        TREE[dest].push({ ...entry, name: copiedName, identity })
+        if (entry.is_dir) {
+          for (const dir of Object.keys(TREE).filter(p => p === source || p.startsWith(`${source}/`))) {
+            TREE[actual + dir.slice(source.length)] = TREE[dir].map(e => ({ ...e, identity: newIdentity() }))
           }
-          list.push({ ...entry, name: n, path: `${dest}/${n}` })
         }
-      }
-      return Promise.resolve(
-        sources.map((p) => ({ source: p, dest: `${dest}/${p.slice(p.lastIndexOf('/') + 1)}`, ok: true }))
-      )
+        return { source, dest: actual, ok: true, error: null, identity }
+      }))
     },
-    trash: (paths) => {
-      for (const p of paths || []) {
-        const parent = p.slice(0, p.lastIndexOf('/'))
-        if (TREE[parent]) TREE[parent] = TREE[parent].filter((e) => `${parent}/${e.name}` !== p)
+    trash: (paths, expected) => {
+      const entries = [], errors = []
+      const trashDir = '/.mock-system-trash'
+      TREE[trashDir] ||= []
+      for (const original of paths || []) {
+        const slash = original.lastIndexOf('/')
+        const parent = slash <= 0 ? '/' : original.slice(0, slash)
+        const name = original.slice(slash + 1)
+        const entry = TREE[parent]?.find(e => e.name === name)
+        const guard = expected?.find(e => e.path === original)
+        if (!entry) { errors.push(`${name}: 源不存在`); continue }
+        if (expected && (!guard || guard.dev !== entry.identity?.dev || guard.ino !== entry.identity?.ino)) {
+          errors.push(`${name}: 项目已被替换`); continue
+        }
+        const trashedName = uniqueName(TREE[trashDir], name)
+        const trashed = `${trashDir}/${trashedName}`
+        TREE[parent] = TREE[parent].filter(e => e !== entry)
+        TREE[trashDir].push({ ...entry, name: trashedName })
+        if (entry.is_dir) rekeyMockTree(original, trashed)
+        entries.push({ original, trashed, identity: entry.identity })
       }
-      return Promise.resolve()
+      return Promise.resolve({ entries, error: errors.length ? errors.join('\n') : null, cancelled: false })
     },
     makeDir: (dir) => {
       const list = (TREE[dir] = TREE[dir] || [])

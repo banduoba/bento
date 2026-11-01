@@ -42,7 +42,6 @@ export default function Pane({
   tick,
   directoryVersions = {},
   directoryKeyFor,
-  operationToast,
   cutSet,
   editPathSignal,
   flash,
@@ -569,17 +568,6 @@ export default function Pane({
       live = false
     }
   }, [entries, tick, loadProgress])
-
-  const [operationToastPosition, setOperationToastPosition] = useState(null)
-  useLayoutEffect(() => {
-    if (!operationToast || !paneElRef.current) { setOperationToastPosition(null); return }
-    const pane = paneElRef.current
-    const candidates = [...pane.querySelectorAll('.row[data-path]')]
-    const row = operationToast.paths?.map(path => candidates.find(el => el.dataset.path === path)).find(Boolean)
-    const rect = pane.getBoundingClientRect()
-    const pos = paneToastPosition(rect, row?.getBoundingClientRect())
-    setOperationToastPosition({ left: pos.x - rect.left, top: pos.y - rect.top, maxWidth: pos.maxWidth })
-  }, [operationToast, rows, paneW])
 
   // 搜索定位：行就绪后选中目标并滚动到可见处
   useEffect(() => {
@@ -1145,6 +1133,7 @@ export default function Pane({
       style={{ gridArea: area, '--list-row-height': `${LIST_ROW_HEIGHT}px` }}
       data-tab-id={tab.id}
       className={`pane${focused ? ' focused' : ''}${flash ? ' flash' : ''}${dropTarget === 'bg' ? ' drop-hover' : ''}`}
+      onFocusCapture={() => onFocus(index)}
       onMouseDown={() => onFocus(index)}
       onContextMenu={(e) => {
         e.preventDefault()
@@ -1589,14 +1578,6 @@ export default function Pane({
           <div className="copy-toast" style={{ left: copyToast.x, top: copyToast.y, maxWidth: copyToast.maxWidth }} title={copyToast.path}>
             <IconCheck size={13} />
             <span className="copy-toast-text">已复制：{copyToast.path}</span>
-          </div>
-        </div>
-      )}
-      {operationToast && operationToastPosition && (
-        <div className="pane-feedback">
-          <div className="copy-toast row-toast" style={operationToastPosition}>
-            <IconCheck size={13} />
-            <span className="copy-toast-text">{operationToast.text}</span>
           </div>
         </div>
       )}
