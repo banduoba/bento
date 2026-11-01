@@ -166,10 +166,7 @@ export default function SettingsDialog({
                             {fda ? '已授予' : fda === false ? '未授予' : '检查中'}
                           </span>
                         </div>
-                        <p>
-                          授予后：全局搜索覆盖资源库与其他用户目录；挂载卷上的文件可直接移入系统废纸篓（与
-                          Finder 一致）。未授予时，这些文件会移入 Bento 回收站（应用数据目录，可找回）。
-                        </p>
+                        <p>授权可让搜索访问资源库等受保护目录。移到废纸篓使用 macOS 系统操作，访问受限时会提示错误。</p>
                       </div>
                       <button className="btn small" onClick={() => api.openPrivacySettings().catch((e) => alert(String(e)))}>
                         打开系统设置
