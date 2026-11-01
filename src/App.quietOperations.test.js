@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mountApp, deferred } from './test/AppHarness.js'
-import { operationBoundary, outcome } from './test/OperationBoundary.js'
+import { operationBoundary, outcome, key } from './test/OperationBoundary.js'
 
 const trigger = h => h.root.findAllByType('button').find(n => n.props['aria-expanded'] !== undefined)
 const details = h => h.root.findAllByProps({ 'aria-label': '文件操作队列' })
@@ -328,4 +328,36 @@ test('recovery data starts in native collapsed details and remains separate from
   await h.run(() => button(h, '收起').props.onClick())
   await open(h)
   assert.equal(recovery().props.open, undefined, 'reopening starts with recovery details collapsed')
+})
+
+for (const pressed of [' ', 'Enter']) test(`recovery summary ${pressed === ' ' ? 'Space' : pressed} keeps its native default without invoking file shortcuts`, async t => {
+  const previews = [], h = await mountApp(t, {
+    listOperationRecoveries: async () => [{ recoveryId: 'r1', description: '原文件待恢复', actions: ['restoreBackup'] }],
+    quickLook: async (...args) => previews.push(args),
+  })
+  const tabId = h.panes[0].props.pane.tabs[0].id
+  await h.run(() => h.panes[0].props.onRowsCache(tabId, [{ path: '/home/a.txt', name: 'a.txt', is_dir: false }]))
+  await h.run(() => h.panes[0].props.onSelect(tabId, new Set(['/home/a.txt'])))
+  await open(h)
+  const summary = h.root.findByProps({ className: 'operation-recoveries' }).findByType('summary')
+  document.activeElement = { tagName: 'SUMMARY' }
+  const event = new Event('keydown', { cancelable: true, bubbles: true })
+  Object.assign(event, { key: pressed })
+  let stopped = false
+  const stop = event.stopPropagation.bind(event)
+  event.stopPropagation = () => { stopped = true; stop() }
+  await h.run(() => {
+    // The renderer has no DOM bubbling; deliver the real summary handler first,
+    // then the App's real window listener only when propagation remains enabled.
+    summary.props.onKeyDown?.(event)
+    if (!stopped) window.dispatchEvent(event)
+  })
+  assert.equal(previews.length, 0, 'disclosure keys must not open the selected file in Quick Look')
+  assert.equal(h.panes[0].props.renaming, null, 'Enter must not rename the selected file')
+  assert.equal(event.defaultPrevented, false, 'the browser must retain native disclosure activation')
+  document.activeElement = null
+  const fileSpace = await key(h, ' ')
+  assert.equal(fileSpace.defaultPrevented, true)
+  assert.equal(previews.length, 1, 'Space still opens Quick Look from the file list')
+  assert.equal(previews[0][0], '/home/a.txt')
 })

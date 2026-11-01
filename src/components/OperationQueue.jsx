@@ -152,7 +152,9 @@ export default function OperationQueue({ state, client, open, onToggle, onClose,
           {settled.length > historyCount &&
             <button className="btn" onClick={() => setHistoryCount(count => Math.min(count + 20, 256))}>显示更多历史</button>}
           {!!state.recoveries.length && <details className="operation-recoveries" aria-label="文件恢复记录">
-            <summary>上次未完成操作的恢复数据（{state.recoveries.length}）</summary>
+            <summary onKeyDown={event => {
+              if (event.key === ' ' || event.key === 'Enter') event.stopPropagation()
+            }}>上次未完成操作的恢复数据（{state.recoveries.length}）</summary>
             <p className="operation-note">这些是先前未完成操作保留的数据，不是日常成功历史。中断的任务不会自动继续，请检查保留的文件后选择操作。</p>
             {state.recoveries.slice(0, recoveryCount).map(record => <article key={record.recoveryId}>
               <b>{record.description}</b>
