@@ -1528,10 +1528,8 @@ export default function Pane({
                       >
                         <IconChevronRight size={12} />
                       </button>
-                    ) : (
-                      <span className="disclosure-spacer" style={entry.depth ? { marginLeft: entry.depth * 18 } : undefined} />
-                    )}
-                    <span className="fileicon">
+                    ) : null}
+                    <span className="fileicon" style={!entry.is_dir && entry.depth > 0 ? { marginLeft: entry.depth * 18 + 20 } : undefined}>
                       {entry.isPseudo ? null : (
                         <FileIcon path={entry.path} name={entry.name} isDir={entry.is_dir} ext={entry.ext} />
                       )}
