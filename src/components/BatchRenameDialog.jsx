@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 
 const MODES = [
@@ -101,7 +101,8 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const anyInvalid = results.some(invalidName)
   const valid = !hasDup && !anyInvalid && changed && !previewPending && !previewError
 
-  useEffect(() => {
+  // Native events must use the committed render before passive preview effects run.
+  useLayoutEffect(() => {
     const onKey = (e) => {
       e.stopPropagation()
       if (e.key === 'Escape' && !busy) onCancel()

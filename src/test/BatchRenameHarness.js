@@ -24,10 +24,17 @@ export async function mountBatch(t, items = [item('sample_1.txt'), item('sample_
   new Function('require', 'module', 'exports', bundle.outputFiles[0].text)(require, mod, mod.exports)
   const props = { items, onCancel() {}, onApply: async rows => applied.push(rows) }
   let renderer
+  let commitProbe
+  // A parent layout effect runs after the dialog commits, before passive effects.
+  // This exposes native event listeners that still retain the previous render.
+  function CommitProbe({ dialogProps }) {
+    React.useLayoutEffect(() => { commitProbe?.() })
+    return React.createElement(mod.exports.default, dialogProps)
+  }
   const oldError = console.error
   try {
     console.error = (...args) => { if (!String(args[0]).startsWith('react-test-renderer is deprecated.')) oldError(...args) }
-    await act(async () => { renderer = create(React.createElement(mod.exports.default, props)) })
+    await act(async () => { renderer = create(React.createElement(CommitProbe, { dialogProps: props })) })
   } finally { console.error = oldError }
   let mounted = true
   const unmount = async () => { if (mounted) { await act(async () => renderer.unmount()); mounted = false } }
@@ -45,7 +52,12 @@ export async function mountBatch(t, items = [item('sample_1.txt'), item('sample_
     click: async text => act(async () => button(text).props.onClick()),
     resolve: async (i, value) => act(async () => requests[i].resolve(value)),
     reject: async (i, value) => act(async () => requests[i].reject(value)),
-    update: async patch => { Object.assign(props, patch); await act(async () => renderer.update(React.createElement(mod.exports.default, props))) },
+    update: async (patch, duringCommit) => {
+      Object.assign(props, patch)
+      commitProbe = duringCommit
+      try { await act(async () => renderer.update(React.createElement(CommitProbe, { dialogProps: props }))) }
+      finally { commitProbe = null }
+    },
     enter: async () => { const e = new Event('keydown'); Object.defineProperty(e, 'key', { value: 'Enter' }); await act(async () => window.dispatchEvent(e)) },
   }
 }
