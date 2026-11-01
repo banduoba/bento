@@ -243,6 +243,12 @@ export default function SearchOverlay({
     onClose()
   }
 
+  const locate = (item) => {
+    if (!item) return
+    onLocate(item.dir, item.path)
+    onClose()
+  }
+
   // 搜索结果拖出应用到其他软件（原生拖拽）
   useEffect(() => {
     const onMove = (e) => {
@@ -283,7 +289,7 @@ export default function SearchOverlay({
       setSelIdx((i) => Math.max(i - 1, 0))
     } else if (e.key === 'Enter') {
       e.preventDefault()
-      if (query.trim()) choose(sorted[selIdx])
+      if (query.trim()) locate(sorted[selIdx])
       else if (history[selIdx]) searchHistory(history[selIdx])
     }
   }
@@ -489,14 +495,13 @@ export default function SearchOverlay({
                 onMouseDown={(e) => {
                   if (e.button === 0) dragRef.current = { x: e.clientX, y: e.clientY, item, started: false }
                 }}
-                onClick={() => {
-                  if (suppressClickRef.current) return
-                  setSelIdx(i)
+                onClick={(e) => {
+                  if (suppressClickRef.current || e.target.closest('button')) return
+                  locate(item)
                 }}
                 onDoubleClick={(e) => {
                   if (suppressClickRef.current || e.target.closest('button')) return
-                  onLocate(item.dir, item.path)
-                  onClose()
+                  locate(item)
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault()
@@ -601,7 +606,7 @@ export default function SearchOverlay({
         )}
         </div>
         <div className="search-hint">
-          ↑↓ 选择 · 双击 定位 · ↩ {query.trim() ? '打开' : '搜索'} · {query.trim() && '右键 更多操作 · '}Esc 关闭 · 范围：{SCOPES.find((s) => s.id === scope)?.label}
+          ↑↓ 选择预览 · {query.trim() ? '单击 / ↩ 定位 · 右键 打开与更多操作 · ' : '↩ 搜索 · '}Esc 关闭 · 范围：{SCOPES.find((s) => s.id === scope)?.label}
         </div>
       </div>
       {menu && (
