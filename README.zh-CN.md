@@ -2,9 +2,7 @@
   <a href="./README.md">English</a> · <strong>简体中文</strong>
 </p>
 
-<p align="center">
-  <img src="./docs/assets/hero.zh-CN.svg" width="100%" alt="Bento — 轻量快速的 macOS 多窗格文件管理器">
-</p>
+# Bento
 
 <p align="center">
   <a href="#安装"><img alt="平台" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0A1530?style=flat-square&logo=apple&logoColor=white"></a>
@@ -21,10 +19,6 @@
   <a href="#架构">架构</a> ·
   <a href="#现状与限制">限制</a> ·
   <a href="#致谢">致谢</a>
-</p>
-
-<p align="center">
-  <img src="./docs/assets/screenshot-main.png" width="100%" alt="Bento 四窗格界面：文稿、项目、图片与下载">
 </p>
 
 ## 简介
@@ -55,19 +49,6 @@
 | **状态全记忆** | 窗口位置与大小、布局、标签、路径、排序、列宽和偏好设置都会在启动时恢复；外观跟随系统浅色 / 深色。 |
 
 名称和内容搜索均支持“当前文件夹 / 主目录 / 全局”。单击结果或按回车会在聚焦窗格中打开所在文件夹并定位选中该项目；悬停或方向键选择可预览，右键菜单的“打开”才打开项目本身。当前文件夹和主目录只在提交搜索时扫描，可找到尚未入索引的新文件；不递归符号链接目录，并在默认 200 条结果上限前应用范围、隐藏项和格式过滤。目录过大或部分不可读时提示结果未穷尽，失败可重试。局部扫描预算为 2 秒软时限、100000 条目、64 层、每文件 16 MiB、单行 64 KiB。全局沿用现有索引与系统来源，并明确提示覆盖范围限制。更新搜索会取消局部工作；无法中断的索引调用结束前，只保留最新一次搜索等待。
-
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="./docs/assets/feature-archive.png" alt="创建归档对话框">
-      <p align="center"><sub><b>创建归档</b> — 压缩级别、密码、一键压缩</sub></p>
-    </td>
-    <td width="50%" valign="top">
-      <img src="./docs/assets/feature-columns.png" alt="右键表头选择显示的列">
-      <p align="center"><sub><b>列设置</b> — 右键表头选择要显示的列</sub></p>
-    </td>
-  </tr>
-</table>
 
 侧边栏默认宽 220px，可拖动范围为 180–520px，双击分隔条可重置；宽度会记忆。行内重命名会按名称自动扩展，在默认 260px 名称列及可见窗格范围内换行，行高 18px；回车确认，Esc 取消。紧凑的行内复制路径按钮可复制该行项目的路径。顶部后退/前进使用当前窗格历史。搜索无法访问受保护位置时，设置中可显示完全磁盘访问快捷入口。关于页面可检查最新版本并打开下载页面，不会静默安装更新。
 
@@ -171,10 +152,8 @@ flowchart LR
 src/                     React 界面（App、Pane、各对话框、列与拖拽辅助）
 src-tauri/src/lib.rs     Rust 命令：文件、搜索、剪贴板、监听、归档
 src-tauri/tauri.conf.json  窗口与打包配置
-docs/                    工程笔记与 README 素材
 ```
 
-实现过程中踩过的坑——原生拖入的坐标系、窗口状态死锁、剪贴板格式等——整理在 [`docs/PITFALLS-drag-clipboard.md`](./docs/PITFALLS-drag-clipboard.md)。
 
 ## 现状与限制
 

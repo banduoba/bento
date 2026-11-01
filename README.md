@@ -2,9 +2,7 @@
   <strong>English</strong> · <a href="./README.zh-CN.md">简体中文</a>
 </p>
 
-<p align="center">
-  <img src="./docs/assets/hero.svg" width="100%" alt="Bento — a fast multi-pane file manager for macOS">
-</p>
+# Bento
 
 <p align="center">
   <a href="#install"><img alt="Platform" src="https://img.shields.io/badge/macOS-Apple%20Silicon-0A1530?style=flat-square&logo=apple&logoColor=white"></a>
@@ -21,10 +19,6 @@
   <a href="#architecture">Architecture</a> ·
   <a href="#status--limitations">Limitations</a> ·
   <a href="#acknowledgements">Credits</a>
-</p>
-
-<p align="center">
-  <img src="./docs/assets/screenshot-main.png" width="100%" alt="Bento showing four panes: documents, projects, pictures and downloads">
 </p>
 
 ## Overview
@@ -57,19 +51,6 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 Name and content search both support Current Folder, Home and Global. Click a result or press Enter to open its containing folder and locate/select it in the focused pane. Hover or use the arrow keys to select or preview; the context menu’s Open action opens the item itself. Current Folder/Home scan only when you submit a search, include new unindexed files, skip directory links, and apply scope, visibility and format filters before the result cap (200 by default). Large or inaccessible trees show partial-result notices; errors offer Retry. Local scans have a 2-second soft budget, 100,000 entries, depth 64, 16 MiB per file and 64 KiB per line. Global results use the existing index/system sources and disclose uncertain coverage. Replacing a search cancels local work; an opaque index call may finish in the background while only the latest replacement waits.
 
 The sidebar starts at 220px wide (drag range 180–520px; double-click its divider to reset). Bento remembers the width. Inline rename grows to fit the name, wraps within the 260px default name column and visible pane, and uses an 18px line height; Enter confirms, while Escape cancels. The compact copy-path button copies the path of the item on that row. Top-bar back and forward follow the current pane's history. Settings can show a Full Disk Access shortcut when search lacks access to protected locations. About can check the latest version and open its download page; it does not silently install updates.
-
-<table>
-  <tr>
-    <td width="50%" valign="top">
-      <img src="./docs/assets/feature-archive.png" alt="The Create Archive dialog">
-      <p align="center"><sub><b>Create Archive</b> — compression level, password, one-click mode</sub></p>
-    </td>
-    <td width="50%" valign="top">
-      <img src="./docs/assets/feature-columns.png" alt="Right-click the header to choose columns">
-      <p align="center"><sub><b>Columns</b> — right-click the header to choose what to show</sub></p>
-    </td>
-  </tr>
-</table>
 
 ## Install
 
@@ -171,10 +152,8 @@ flowchart LR
 src/                     React UI (App, Pane, dialogs, column and drag helpers)
 src-tauri/src/lib.rs     Rust commands: files, search, clipboard, watcher, archive
 src-tauri/tauri.conf.json  Window and bundle configuration
-docs/                    Engineering notes and README assets
 ```
 
-Hard-won implementation notes — coordinate systems for native drops, a window-state deadlock, pasteboard formats and more — are collected in [`docs/PITFALLS-drag-clipboard.md`](./docs/PITFALLS-drag-clipboard.md).
 
 ## Status & limitations
 

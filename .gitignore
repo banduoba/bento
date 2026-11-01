@@ -11,3 +11,9 @@ scripts/bench/reports/*
 !scripts/bench/reports/.gitkeep
 scripts/bench/scan-rs/target/
 src-tauri/fswatch/target/
+
+# Private engineering notes and assets
+/docs/
+
+# Private task and planning artifacts
+/.superpowers/
