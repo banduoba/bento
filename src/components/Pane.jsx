@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Channel } from '@tauri-apps/api/core'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
 import { api, hasTauri } from '../api'
 import { LIST_ROW_HEIGHT } from '../shortcuts'
@@ -12,6 +12,7 @@ import { fmtSize, fmtDate, basename, parentPath, labelOf, makeMatcher, copyText,
 import { COL_MIN, COL_MAX, DEFAULT_COLS, applyColVars, fitColumns, normalizeCols, normalizeVis } from '../columns'
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
 import FileIcon from './FileIcon'
+import InlineRename from './InlineRename'
 
 const MIME = 'application/x-bento'
 
@@ -298,6 +299,8 @@ export default function Pane({
       cy1: e.clientY,
       y1: e.clientY - rect.top + el.scrollTop,
       moved: false,
+      onMove: onMarqueeMove,
+      onUp: onMarqueeUp,
     }
     window.addEventListener('mousemove', onMarqueeMove)
     window.addEventListener('mouseup', onMarqueeUp)
@@ -995,14 +998,42 @@ export default function Pane({
     if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
   }
 
+  const renamingHere = renaming && renaming.tabId === tab.id ? renaming : null
+  useEffect(() => {
+    if (!renamingHere || !marqueeRef.current) return
+    window.removeEventListener('mousemove', marqueeRef.current.onMove)
+    window.removeEventListener('mouseup', marqueeRef.current.onUp)
+    marqueeRef.current = null
+    setMarqueeRect(null)
+  }, [renamingHere?.path, renamingHere?.tabId])
+  const renameIndex = renamingHere ? rows.findIndex(row => row.path === renamingHere.path) : -1
+  const renameKey = renamingHere ? `${tab.id}:${renamingHere.path}` : null
+  const [renameSize, setRenameSize] = useState(null)
+  const renameHeight = renameSize?.key === renameKey ? renameSize.height : LIST_ROW_HEIGHT
+  const onRenameHeight = height => setRenameSize(previous =>
+    previous?.key === renameKey && previous.height === height ? previous : { key: renameKey, height })
+  const renameRange = useMemo(() => range => {
+    const indexes = defaultRangeExtractor(range)
+    // Keep only the active editor outside overscan; scrolling must not unmount focus.
+    if (renameIndex >= 0 && !indexes.includes(renameIndex)) indexes.push(renameIndex)
+    return indexes.sort((a, b) => a - b)
+  }, [renameIndex])
   const virt = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => LIST_ROW_HEIGHT,
     overscan: 14,
+    rangeExtractor: renameRange,
     // 路径做键：FSEvents 增删改只动对应行，虚拟列表不会按索引把可见行整表换掉。
     getItemKey: (index) => rows[index]?.path ?? index,
   })
+
+  // Clear the one measured cache entry when the editor changes/ends. measure()
+  // resets virtual estimates only; ordinary filenames never get DOM measurements.
+  useLayoutEffect(() => { virt.measure() }, [renameKey])
+  useLayoutEffect(() => {
+    if (renameIndex >= 0) virt.resizeItem(renameIndex, renameHeight)
+  }, [renameIndex, renameHeight, renameKey, rows])
 
   // 重命名输入框聚焦并选中主名（不含扩展名）。新建的文件可能排在视口外，先滚进虚拟列表再等输入框挂上。
   useEffect(() => {
@@ -1024,7 +1055,10 @@ export default function Pane({
         return
       }
       if (document.activeElement === input) return
-      input.focus()
+      if (idx >= 0) {
+        try { virt.scrollToIndex(idx, { align: 'auto' }) } catch {}
+      }
+      input.focus({ preventScroll: true })
       if (renaming.selectAll) {
         input.setSelectionRange(0, input.value.length)
       } else {
@@ -1122,7 +1156,6 @@ export default function Pane({
     }
   }, [crumbs, collapsedCount, editingPath, tab.path])
 
-  const renamingHere = renaming && renaming.tabId === tab.id ? renaming : null
   const kbdCurrent = clickFocus && selection?.has(clickFocus)
     ? clickFocus
     : rows.find((r) => !r.isPseudo && selection?.has(r.path))?.path
@@ -1413,6 +1446,7 @@ export default function Pane({
         aria-busy={loadProgress ? 'true' : undefined}
         onFocus={() => onFocus(index)}
         onMouseDown={(e) => {
+          if (renamingHere) return // Marquee coordinates assume ordinary, fixed-height rows.
           if (e.target === scrollRef.current || e.target === innerRef.current) {
             scrollRef.current?.focus({ preventScroll: true })
             startMarquee(e)
@@ -1437,13 +1471,11 @@ export default function Pane({
                   className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${focused && kbdCurrent === entry.path ? ' kbd-current' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${
                     dropTarget === entry.path ? ' drop-target' : ''
                   }`}
-                  style={{ transform: `translateY(${vi.start}px)` }}
+                  style={{ transform: `translateY(${vi.start}px)`, height: vi.size }}
                   onDragStart={(e) => e.preventDefault()}
                   onMouseDown={(e) => {
-                    if (e.button !== 0 || entry.isPseudo) return
-                    if (!e.target?.closest?.('input, textarea, button')) {
-                      scrollRef.current?.focus({ preventScroll: true })
-                    }
+                    if (e.button !== 0 || entry.isPseudo || e.target?.closest?.('input, textarea, button')) return
+                    scrollRef.current?.focus({ preventScroll: true })
                     beginRowDrag(e, entry)
                   }}
                   onClick={(e) => {
@@ -1505,29 +1537,15 @@ export default function Pane({
                       )}
                     </span>
                     {isRenaming ? (
-                      <input
-                        ref={renameRef}
-                        className="rename-input"
+                      <InlineRename
+                        key={`${tab.id}:${entry.path}`}
+                        inputRef={renameRef}
+                        viewportRef={scrollRef}
                         value={renamingHere.value}
-                        onChange={(e) => onRenameChange(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            onRenameCommit()
-                            return
-                          }
-                          if (e.key === 'Escape') {
-                            e.stopPropagation()
-                            onRenameCancel()
-                            return
-                          }
-                          if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
-                        }}
-                        onBlur={onRenameCommit}
-                        onClick={(e) => e.stopPropagation()}
-                        onDoubleClick={(e) => e.stopPropagation()}
-                        draggable={false}
+                        onChange={onRenameChange}
+                        onCommit={onRenameCommit}
+                        onCancel={onRenameCancel}
+                        onHeight={onRenameHeight}
                       />
                     ) : (
                       <>

@@ -24,6 +24,7 @@ const bundle = await build({
       builder.onResolve({ filter: /(?:^|\/)api(?:\.js)?$/ }, () => ({ path: 'api', namespace: 'test' }))
       builder.onResolve({ filter: /(?:^|\/)fsWatch$/ }, () => ({ path: 'watch', namespace: 'test' }))
       builder.onResolve({ filter: /(?:^|\/)nativeDrag$/ }, () => ({ path: 'drag', namespace: 'test' }))
+      builder.onResolve({ filter: /^@tanstack\/virtual-core$/ }, ({ path }) => ({ path: require.resolve(path), external: true }))
       builder.onResolve({ filter: /^@tanstack\/react-virtual$/ }, () => ({ path: 'viewport', namespace: 'test' }))
       builder.onResolve({ filter: /(?:^|\/)FileIcon$/ }, () => ({ path: 'icon', namespace: 'test' }))
       builder.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({ path: 'channel', namespace: 'test' }))
@@ -33,7 +34,7 @@ const bundle = await build({
           : path === 'watch'
             ? `export const setWatch = () => {}; export const clearWatch = () => {}; export const onFsChange = (fn) => globalThis.${bridgeKey}.subscribe(fn)`
             : path === 'viewport'
-              ? 'export const useVirtualizer = (opts) => ({ getTotalSize: () => opts.count * opts.estimateSize(), getVirtualItems: () => Array.from({ length: opts.count }, (_, index) => ({ index, key: opts.getItemKey(index), start: index * opts.estimateSize() })), scrollToIndex: () => {} })'
+              ? 'export { defaultRangeExtractor } from "@tanstack/virtual-core"; export const useVirtualizer = (opts) => ({ measure: () => {}, resizeItem: () => {}, getTotalSize: () => opts.count * opts.estimateSize(), getVirtualItems: () => Array.from({ length: opts.count }, (_, index) => ({ index, key: opts.getItemKey(index), start: index * opts.estimateSize(), size: opts.estimateSize() })), scrollToIndex: () => {} })'
               : path === 'icon'
                 ? 'export default function FileIcon() { return null }'
             : path === 'channel'
