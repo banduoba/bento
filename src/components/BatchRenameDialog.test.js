@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createTextEditing } from '../textEditing.js'
 import { mountBatch, item } from '../test/BatchRenameHarness.js'
 
 test('literal replace defaults off, replaces every literal occurrence and keeps original apply contract', async t => {
@@ -118,4 +119,47 @@ test('native Enter in the commit gap cannot apply a previous selection while the
   await h.resolve(1, ['current'])
   await h.enter()
   assert.deepEqual(h.applied, [[{ ...item('other.txt'), newBase: 'current', newName: 'current.txt' }]])
+})
+
+
+test('editable field shortcuts reach the existing text delegate without leaking modal file shortcuts', async t => {
+  const h = await mountBatch(t)
+  await h.change(0, 'sample'); await h.change(1, 'case')
+  const commands = [], writes = [], reached = [], keyWindow = window
+  const input = h.inputs()[0].instance
+  Object.assign(input, { value: 'sample', selectionStart: 0, selectionEnd: 0,
+    select() { this.selectionStart = 0; this.selectionEnd = this.value.length },
+  })
+  const doc = { activeElement: input, defaultView: window, execCommand: (...args) => commands.push(args) }
+  const editor = createTextEditing({ doc, readText: async () => 'pasted', writeText: async value => writes.push(value) })
+  const delegate = e => { reached.push(e.key); editor.handleKeyDown(e) }
+  keyWindow.addEventListener('keydown', delegate)
+  t.after(() => { keyWindow.removeEventListener('keydown', delegate); editor.dispose() })
+
+  const selected = await h.key('a', input, { metaKey: true })
+  assert.equal(selected.cancelBubble, false, 'CmdA from the real mounted input reaches bubble delegate')
+  assert.equal(selected.defaultPrevented, true)
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [0, 6])
+  for (const key of ['c', 'x', 'v']) {
+    const event = await h.key(key, input, { metaKey: true })
+    assert.equal(event.cancelBubble, false, `editing shortcut ${key} propagates`)
+    assert.equal(event.defaultPrevented, true)
+  }
+  assert.deepEqual(writes, ['sample', 'sample'])
+  assert.deepEqual(commands.map(args => args[0]), ['delete', 'insertText'])
+  assert.equal(commands[1][2], 'pasted')
+
+  const count = reached.length
+  for (const [key, target, modifiers] of [
+    ['r', input, { metaKey: true }], ['c', input, { metaKey: true, altKey: true }],
+    ['w', input, { metaKey: true }], ['Backspace', input, { metaKey: true }],
+    ['z', input, { metaKey: true }], ['Z', input, { metaKey: true, shiftKey: true }],
+    ['F2', input, {}], ['a', input, {}], ['a', input, { ctrlKey: true }],
+    ['a', input, { metaKey: true, shiftKey: true }], ['a', input, { metaKey: true, isComposing: true }],
+    ['a', h.button('重命名').instance, { metaKey: true }],
+  ]) {
+    assert.equal((await h.key(key, target, modifiers)).cancelBubble, true, `${key} stays inside the modal`)
+  }
+  assert.equal(reached.length, count)
+  assert.deepEqual(h.applied, [])
 })
