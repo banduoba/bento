@@ -1115,7 +1115,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 
 .rename-input {
   font: inherit;
-  line-height: 22px;
+  line-height: 18px;
   box-sizing: border-box;
   border: 1.5px solid var(--accent);
   border-radius: 6px;
@@ -1145,7 +1145,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   width: max-content;
   white-space: pre;
   font: inherit;
-  line-height: 22px;
+  line-height: 18px;
 }
 
 .empty, .error, .loading {
