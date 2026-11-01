@@ -1705,6 +1705,8 @@ export default function App() {
             favorites={cfg.favorites}
             focusedPath={focusedTab?.path}
             tick={tick}
+            showHidden={cfg.showHidden}
+            autoRefresh={cfg.autoRefresh !== false}
             workspaces={cfg.workspaces}
             activeWorkspace={cfg.activeWorkspace}
             wsRenaming={wsRenaming}

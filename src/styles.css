@@ -1932,3 +1932,11 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .search-error button { margin-left: auto; padding: 3px 10px; border: 1px solid currentColor; border-radius: 5px; background: transparent; color: inherit; cursor: pointer; }
 .batch-rename-regex { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .batch-rename-preview .preview-line .new.invalid { color: var(--danger, #c0392b); }
+
+/* Lazy sidebar folder branches: disclosure owns expansion, the row owns navigation. */
+.sb-disclosure, .sb-disclosure-space { width: 14px; min-width: 14px; height: 20px; flex: none; }
+.sb-disclosure { padding: 0; border: 0; background: transparent; color: var(--muted-icon); cursor: pointer; font-size: 13px; line-height: 20px; }
+.sb-disclosure:hover { color: var(--text); background: var(--hover-bg); border-radius: 3px; }
+.sb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-tree-note { padding: 4px 12px 5px 34px; color: var(--text-2); font-size: 11px; overflow-wrap: anywhere; }
+.sb-tree-note button { display: block; padding: 2px 0; border: 0; background: transparent; color: var(--accent); font-size: inherit; text-align: left; cursor: pointer; }

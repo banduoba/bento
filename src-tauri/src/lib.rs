@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 
+mod folder_tree;
 mod rename_preview;
 mod session_store;
 mod session_exit;
@@ -74,6 +75,13 @@ async fn list_dir(path: String, show_hidden: bool) -> Result<ListResult, String>
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn list_subdirectories(path: String, show_hidden: bool) -> Result<folder_tree::FolderResult, String> {
+    tauri::async_runtime::spawn_blocking(move || folder_tree::list(&path, show_hidden))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 生成不冲突的目标路径：name 已存在时用 "name 2"、"name 3"…
@@ -2971,6 +2979,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_dir,
+            list_subdirectories,
             list_stream::list_dir_stream,
             list_stream::cancel_list_dir,
             transfer,
