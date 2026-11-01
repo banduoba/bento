@@ -74,7 +74,7 @@ struct EmptyRoot {
     identity: Identity,
 }
 impl EmptyRoot {
-    fn prepare(root: &OwnedRoot) -> io::Result<Option<Self>> {
+    fn prepare(root: &OwnedRoot) -> io::Result<Self> {
         let name = root.path.file_name().ok_or_else(super::identity::changed)?;
         let private_name = name.as_bytes().strip_prefix(b".bento-operation-");
         if !root.path.is_absolute()
@@ -92,8 +92,9 @@ impl EmptyRoot {
         {
             return Err(super::identity::changed());
         }
-        // Only an anchored leaf ENOENT proves an already-removed root. A
-        // missing, symlinked or inaccessible parent leaves ownership unproven.
+        // A missing leaf cannot prove cleanup: an ancestor may have moved or
+        // been redirected while the original root survives elsewhere. Require
+        // every root to be present with its recorded identity before cleanup.
         let parent = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
@@ -104,12 +105,12 @@ impl EmptyRoot {
             identity: root.identity.clone(),
         };
         if !prepared.matches()? {
-            return Ok(None);
+            return Err(super::identity::changed());
         }
         if fs::read_dir(&root.path)?.next().transpose()?.is_some() {
             return Err(super::identity::changed());
         }
-        Ok(Some(prepared))
+        Ok(prepared)
     }
 
     fn matches(&self) -> io::Result<bool> {
@@ -142,7 +143,7 @@ impl EmptyRoot {
 
     fn remove(self) -> io::Result<()> {
         if !self.matches()? {
-            return Ok(());
+            return Err(super::identity::changed());
         }
         // rmdir is the atomic emptiness check: a child created after preflight
         // prevents removal. There is no identity-CAS rmdir; an adversarial rename
@@ -187,13 +188,14 @@ fn reclaim_empty_record(record: &Record) -> io::Result<()> {
         return Err(super::identity::changed());
     }
     // Prove every root before deleting any. If later removal fails, keep the
-    // original durable record; already absent roots make the next open retryable.
+    // original durable record. A missing root on the next open stays available
+    // for explicit recovery rather than guessing whether an ancestor was moved.
     let roots = record
         .roots
         .iter()
         .map(EmptyRoot::prepare)
         .collect::<io::Result<Vec<_>>>()?;
-    for root in roots.into_iter().flatten() {
+    for root in roots {
         root.remove()?;
     }
     if record.roots.iter().any(|root| {
@@ -540,11 +542,12 @@ mod startup_tests {
     }
 
     #[test]
-    fn startup_retries_after_a_previous_partial_empty_root_cleanup() {
+    fn startup_retains_previous_partial_cleanup_for_manual_recovery() {
         let fixture = Fixture::new();
         let mut record = fixture.record();
         record.roots.push(OwnedRoot::create(&fixture.0).unwrap());
         let (persisted, journal) = fixture.save(&record);
+        let original_ledger = fs::read(&persisted).unwrap();
         fs::remove_dir(&record.roots[0].path).unwrap();
         let payload = record.roots[1].path.join("payload");
         fs::write(&payload, b"keep me").unwrap();
@@ -554,9 +557,22 @@ mod startup_tests {
         assert_eq!(fs::read(&payload).unwrap(), b"keep me");
         fs::remove_file(&payload).unwrap();
         let journal = fixture.reopen(journal);
-        assert!(journal.recoveries().is_empty());
-        assert!(!persisted.exists());
-        assert!(!record.roots[1].path.exists());
+        let recoveries = journal.recoveries();
+        assert_eq!(recoveries.len(), 1);
+        assert!(matches!(
+            recoveries[0].actions.as_slice(),
+            [RecoveryAction::DiscardStaging]
+        ));
+        assert_eq!(fs::read(&persisted).unwrap(), original_ledger);
+        assert!(record.roots[1].path.is_dir());
+        assert_eq!(
+            fs::read(record.source.as_ref().unwrap()).unwrap(),
+            b"original source"
+        );
+        assert_eq!(
+            fs::read(&record.destination).unwrap(),
+            b"original destination"
+        );
     }
 
     #[test]
@@ -766,12 +782,70 @@ mod startup_tests {
         assert_unproven_parent_retains_recovery("missingParent");
     }
 
+    fn assert_relocated_parent_retains_recovery(intermediate_symlink: bool) {
+        let fixture = Fixture::new();
+        let mut record = fixture.record();
+        let original_tree = fixture.0.join("original-tree");
+        let parent = original_tree.join("parent");
+        fs::create_dir_all(&parent).unwrap();
+        let root = OwnedRoot::create(&parent).unwrap();
+        let leaf = root.path.file_name().unwrap().to_owned();
+        fs::write(root.path.join("payload"), b"surviving private payload").unwrap();
+        record.roots = vec![root.clone()];
+        let alias = fixture.0.join("ancestor-alias");
+        if intermediate_symlink {
+            symlink(&original_tree, &alias).unwrap();
+            record.roots[0].path = alias.join("parent").join(&leaf);
+        }
+        let (persisted, mut journal) = fixture.save(&record);
+        let original_ledger = fs::read(&persisted).unwrap();
+        let surviving_root = if intermediate_symlink {
+            let other_tree = fixture.0.join("other-tree");
+            fs::create_dir_all(other_tree.join("parent")).unwrap();
+            fs::remove_file(&alias).unwrap();
+            symlink(&other_tree, &alias).unwrap();
+            root.path
+        } else {
+            let retained_parent = original_tree.join("retained-parent");
+            fs::rename(&parent, &retained_parent).unwrap();
+            fs::create_dir(&parent).unwrap();
+            retained_parent.join(&leaf)
+        };
+        for _ in 0..2 {
+            journal = fixture.reopen(journal);
+            assert_eq!(journal.recoveries().len(), 1);
+            assert_eq!(fs::read(&persisted).unwrap(), original_ledger);
+            assert_eq!(
+                fs::read(surviving_root.join("payload")).unwrap(),
+                b"surviving private payload"
+            );
+            assert_eq!(
+                fs::read(record.source.as_ref().unwrap()).unwrap(),
+                b"original source"
+            );
+            assert_eq!(
+                fs::read(&record.destination).unwrap(),
+                b"original destination"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_retains_recovery_with_relocated_intermediate_symlink() {
+        assert_relocated_parent_retains_recovery(true);
+    }
+
+    #[test]
+    fn startup_retains_recovery_with_relocated_real_parent() {
+        assert_relocated_parent_retains_recovery(false);
+    }
+
     #[test]
     fn empty_root_removal_rechecks_replacements_and_never_removes_new_children() {
-        for case in ["newChild", "replacement", "symlink"] {
+        for case in ["newChild", "replacement", "symlink", "missing"] {
             let fixture = Fixture::new();
             let root = OwnedRoot::create(&fixture.0).unwrap();
-            let prepared = EmptyRoot::prepare(&root).unwrap().unwrap();
+            let prepared = EmptyRoot::prepare(&root).unwrap();
             match case {
                 "newChild" => fs::write(root.path.join("payload"), b"new bytes").unwrap(),
                 "replacement" => {
@@ -782,10 +856,15 @@ mod startup_tests {
                     fs::rename(&root.path, fixture.0.join("original-root")).unwrap();
                     symlink(fixture.0.join("original-root"), &root.path).unwrap();
                 }
+                "missing" => fs::rename(&root.path, fixture.0.join("original-root")).unwrap(),
                 _ => unreachable!(),
             }
             assert!(prepared.remove().is_err(), "{case}");
-            assert!(fs::symlink_metadata(&root.path).is_ok(), "{case}");
+            if case == "missing" {
+                assert!(fixture.0.join("original-root").is_dir());
+            } else {
+                assert!(fs::symlink_metadata(&root.path).is_ok(), "{case}");
+            }
             if case == "newChild" {
                 assert_eq!(fs::read(root.path.join("payload")).unwrap(), b"new bytes");
             }
