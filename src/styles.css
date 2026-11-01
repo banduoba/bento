@@ -304,6 +304,35 @@ input, textarea {
   overflow-y: auto;
   padding: 8px 8px 12px;
 }
+.sidebar-layout {
+  display: flex;
+  flex: none;
+  min-height: 0;
+  background: var(--sidebar-bg);
+}
+.sidebar-layout > .sidebar {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+  border-right: 0;
+}
+.sidebar-splitter {
+  flex: 0 0 8px;
+  border-right: 1px solid var(--border-strong);
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.sidebar-splitter:hover,
+.sidebar-splitter:focus-visible,
+.sidebar-layout.resizing > .sidebar-splitter {
+  border-right-color: var(--accent);
+}
+.sidebar-splitter:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.sidebar-layout.resizing { user-select: none; }
 .sb-title {
   font-size: 11px;
   font-weight: 600;
