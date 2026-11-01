@@ -2,11 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { build } from 'esbuild'
 import { createRequire } from 'node:module'
+import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import React from 'react'
 import { act, create } from 'react-test-renderer'
 
 const require = createRequire(import.meta.url)
+const packageVersion = JSON.parse(await readFile(new URL('../../package.json', import.meta.url), 'utf8')).version
 const bundle = await build({
   entryPoints: [fileURLToPath(new URL('./SettingsDialog.jsx', import.meta.url))],
   bundle: true, write: false, format: 'cjs', platform: 'node', jsx: 'automatic',
@@ -85,7 +87,7 @@ test('settings About shows runtime metadata without networking and opens project
 test('browser demo uses package version and browser links without native IPC', async t => {
   const h = await mount(t, { native: false, getVersion: () => { throw new Error('native IPC forbidden') } })
   await h.click('关于')
-  assert.ok(h.text().includes('0.2.1'))
+  assert.ok(h.text().includes(packageVersion))
   await h.click('下载页面')
   assert.deepEqual(h.opened, [['https://github.com/banduoba/bento/releases/latest', '_blank', 'noopener,noreferrer']])
 })

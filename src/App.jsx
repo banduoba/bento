@@ -29,8 +29,11 @@ import {
   withFolderPatch,
 } from './viewSettings'
 import Sidebar from './components/Sidebar'
+import SidebarLayout from './components/SidebarLayout'
+import { normalizeSidebarWidth } from './sidebarWidth'
 import Pane from './components/Pane'
 import StatusBar from './components/StatusBar'
+import TitlebarNavigation from './components/TitlebarNavigation'
 import ContextMenu from './components/ContextMenu'
 import BatchRenameDialog from './components/BatchRenameDialog'
 import ZipDialog, { normalizeZipPrefs, levelOf } from './components/ZipDialog'
@@ -93,6 +96,7 @@ function sanitizeConfig(saved, home) {
   return {
     showHidden: !!saved.showHidden,
     showSidebar: saved.showSidebar !== false,
+    sidebarWidth: normalizeSidebarWidth(saved.sidebarWidth),
     autoRefresh: saved.autoRefresh !== false,
     alwaysOnTop: saved.alwaysOnTop === true,
     enterAction: normalizeEnterAction(saved.enterAction),
@@ -1639,7 +1643,8 @@ export default function App() {
       {recoveryNotice && <div role="alert">{recoveryNotice} <button onClick={() => setRecoveryNotice(null)}>知道了</button></div>}
       {saveError && <div role="alert">保存失败：{saveError} <button onClick={() => flushPersistence().catch(error => setSaveError(String(error)))}>重试保存</button></div>}
       <div className="titlebar" onMouseDown={titlebarMouseDown}>
-        <div className="tb-title" title={windowTitle}>{windowTitle}</div>
+        <TitlebarNavigation tab={focusedTab} onBack={navBack} onForward={navForward} />
+        <div className="tb-title" title={focusedTab?.path}>{windowTitle}</div>
         <div className="tb-center">
           <div className="layout-pick-wrap">
             <button className="layout-btn" title="窗口布局" onClick={() => setLayoutPickerOpen((o) => !o)}>
@@ -1672,67 +1677,79 @@ export default function App() {
             aria-pressed={!!cfg.alwaysOnTop}
             onClick={() => setCfg((c) => ({ ...c, alwaysOnTop: !c.alwaysOnTop }))}
           >
-            <IconPin size={15} filled={!!cfg.alwaysOnTop} />
+            <IconPin size={20} filled={!!cfg.alwaysOnTop} />
           </button>
           <button
             className="iconbtn"
             title="聚焦搜索 (⌥⌘F)"
             onClick={() => setSearchOpen(true)}
           >
-            <IconSearch size={15} />
+            <IconSearch size={20} />
           </button>
           <button
             className="iconbtn"
             title={cfg.showHidden ? '隐藏隐藏文件 (⇧⌘.)' : '显示隐藏文件 (⇧⌘.)'}
             onClick={() => setCfg((c) => ({ ...c, showHidden: !c.showHidden }))}
           >
-            {cfg.showHidden ? <IconEye size={15} /> : <IconEyeOff size={15} />}
+            {cfg.showHidden ? <IconEye size={20} /> : <IconEyeOff size={20} />}
           </button>
           <button
             className="iconbtn"
             title="设置"
             onClick={() => setSettingsOpen(true)}
           >
-            <IconSettings size={15} />
+            <IconSettings size={20} />
           </button>
         </div>
       </div>
 
       <div className="main">
         {cfg.showSidebar && (
-          <Sidebar
-            home={home}
-            favorites={cfg.favorites}
-            focusedPath={focusedTab?.path}
-            tick={tick}
-            workspaces={cfg.workspaces}
-            activeWorkspace={cfg.activeWorkspace}
-            wsRenaming={wsRenaming}
-            onSwitchWorkspace={switchWorkspace}
-            onCreateWorkspace={createWorkspace}
-            onWorkspaceMenu={workspaceMenu}
-            onWsRenameChange={(v) => setWsRenaming((r) => (r ? { ...r, value: v } : r))}
-            onWsRenameCommit={() => {
-              if (wsRenaming) renameWorkspace(wsRenaming.id, wsRenaming.value)
-              setWsRenaming(null)
-            }}
-            onWsRenameCancel={() => setWsRenaming(null)}
-            onOpen={(path) => {
-              // 聚焦窗格的当前标签；异常时回退到第一个窗格第一个标签
-              const t = activeTabOf(focusIdx) || cfg.panes[0]?.tabs[0]
-              if (!t) return
-              trace(
-                `sb-open focusIdx=${focusIdx} tab=${t.id} -> ${path} | actives=[${cfg.panes
-                  .map((p) => p.tabs[p.active]?.path || '?')
-                  .join(' | ')}]`
-              )
-              setFocused(focusIdx)
-              nav(t.id, path)
-              triggerFlash(focusIdx)
-            }}
-            onMenu={sidebarMenu}
-            onDropPin={pinFavorite}
-          />
+          <SidebarLayout width={cfg.sidebarWidth} onWidthCommit={sidebarWidth => setCfg(c => ({ ...c, sidebarWidth }))}>
+            <Sidebar
+              home={home}
+              favorites={cfg.favorites}
+              focusedPath={focusedTab?.path}
+              paneTabs={cfg.panes[focusIdx]?.tabs || []}
+              activeTabId={focusedTab?.id}
+              onActivateTab={(tabId) => setCfg((c) => {
+                const pane = c.panes[focusIdx]
+                const active = pane?.tabs.findIndex(tab => tab.id === tabId)
+                if (active == null || active < 0 || active === pane.active) return c
+                return { ...c, panes: c.panes.map((p, i) => i === focusIdx ? { ...p, active } : p) }
+              })}
+              tick={tick}
+              showHidden={cfg.showHidden}
+              autoRefresh={cfg.autoRefresh !== false}
+              workspaces={cfg.workspaces}
+              activeWorkspace={cfg.activeWorkspace}
+              wsRenaming={wsRenaming}
+              onSwitchWorkspace={switchWorkspace}
+              onCreateWorkspace={createWorkspace}
+              onWorkspaceMenu={workspaceMenu}
+              onWsRenameChange={(v) => setWsRenaming((r) => (r ? { ...r, value: v } : r))}
+              onWsRenameCommit={() => {
+                if (wsRenaming) renameWorkspace(wsRenaming.id, wsRenaming.value)
+                setWsRenaming(null)
+              }}
+              onWsRenameCancel={() => setWsRenaming(null)}
+              onOpen={(path) => {
+                // 聚焦窗格的当前标签；异常时回退到第一个窗格第一个标签
+                const t = activeTabOf(focusIdx) || cfg.panes[0]?.tabs[0]
+                if (!t) return
+                trace(
+                  `sb-open focusIdx=${focusIdx} tab=${t.id} -> ${path} | actives=[${cfg.panes
+                    .map((p) => p.tabs[p.active]?.path || '?')
+                    .join(' | ')}]`
+                )
+                setFocused(focusIdx)
+                nav(t.id, path)
+                triggerFlash(focusIdx)
+              }}
+              onMenu={sidebarMenu}
+              onDropPin={pinFavorite}
+            />
+          </SidebarLayout>
         )}
         <div
           className="panes"
