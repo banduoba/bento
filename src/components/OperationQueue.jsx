@@ -88,6 +88,8 @@ export default function OperationQueue({ state, client, open, onToggle, onClose,
   const key = job => `${job.sessionId || state.sessionId}:${job.jobId}`
   const dismissible = job => terminal(job.state) && !job.resultsPending && !job.detailError
     && !state.pendingSubmissions.some(request => request.requestId === job.requestId)
+  const hasError = job => job.error || job.detailError || job.details.some(outcome => outcome.error)
+  const quiet = job => ['completed', 'cancelled'].includes(job.state) && dismissible(job) && !hasError(job)
   useEffect(() => {
     // Retain display choices only while their settled jobs remain in the bounded native history.
     const retained = new Set(state.jobs.filter(dismissible).map(key))
@@ -96,10 +98,10 @@ export default function OperationQueue({ state, client, open, onToggle, onClose,
       return next.size === previous.size ? previous : next
     })
   }, [state.jobs, state.pendingSubmissions, state.sessionId])
-  const visible = state.jobs.filter(job => !dismissible(job) || !dismissed.has(key(job)))
+  const visible = state.jobs.filter(job => !quiet(job) && (!dismissible(job) || !dismissed.has(key(job))))
   const active = visible.filter(job => !terminal(job.state))
   const syncing = visible.filter(job => terminal(job.state) && job.resultsPending)
-  const attention = visible.filter(job => ['failed', 'partial', 'waitingConflict'].includes(job.state) || job.error || job.detailError)
+  const attention = visible.filter(job => ['failed', 'partial', 'waitingConflict'].includes(job.state) || hasError(job))
   const needsAttention = !!(attention.length || state.recoveries.length || state.pendingSubmissions.length || state.error || notice)
   const wasBusy = useRef(state.busy)
   useEffect(() => {
@@ -133,8 +135,8 @@ export default function OperationQueue({ state, client, open, onToggle, onClose,
           <button className="btn" disabled={state.busy || !state.latestUndoId}
             title={state.busy ? '当前任务结束后可撤销' : '撤销最近一次文件操作 (⌘Z)'} onClick={onUndo}>撤销</button>
           <button className="btn" onClick={() => run(() => client.resync())}>同步</button>
-          <button className="btn" disabled={!settled.length} title="仅清除已结束的显示记录，不会删除文件、恢复记录或撤销记录"
-            onClick={() => setDismissed(new Set(state.jobs.filter(dismissible).map(key)))}>清除已结束记录</button>
+          {!!settled.length && <button className="btn" title="仅清除已结束的显示记录，不会删除文件、恢复记录或撤销记录"
+            onClick={() => setDismissed(previous => new Set([...previous, ...settled.map(key)]))}>清除已结束记录</button>}
           <button className="btn" onClick={onClose} aria-label="收起文件操作">收起</button>
         </header>
         <div className="operation-queue-body">
@@ -144,14 +146,14 @@ export default function OperationQueue({ state, client, open, onToggle, onClose,
             {operationNames[request.kind]}提交状态待确认
             <button className="btn" onClick={() => run(() => client.retrySubmission(request.requestId))}>同步并重试提交</button>
           </div>)}
-          {!visible.length && !state.pendingSubmissions.length && <p className="operation-note">暂无文件操作</p>}
+          {!visible.length && !state.pendingSubmissions.length && <p className="operation-note">暂无进行中或待处理的文件操作</p>}
           {[...active, ...protectedHistory, ...history].map(job => <OperationJob key={job.jobId} job={job} client={client}
             onConflict={onConflict} onRetry={onRetry} run={run} />)}
           {settled.length > historyCount &&
             <button className="btn" onClick={() => setHistoryCount(count => Math.min(count + 20, 256))}>显示更多历史</button>}
-          {!!state.recoveries.length && <section className="operation-recoveries" aria-label="文件恢复记录">
-            <h3>待处理恢复记录</h3>
-            <p className="operation-note">中断的任务不会自动继续。请检查保留的文件后选择操作。</p>
+          {!!state.recoveries.length && <details className="operation-recoveries" aria-label="文件恢复记录">
+            <summary>上次未完成操作的恢复数据（{state.recoveries.length}）</summary>
+            <p className="operation-note">这些是先前未完成操作保留的数据，不是日常成功历史。中断的任务不会自动继续，请检查保留的文件后选择操作。</p>
             {state.recoveries.slice(0, recoveryCount).map(record => <article key={record.recoveryId}>
               <b>{record.description}</b>
               {[record.source, record.destination].filter(Boolean).map(path => <div className="operation-path" key={path}>
@@ -162,7 +164,7 @@ export default function OperationQueue({ state, client, open, onToggle, onClose,
             </article>)}
             {state.recoveries.length > recoveryCount &&
               <button className="btn" onClick={() => setRecoveryCount(count => count + 20)}>显示更多恢复记录</button>}
-          </section>}
+          </details>}
         </div>
       </section>}
     </div>
