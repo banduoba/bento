@@ -5,6 +5,7 @@ import { IconSearch } from '../icons'
 import FileIcon from './FileIcon'
 import ContextMenu from './ContextMenu'
 import { makeDragPreview, runNativeDrag } from '../nativeDrag'
+import { FORMATS, searchError, searchRequestId } from '../search/model.js'
 
 const SCOPES = [
   { id: 'global', label: '全局' },
@@ -18,17 +19,6 @@ const SORTS = [
   { id: 'size', label: '大小' },
   { id: 'name', label: '名称' },
   { id: 'score', label: '相关度' },
-]
-
-const FORMATS = [
-  { id: 'all', label: '全部' },
-  { id: 'folder', label: '文件夹' },
-  { id: 'image', label: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
-  { id: 'document', label: '文档', extensions: ['doc', 'docx', 'pdf', 'md', 'txt'] },
-  { id: 'spreadsheet', label: '表格', extensions: ['xls', 'xlsx', 'csv'] },
-  { id: 'presentation', label: '演示', extensions: ['ppt', 'pptx', 'key'] },
-  { id: 'video', label: '视频', extensions: ['mp4', 'mov', 'mkv'] },
-  { id: 'archive', label: '压缩包', extensions: ['zip', 'rar', '7z', 'dmg'] },
 ]
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -131,6 +121,9 @@ export default function SearchOverlay({
   const [results, setResults] = useState([])
   const [format, setFormat] = useState('all')
   const [elapsed, setElapsed] = useState(null)
+  const [response, setResponse] = useState(null)
+  const [error, setError] = useState(null)
+  const [retry, setRetry] = useState(0)
   const [preview, setPreview] = useState(null)
   const previewRef = useRef(null)
   const firstHitRef = useRef(null) // 选中结果的内容预览 {loading, kind, text, matchLines, truncated, path}
@@ -142,7 +135,6 @@ export default function SearchOverlay({
   const suppressClickRef = useRef(false)
   const inputRef = useRef(null)
   const tokenRef = useRef(0)
-  const previousModeRef = useRef(mode)
   const timerRef = useRef(null)
   const menuRef = useRef(null)
   menuRef.current = menu
@@ -181,45 +173,32 @@ export default function SearchOverlay({
     return () => window.removeEventListener('keydown', onKey, true)
   }, [onClose, open])
 
-  // 绘制前清空切换模式的旧结果；防抖搜索 + 过期结果丢弃。
+  // Invalidate before paint; a superseded response cannot affect results or busy state.
   useLayoutEffect(() => {
     const token = ++tokenRef.current
-    if (previousModeRef.current !== mode) {
-      previousModeRef.current = mode
-      setResults([])
-      setSelIdx(0)
-    }
-    if (!open) {
-      setBusy(false)
-      return
-    }
+    setResults([])
+    setResponse(null)
+    setError(null)
+    setElapsed(null)
+    setPreview(null)
+    setSelIdx(0)
     const q = query.trim()
-    if (!q) {
-      setResults([])
-      setBusy(false)
-      return
-    }
+    if (!open || !q) { setBusy(false); return }
     setBusy(true)
-    clearTimeout(timerRef.current)
+    const requestId = searchRequestId()
+    let submitted = false
     const t0 = performance.now()
     timerRef.current = setTimeout(async () => {
-      // 防抖完成、实际提交搜索时记录，保留 Enter 打开结果的既有语义。
-      setHistory((items) => normalizeHistory([q, ...items]))
+      submitted = true
+      setHistory(items => normalizeHistory([q, ...items]))
       try {
-        const r = await api.search(
-          q,
-          mode === 'content' ? 'global' : scope,
-          mode === 'content' || scope !== 'pane' ? null : root,
-          showHidden,
-          searchPaths,
-          mode
-        )
+        const r = await api.searchQuery(q, scope, scope === 'pane' ? root : null, showHidden, searchPaths, mode, requestId, format)
         if (tokenRef.current !== token) return
-        setResults(r || [])
-        setSelIdx(0)
+        setResults(r.items)
+        setResponse(r)
         setElapsed(Math.round(performance.now() - t0))
-      } catch {
-        if (tokenRef.current === token) setResults([])
+      } catch (error) {
+        if (tokenRef.current === token) setError(searchError(error))
       } finally {
         if (tokenRef.current === token) setBusy(false)
       }
@@ -227,8 +206,9 @@ export default function SearchOverlay({
     return () => {
       clearTimeout(timerRef.current)
       ++tokenRef.current
+      if (submitted) api.cancelSearch(requestId).catch(() => {})
     }
-  }, [open, query, scope, root, showHidden, searchPaths, mode])
+  }, [open, query, scope, root, showHidden, searchPaths, mode, format, retry])
 
   // 预览加载完成后滚动到第一处命中
   useEffect(() => {
@@ -248,7 +228,7 @@ export default function SearchOverlay({
       api
         .fsearchStatus()
         .then((s) => live && setIdxStatus(s))
-        .catch(() => live && setIdxStatus({ ready: true, entries: 0 }))
+        .catch(() => live && setIdxStatus(null))
     poll()
     const t = setInterval(poll, 1500)
     return () => {
@@ -309,21 +289,13 @@ export default function SearchOverlay({
   }
 
   const sorted = useMemo(() => {
-    const selectedFormat = FORMATS.find((f) => f.id === format)
-    const arr = results.filter((item) => {
-      if (format === 'all') return true
-      if (format === 'folder') return item.is_dir
-      if (item.is_dir) return false
-      const dot = item.name.lastIndexOf('.')
-      const ext = dot > 0 ? item.name.slice(dot + 1).toLowerCase() : ''
-      return selectedFormat.extensions.includes(ext)
-    })
+    const arr = results.slice()
     if (sortBy === 'btime') arr.sort((a, b) => (b.btime_ms || 0) - (a.btime_ms || 0))
     else if (sortBy === 'mtime') arr.sort((a, b) => (b.mtime_ms || 0) - (a.mtime_ms || 0))
     else if (sortBy === 'size') arr.sort((a, b) => (b.size || 0) - (a.size || 0))
     else if (sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
     return arr // score：保持引擎返回的相关度顺序
-  }, [results, sortBy, format])
+  }, [results, sortBy])
 
   // 内容模式：选中结果变化 → 读取文件内容预览
   useEffect(() => {
@@ -400,8 +372,8 @@ export default function SearchOverlay({
           <input
             ref={inputRef}
             value={query}
-            placeholder="搜索文件名…"
-            aria-label="搜索文件名"
+            placeholder={mode === 'content' ? '搜索文件内容…' : '搜索文件名…'}
+            aria-label={mode === 'content' ? '搜索文件内容' : '搜索文件名'}
             onChange={(e) => { setQuery(e.target.value); setSelIdx(0) }}
             onKeyDown={onKeyDown}
             spellCheck={false}
@@ -409,13 +381,12 @@ export default function SearchOverlay({
           {busy && <span className="search-busy">搜索中…</span>}
         </div>
         <div className="search-toolbar">
-          <div className={`tb-group${mode === 'content' ? ' disabled' : ''}`}>
+          <div className="tb-group">
             <span className="tb-label">范围</span>
             {SCOPES.map((s) => (
               <button
                 key={s.id}
                 className={`seg-btn${scope === s.id ? ' on' : ''}`}
-                disabled={mode === 'content'}
                 onClick={() => onScopeChange(s.id)}
               >
                 {s.label}
@@ -450,11 +421,11 @@ export default function SearchOverlay({
               ? '最近搜索'
               : busy
                 ? '搜索中…'
-                : `${sorted.length} 个结果${elapsed != null ? ` · ${elapsed} ms` : ''}`}
+                : error ? '搜索失败' : `${sorted.length} 个结果${elapsed != null ? ` · ${elapsed} ms` : ''}`}
           </span>
             {scope === 'global' && idxStatus && !idxStatus.ready && (
               <span className="search-idx-hint">
-                {' '}· 全局索引建立中（已收录 {idxStatus.entries.toLocaleString()} 条），当前结果来自系统索引
+                {' '}· 全局索引建立中（已收录 {idxStatus.entries.toLocaleString()} 条），{response?.source.includes('spotlight') ? '当前结果来自系统索引' : '等待索引就绪'}
               </span>
             )}
             {scope === 'global' && idxStatus && idxStatus.ready && idxStatus.full_disk_access === false && (
@@ -465,6 +436,12 @@ export default function SearchOverlay({
           </div>
           <span className="search-syntax"><code>* ?</code> 通配 · <code>ext:</code> 后缀 · <code>re:</code> 正则 · 空格 = 且</span>
         </div>
+        {error && <div className="search-notice search-error" role="alert"><span>{error}</span><button onClick={() => setRetry(n => n + 1)}>重试</button></div>}
+        {!busy && response && (response.incomplete || response.truncated) && <div className="search-notice" role="status">
+          {response.truncated && <div>结果已截断，请收窄搜索范围或关键词。</div>}
+          {response.incomplete && <div>搜索未穷尽，当前结果可能不完整。</div>}
+          {response.warnings.map(w => <div key={w.code}>{w.message}</div>)}
+        </div>}
         <div className="search-formats" role="group" aria-label="结果格式过滤">
           {FORMATS.map((f) => (
             <button
@@ -495,7 +472,7 @@ export default function SearchOverlay({
               </button>
             )) : <SearchGuide />
           ) : !busy && sorted.length === 0 ? (
-            <SearchGuide noResults />
+            error || response?.incomplete ? <div className="search-empty">{error ? '请重试搜索。' : '当前扫描未返回匹配项，可收窄范围后重试。'}</div> : <SearchGuide noResults />
           ) : (
             sorted.map((item, i) => (
               <div

@@ -54,6 +54,8 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | **Keyboard-first** | Editable address bar (<kbd>⌘L</kbd>, <kbd>Tab</kbd> completes while editing), copy paths (<kbd>⌥⌘C</kbd>), <kbd>Tab</kbd> switches panes, <kbd>F5</kbd> / <kbd>F6</kbd> copy or move to the other pane, arrow-key navigation, inline folder expansion, Quick Look on <kbd>Space</kbd>, always-on-top pin (<kbd>⌥⌘T</kbd>). |
 | **Remembers everything** | Window frame, layout, tabs, paths, sort order, column widths and preferences are restored on launch. Follows the system light / dark appearance. |
 
+Name and content search both support Current Folder, Home and Global. Current Folder/Home scan only when you submit a search, include new unindexed files, skip directory links and protected Bento recovery data, and apply scope, visibility and format filters before the result cap (200 by default). Large or inaccessible trees show partial-result notices; errors offer Retry. Local scans have a 2-second soft budget, 100,000 entries, depth 64, 16 MiB per file and 64 KiB per line. Global results use the existing index/system sources and disclose uncertain coverage. Replacing a search cancels local work; an opaque index call may finish in the background while only the latest replacement waits.
+
 <table>
   <tr>
     <td width="50%" valign="top">
