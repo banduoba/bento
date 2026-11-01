@@ -731,12 +731,17 @@ fn indexed(
     }
     Ok(())
 }
-// A bracket term cannot safely narrow Spotlight candidates: mdfind has its own pattern
-// grammar. A plain independent word may narrow it; otherwise use the all-name fallback.
-fn spotlight_hint(query: &str) -> Option<String> {
-    query_words(query)
-        .into_iter()
-        .find(|word| !word.contains(':') && !word.starts_with('.') && !word.contains(['[', ']']))
+// fsearch terms may be fuzzy, negated, or satisfied by ancestors. They cannot safely
+// narrow a filename-only source. Keep Spotlight candidates broad and admit them below
+// with the actual parsed query, literal names, scope, visibility and format filters.
+fn spotlight_command(root: Option<&Path>) -> std::process::Command {
+    let mut cmd = std::process::Command::new("mdfind");
+    cmd.arg("-0");
+    if let Some(root) = root {
+        cmd.arg("-onlyin").arg(root);
+    }
+    cmd.arg("kMDItemFSName == \"*\"");
+    cmd
 }
 // Kill and reap even on read error/cancellation. No detached subprocess or reader thread.
 struct Child(std::process::Child);
@@ -753,7 +758,7 @@ fn spotlight(
     remaining: &mut usize,
     response: &mut SearchResponse,
 ) -> Result<()> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let query = parse_query(&request.query, false)?;
     let scopes: Vec<Option<&PathBuf>> = if roots.is_empty() {
         vec![None]
@@ -767,17 +772,7 @@ fn spotlight(
             response.warn("sourceBudget", "系统索引达到共享候选预算");
             break;
         }
-        let mut cmd = Command::new("mdfind");
-        cmd.arg("-0");
-        if let Some(root) = root {
-            cmd.arg("-onlyin").arg(root);
-        }
-        // Spotlight is a candidate source; the parsed query determines accepted matches.
-        if let Some(hint) = spotlight_hint(&request.query) {
-            cmd.arg("-name").arg(hint);
-        } else {
-            cmd.arg("kMDItemFSName == \"*\"");
-        }
+        let mut cmd = spotlight_command(root.map(PathBuf::as_path));
         let mut child = Child(
             cmd.stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -1467,12 +1462,16 @@ mod tests {
     }
 
     #[test]
-    fn spotlight_bracket_only_hint_is_broad_and_literal_admission_rejects_decoys() {
+    fn spotlight_bracket_candidates_are_broad_and_literal_admission_rejects_decoys() {
         let f = Fixture::new();
         let wanted = f.file("report [2026-11-01].txt", "fixture");
         let decoy = f.file("report x2026-11-01x.txt", "decoy");
         for text in ["*[2026-11-01]*", "\"report [2026-11-01]\""] {
-            assert_eq!(spotlight_hint(text), None); // Uses the existing all-name Spotlight query.
+            let command = spotlight_command(None);
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["-0", "kMDItemFSName == \"*\""]
+            );
             let parsed = parse_query(text, false).unwrap();
             assert!(query_accepts(
                 &parsed,
@@ -1485,9 +1484,46 @@ mod tests {
                 &fs::metadata(&decoy).unwrap()
             ));
         }
-        assert_eq!(spotlight_hint("report [2026-11-01]"), Some("report".into()));
-        assert_eq!(spotlight_hint("re:[a-c]"), None);
     }
+    #[test]
+    fn spotlight_candidates_preserve_negative_modifier_ancestor_and_fuzzy_matches() {
+        for (text, path) in [
+            ("!draft *.pdf", "/review/report.pdf"),
+            ("^report", "/review/report.pdf"),
+            ("reports invoice", "/review/reports/invoice.pdf"),
+            ("rprt", "/review/report.pdf"),
+        ] {
+            let parsed = fsearch::Query::parse(text, "/review").unwrap();
+            assert!(
+                parsed
+                    .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                    .is_some(),
+                "{text}: {path}"
+            );
+            let command = spotlight_command(None);
+            assert_eq!(command.get_program(), "mdfind");
+            assert_eq!(
+                command.get_args().collect::<Vec<_>>(),
+                ["-0", "kMDItemFSName == \"*\""]
+            );
+        }
+    }
+
+    #[test]
+    fn spotlight_candidates_preserve_exact_root_argument_and_broad_predicate() {
+        let command = spotlight_command(Some(Path::new("/review roots/[2026]")));
+        assert_eq!(command.get_program(), "mdfind");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "-0",
+                "-onlyin",
+                "/review roots/[2026]",
+                "kMDItemFSName == \"*\"",
+            ]
+        );
+    }
+
     #[test]
     fn global_command_rejects_malformed_explicit_regex_before_sources() {
         let result = tauri::async_runtime::block_on(search_query(
