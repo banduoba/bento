@@ -201,22 +201,111 @@ fn content_filters(query: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
-fn parse_query(query: &str, content: bool) -> Result<fsearch::Query> {
+struct NameLiteral {
+    pattern: regex::bytes::Regex,
+    negate: bool,
+}
+struct ParsedQuery {
+    engine: fsearch::Query,
+    literals: Vec<NameLiteral>,
+}
+impl ParsedQuery {
+    fn literal_names_accept(&self, path: &Path) -> bool {
+        let name = path.file_name().unwrap_or_default().as_bytes();
+        self.literals
+            .iter()
+            .all(|literal| literal.pattern.is_match(name) != literal.negate)
+    }
+}
+// Match the locked parser's space/quoted-word boundaries; filters retain their original text.
+fn query_words(query: &str) -> Vec<String> {
+    let (mut words, mut word, mut quoted) = (vec![], String::new(), false);
+    for ch in query.chars() {
+        match ch {
+            '"' => quoted = !quoted,
+            ' ' if !quoted => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            _ => word.push(ch),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+fn parse_query(query: &str, content: bool) -> Result<ParsedQuery> {
     let home = std::env::var("HOME").unwrap_or_default();
+    let invalid = |e| SearchError::new("invalidQuery", e);
+    let mut literals = vec![];
     let input = if content {
         content_filters(query)
+    } else if query.contains(['[', ']']) {
+        let mut filters = fsearch::Query::parse("", &home).map_err(invalid)?;
+        let mut candidates = vec![];
+        for word in query_words(query) {
+            let filter = if let Some((key, value)) = word.split_once(':') {
+                filters.filter(key, value, &home).map_err(invalid)?
+            } else {
+                false
+            };
+            // Only ordinary filename terms need this adapter. Explicit filters (including
+            // re:/path:/in:) and the engine's path-glob syntax keep their own grammar.
+            if filter || !word.contains(['[', ']']) || word.contains('/') {
+                candidates.push(word);
+                continue;
+            }
+            let (negate, name) = word
+                .strip_prefix('!')
+                .map_or((false, word.as_str()), |s| (true, s));
+            let glob = name.contains(['*', '?']);
+            let pattern = if glob {
+                super::glob_to_regex(name)
+            } else {
+                regex::escape(name)
+            };
+            literals.push(NameLiteral {
+                pattern: regex::bytes::RegexBuilder::new(&pattern)
+                    .case_insensitive(true)
+                    .dot_matches_new_line(true)
+                    .build()
+                    .map_err(|e| invalid(e.to_string()))?,
+                negate,
+            });
+            if !negate {
+                // The engine cannot escape bracket classes. Broaden just these characters;
+                // literal admission below removes decoys before the final result cap.
+                let broad = name.replace(['[', ']'], "?");
+                candidates.push(if glob { broad } else { format!("*{broad}*") });
+            }
+            // A broad negative candidate could hide valid names; enforce it only at admission.
+        }
+        candidates
+            .into_iter()
+            .map(|word| format!("\"{word}\""))
+            .collect::<Vec<_>>()
+            .join(" ")
     } else {
         query.into()
     };
-    fsearch::Query::parse(&input, &home).map_err(|e| SearchError::new("invalidQuery", e))
+    Ok(ParsedQuery {
+        engine: fsearch::Query::parse(&input, &home).map_err(invalid)?,
+        literals,
+    })
 }
-fn query_accepts(query: &fsearch::Query, path: &Path, md: &fs::Metadata) -> bool {
+fn query_accepts(query: &ParsedQuery, path: &Path, md: &fs::Metadata) -> bool {
+    if !query.literal_names_accept(path) {
+        return false;
+    }
     let kind = if md.is_dir() {
         fsearch::walk::KIND_DIR
     } else {
         fsearch::walk::KIND_FILE
     };
     query
+        .engine
         .match_path(
             path.as_os_str().as_bytes(),
             kind,
@@ -536,7 +625,7 @@ fn indexed(
             response.warn("sourceBudget", "搜索源达到候选预算，结果可能不完整");
             break;
         }
-        let mut query = original.clone();
+        let mut query = original.engine.clone();
         if !apply_format(&mut query, &request.format) {
             return Ok(());
         }
@@ -620,7 +709,10 @@ fn indexed(
                 source_remaining -= 1;
                 let path = hit.path;
                 let is_dir = (hit.kind & 0b11) == fsearch::walk::KIND_DIR;
-                if !eligible(&path, roots, request) || !format_ok(&path, is_dir, &request.format) {
+                if !eligible(&path, roots, request)
+                    || !original.literal_names_accept(&path)
+                    || !format_ok(&path, is_dir, &request.format)
+                {
                     continue;
                 }
                 let Ok(md) = fs::metadata(&path) else {
@@ -628,7 +720,7 @@ fn indexed(
                     continue;
                 };
                 // Keep explicit user filters when the configured scope supplied Query.scope.
-                if original.scope.is_some() && !query_accepts(&original, &path, &md) {
+                if original.engine.scope.is_some() && !query_accepts(&original, &path, &md) {
                     continue;
                 }
                 if admit(response, item(&path, &md, None, None), request.limit) {
@@ -638,6 +730,13 @@ fn indexed(
         }
     }
     Ok(())
+}
+// A bracket term cannot safely narrow Spotlight candidates: mdfind has its own pattern
+// grammar. A plain independent word may narrow it; otherwise use the all-name fallback.
+fn spotlight_hint(query: &str) -> Option<String> {
+    query_words(query)
+        .into_iter()
+        .find(|word| !word.contains(':') && !word.starts_with('.') && !word.contains(['[', ']']))
 }
 // Kill and reap even on read error/cancellation. No detached subprocess or reader thread.
 struct Child(std::process::Child);
@@ -674,11 +773,7 @@ fn spotlight(
             cmd.arg("-onlyin").arg(root);
         }
         // Spotlight is a candidate source; the parsed query determines accepted matches.
-        let hint = request
-            .query
-            .split_whitespace()
-            .find(|word| !word.contains(':') && !word.starts_with('.'));
-        if let Some(hint) = hint {
+        if let Some(hint) = spotlight_hint(&request.query) {
             cmd.arg("-name").arg(hint);
         } else {
             cmd.arg("kMDItemFSName == \"*\"");
@@ -738,8 +833,8 @@ fn spotlight(
                         if eligible(p, roots, request) {
                             match fs::metadata(p) {
                                 Ok(md) => {
-                                    if format_ok(p, md.is_dir(), &request.format)
-                                        && query_accepts(&query, p, &md)
+                                    if query_accepts(&query, p, &md)
+                                        && format_ok(p, md.is_dir(), &request.format)
                                         && admit(response, item(p, &md, None, None), request.limit)
                                     {
                                         return Ok(());
@@ -1308,6 +1403,108 @@ mod tests {
     }
 
     #[test]
+    fn global_name_parser_keeps_date_and_wildcard_brackets_literal() {
+        let f = Fixture::new();
+        let literal = f.file("report [2026-11-01].txt", "fixture");
+        let decoy = f.file("report 2026-11-01.txt", "decoy");
+        let class_literal = f.file("report [abc].txt", "fixture");
+        let class_decoy = f.file("report xabcx.txt", "decoy");
+        for (text, wanted, unwanted) in [
+            ("report [2026-11-01]", &literal, &decoy),
+            ("*[2026-11-01]*", &literal, &decoy),
+            ("*[abc]*", &class_literal, &class_decoy),
+            ("report [abc]", &class_literal, &class_decoy),
+        ] {
+            // Same real fsearch parser and final matching path used by both global sources.
+            let parsed = parse_query(text, false).unwrap();
+            assert!(
+                query_accepts(&parsed, wanted, &fs::metadata(wanted).unwrap()),
+                "{text}"
+            );
+            assert!(
+                !query_accepts(&parsed, unwanted, &fs::metadata(unwanted).unwrap()),
+                "{text}"
+            );
+        }
+    }
+    #[test]
+    fn global_name_parser_keeps_explicit_regex_and_extension_filters() {
+        let f = Fixture::new();
+        let regex_hit = f.file("report a.txt", "fixture");
+        let bracket_hit = f.file("report [abc].txt", "fixture");
+        let wrong_ext = f.file("report [abc].png", "decoy");
+        let regex = parse_query("re:^report.[a-c]\\.txt$ ext:txt", false).unwrap();
+        assert!(query_accepts(
+            &regex,
+            &regex_hit,
+            &fs::metadata(&regex_hit).unwrap()
+        ));
+        assert!(!query_accepts(
+            &regex,
+            &bracket_hit,
+            &fs::metadata(&bracket_hit).unwrap()
+        ));
+        let mixed = parse_query("*[abc]* re:txt$ ext:txt", false).unwrap();
+        assert!(query_accepts(
+            &mixed,
+            &bracket_hit,
+            &fs::metadata(&bracket_hit).unwrap()
+        ));
+        assert!(!query_accepts(
+            &mixed,
+            &regex_hit,
+            &fs::metadata(&regex_hit).unwrap()
+        ));
+        assert!(!query_accepts(
+            &mixed,
+            &wrong_ext,
+            &fs::metadata(&wrong_ext).unwrap()
+        ));
+        assert_eq!(
+            parse_query("re:[", false).err().unwrap().code,
+            "invalidQuery"
+        );
+    }
+
+    #[test]
+    fn spotlight_bracket_only_hint_is_broad_and_literal_admission_rejects_decoys() {
+        let f = Fixture::new();
+        let wanted = f.file("report [2026-11-01].txt", "fixture");
+        let decoy = f.file("report x2026-11-01x.txt", "decoy");
+        for text in ["*[2026-11-01]*", "\"report [2026-11-01]\""] {
+            assert_eq!(spotlight_hint(text), None); // Uses the existing all-name Spotlight query.
+            let parsed = parse_query(text, false).unwrap();
+            assert!(query_accepts(
+                &parsed,
+                &wanted,
+                &fs::metadata(&wanted).unwrap()
+            ));
+            assert!(!query_accepts(
+                &parsed,
+                &decoy,
+                &fs::metadata(&decoy).unwrap()
+            ));
+        }
+        assert_eq!(spotlight_hint("report [2026-11-01]"), Some("report".into()));
+        assert_eq!(spotlight_hint("re:[a-c]"), None);
+    }
+    #[test]
+    fn global_command_rejects_malformed_explicit_regex_before_sources() {
+        let result = tauri::async_runtime::block_on(search_query(
+            "re:[".into(),
+            "global".into(),
+            None,
+            false,
+            None,
+            None,
+            Some("name".into()),
+            "global_invalid_explicit_regex".into(),
+            None,
+        ));
+        assert_eq!(result.err().unwrap().code, "invalidQuery");
+    }
+
+    #[test]
     fn cancellation_before_admission_is_honored_and_ids_are_bounded() {
         cancel_search("cancel_before".into()).unwrap();
         let active = Active::new("cancel_before".into()).unwrap();
@@ -1422,9 +1619,9 @@ mod tests {
     #[test]
     fn source_format_intersects_user_extension_filter() {
         let mut q = parse_query("report ext:png", false).unwrap();
-        assert!(!apply_format(&mut q, "document"));
+        assert!(!apply_format(&mut q.engine, "document"));
         let mut q = parse_query("report ext:txt", false).unwrap();
-        assert!(apply_format(&mut q, "document"));
-        assert_eq!(q.exts, vec![b"txt".to_vec()]);
+        assert!(apply_format(&mut q.engine, "document"));
+        assert_eq!(q.engine.exts, vec![b"txt".to_vec()]);
     }
 }
