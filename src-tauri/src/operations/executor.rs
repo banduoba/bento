@@ -228,7 +228,14 @@ impl FileExecutor {
         let mut source_manifest = source
             .map(|s| Manifest::capture(s, &|| checkpoint(c)))
             .transpose()?;
-        let auto = r.options.keep_both || r.kind == OperationKind::Trash || creating;
+        // Pasting onto the source's own directory entry means duplicate. Resolve
+        // parent aliases, but keep unrelated conflicts (including hard links in
+        // another directory) on the normal conflict-policy path.
+        let duplicate_in_place = r.kind == OperationKind::Copy
+            && source.is_some_and(|src| same_entity(src, &requested))
+            && fs::canonicalize(source.unwrap().parent().unwrap())? == fs::canonicalize(&parent)?;
+        let auto =
+            r.options.keep_both || r.kind == OperationKind::Trash || creating || duplicate_in_place;
         let mut destination = requested.clone();
         let mut replacement = None;
         if !crate::entry_available(&destination) {
