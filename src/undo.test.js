@@ -44,12 +44,15 @@ test('rejected undo remains retryable and overlapping key presses admit one undo
   assert.equal(calls.length,2)
   assert.deepEqual(calls.map(c=>c[0]),['u-exact','u-exact']);assert.equal(calls[0][1],calls[1][1])
 })
-test('input, textarea and contenteditable undo remain native while file undo is available',async t=>{
+test('input, textarea and contenteditable undo use browser commands while file undo is available',async t=>{
   const {b,h}=await completedMove(t)
+  const commands=[]
+  document.execCommand=(...args)=>{commands.push(args);return true}
   for(const element of [{tagName:'INPUT'},{tagName:'TEXTAREA'},{tagName:'DIV',isContentEditable:true}]){
     document.activeElement=element
-    assert.equal((await key(h,'z',{metaKey:true})).defaultPrevented,false)
+    assert.equal((await key(h,'z',{metaKey:true})).defaultPrevented,true)
   }
+  assert.deepEqual(commands.map(c=>c[0]),['undo','undo','undo'])
   assert.equal(b.calls.some(c=>c[0]==='undo'),false)
 })
 test('missing inverse outcome pages do not acknowledge results or announce undo success',async t=>{

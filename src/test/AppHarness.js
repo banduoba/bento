@@ -23,14 +23,14 @@ const bundle = await build({ stdin: {contents: `export { default } from './App.j
       : path.endsWith('/event') ? `export const listen=(...a)=>globalThis.${bridgeKey}.listen(...a)`
       : path.endsWith('/core') ? `export const invoke=(...a)=>globalThis.${bridgeKey}.invoke(...a); export const convertFileSrc=x=>x; export class Channel{}`
       : path.endsWith('plugin-dialog') ? `export const open=async()=>null; export const confirm=(...a)=>globalThis.${bridgeKey}.confirm(...a)`
-      : 'export const readText=async()=>""; export const writeText=async()=>{}'
+      : `export const readText=(...a)=>globalThis.${bridgeKey}.textClipboard.readText(...a); export const writeText=(...a)=>globalThis.${bridgeKey}.textClipboard.writeText(...a)`
   }))
 }}] })
 const mod={exports:{}}
 new Function('require','module','exports',bundle.outputFiles[0].text)(require,mod,mod.exports)
 const App=mod.exports.default
 export const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b});return{promise,resolve,reject}}
-export async function mountApp(t, overrides={}, effectClock) {
+export async function mountApp(t, overrides={}, effectClock, textClipboard={}) {
   const globals=['window','document','requestAnimationFrame','cancelAnimationFrame','IS_REACT_ACT_ENVIRONMENT',bridgeKey]
   const previous=Object.fromEntries(globals.map(k=>[k,globalThis[k]]))
   const storageDescriptor=Object.getOwnPropertyDescriptor(globalThis,'localStorage')
@@ -47,7 +47,7 @@ export async function mountApp(t, overrides={}, effectClock) {
   const win={setAlwaysOnTop:async()=>{},setTitle:async()=>{},onDragDropEvent:async f=>{dragHandler=f;return()=>{dragHandler=null}},onMoved:async()=>()=>{},onResized:async()=>()=>{},onCloseRequested:async f=>{closeHandler=f;return()=>{closeHandler=null}},close:async()=>{closes++},destroy:async()=>{closes++;destroyed++}}
   const emptyQueue=()=>({sessionId:'test',revision:1,jobs:[],busy:false,accepting:true,latestUndoId:null})
   const api={listOperationJobs:async()=>emptyQueue(),listOperationRecoveries:async()=>[],prepareOperationExit:async()=>emptyQueue(),ackOperationOutcomes:async()=>{},fsearchStatus:async()=>({ready:true}),diskSpace:async()=>1000,homeDir:async()=>'/home',loadConfig:async()=>null,loadViewSettings:async()=>null,loadSession:async()=>null,listTemplates:async()=>[],resolvePath:async p=>p,saveConfig:async v=>writes.config.push(v),saveViewSettings:async v=>writes.views.push(v),saveSession:async v=>writes.session.push(v),sessionExitReply:async(id,allow)=>replies.push([id,allow]),...overrides}
-  globalThis[bridgeKey]={api,win,effectClock,listen:async(name,fn)=>{events.set(name,fn);return()=>events.delete(name)},invoke:async(cmd,args)=>{if(cmd==='session_exit_reply')replies.push([args.requestId,args.allowExit])},confirm:async(...args)=>{dialogs.push(args);return discard}}
+  globalThis[bridgeKey]={api,win,effectClock,textClipboard:{readText:async()=>"",writeText:async()=>{},...textClipboard},listen:async(name,fn)=>{events.set(name,fn);return()=>events.delete(name)},invoke:async(cmd,args)=>{if(cmd==='session_exit_reply')replies.push([args.requestId,args.allowExit])},confirm:async(...args)=>{dialogs.push(args);return discard}}
   mod.exports.clipboard.setClip(null)
   let renderer
   const error=console.error

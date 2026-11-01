@@ -6,6 +6,7 @@ import { confirm } from '@tauri-apps/plugin-dialog'
 import { blankTab, blankPane, freshId, navigateTab, restoreSession, sessionForDisk, preferencesForDisk } from './session'
 import { createSerialSaver } from './persistence'
 import { createSessionClose } from './sessionClose'
+import { createTextEditing, isTextEditingElement } from './textEditing'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { api, hasTauri } from './api'
 import { bumpManualRefreshTick, directoryKey, invalidateDirectories, rootRefreshKey } from './paneFeedback'
@@ -61,51 +62,6 @@ const EMPTY_SELECTION = new Set()
 const trace = (m) => {
   invoke('append_trace_log', { msg: m }).catch(() => {})
   invoke('log_debug', { msg: m }).catch(() => {})
-}
-
-// 输入框文本编辑辅助（无系统编辑菜单时 WKWebView 输入框原生 ⌘C/⌘V 失效）
-function applyInputValue(el, value, selStart, selEnd) {
-  const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype
-  Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value)
-  el.dispatchEvent(new Event('input', { bubbles: true }))
-  requestAnimationFrame(() => {
-    try {
-      el.setSelectionRange(selStart, selEnd)
-    } catch {}
-  })
-}
-
-async function handleTextShortcut(e, el) {
-  if (!e.metaKey || e.altKey || e.ctrlKey || e.shiftKey) return
-  const key = e.key.toLowerCase()
-  const s = el.selectionStart ?? 0
-  const t = el.selectionEnd ?? 0
-  const sel = el.value.slice(s, t)
-  if (key === 'a') {
-    e.preventDefault()
-    el.select?.()
-    return
-  }
-  if (key === 'c' || key === 'x') {
-    if (!sel) return
-    e.preventDefault()
-    try {
-      await writeText(sel)
-    } catch {
-      try {
-        await navigator.clipboard.writeText(sel)
-      } catch {}
-    }
-    if (key === 'x') applyInputValue(el, el.value.slice(0, s) + el.value.slice(t), s, s)
-    return
-  }
-  if (key === 'v') {
-    e.preventDefault()
-    try {
-      const text = await readText()
-      if (text) applyInputValue(el, el.value.slice(0, s) + text + el.value.slice(t), s + text.length, s + text.length)
-    } catch {}
-  }
 }
 
 const freshWsId = () => `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
@@ -1368,6 +1324,7 @@ export default function App() {
 
   // ---------- 全局快捷键 ----------
   const keyRef = useRef(null)
+  const textEditing = useRef(null)
   keyRef.current = (e) => {
     if (exitChoice || exitDraining || visibleConflict) return
     // ⌘,：输入框聚焦时也可打开设置
@@ -1379,12 +1336,16 @@ export default function App() {
       setSettingsOpen(true)
       return
     }
-    // Text inputs retain native undo; file undo belongs to the backend effect stack.
-    if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
-      const tag = document.activeElement?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || document.activeElement?.isContentEditable) return
-      e.preventDefault()
-      undoLast()
+    // Text Undo/Redo must explicitly reach WebKit; file Undo uses the effect stack.
+    if (e.metaKey && !e.altKey && !e.ctrlKey && e.key.toLowerCase() === 'z') {
+      if (isTextEditingElement(document.activeElement)) {
+        textEditing.current?.handleKeyDown(e)
+        return
+      }
+      if (!e.shiftKey) {
+        e.preventDefault()
+        undoLast()
+      }
       return
     }
     // ⌘K：打开/聚焦搜索面板（浏览器习惯）
@@ -1415,15 +1376,14 @@ export default function App() {
       copyPlainPaths(tab.id, orderedPaths(tab.id))
       return
     }
-    const tag = document.activeElement?.tagName
     if (e.metaKey && !e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === 'r' || e.key === 'R')) {
       e.preventDefault()
       const tab = activeTabOf(focusIdx)
       if (tab) refreshTab(tab.id)
       return
     }
-    if (tag === 'INPUT' || tag === 'TEXTAREA') {
-      handleTextShortcut(e, document.activeElement)
+    if (isTextEditingElement(document.activeElement)) {
+      textEditing.current?.handleKeyDown(e)
       return
     }
     const meta = e.metaKey
@@ -1593,9 +1553,18 @@ export default function App() {
   }
 
   useEffect(() => {
+    const editor = createTextEditing({
+      doc: document, readText, writeText,
+      writeFallback: text => navigator.clipboard.writeText(text),
+    })
+    textEditing.current = editor
     const h = (e) => keyRef.current?.(e)
     window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
+    return () => {
+      window.removeEventListener('keydown', h)
+      editor.dispose()
+      textEditing.current = null
+    }
   }, [])
 
   const conflictKey = job => `${job.jobId}:${job.conflict?.conflictId}:${job.conflict?.revision}`

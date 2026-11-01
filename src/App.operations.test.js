@@ -38,12 +38,15 @@ test('new directory completion begins rename only in the original live tab and p
   await b.emit(h,'j2',{state:'completed',phase:'finished'},[outcome({source:null,actualDestination:'/home/new2',effectId:'e2',affectedDirectories:['/home']})])
   assert.equal(h.panes[0].props.renaming,null)
 })
-test('file undo invokes backend top id, stays retryable after partial, and leaves native input undo untouched',async t=>{
+test('file undo invokes backend top id, stays retryable after partial, and keeps input undo in the browser',async t=>{
   const b=operationBoundary(),h=await mountApp(t,b.api)
   await h.run(()=>h.panes[0].props.onDropTransfer('/dest',['/src/a'],'move'))
   b.setUndo('u1');await b.emit(h,'j1',{state:'completed',phase:'finished',undoId:'u1'},[outcome({sourceDisposition:'removed'})])
   document.activeElement={tagName:'INPUT'}
-  const editing=await key(h,'z',{metaKey:true});assert.equal(editing.defaultPrevented,false)
+  const commands=[]
+  document.execCommand=(...args)=>{commands.push(args);return true}
+  const editing=await key(h,'z',{metaKey:true});assert.equal(editing.defaultPrevented,true)
+  assert.deepEqual(commands,[['undo',false,null]])
   assert.equal(b.calls.filter(c=>c[0]==='undo').length,0)
   document.activeElement=null
   await key(h,'z',{metaKey:true});const undo=b.calls.find(c=>c[0]==='undo');assert.equal(undo[1],'u1')
