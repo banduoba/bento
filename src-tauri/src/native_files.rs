@@ -274,21 +274,21 @@ fn resolved_reply_path(reply: &Descriptor) -> Option<String> {
 }
 
 fn workspace_completion(
-    paths: &[String],
+    inputs: &[(String, Retained<NSURL>)],
     mapping: &NSDictionary<NSURL, NSURL>,
     error: Option<&NSError>,
 ) -> Completion {
     let mut result = error.map(ns_error).unwrap_or_default();
-    for original in paths {
-        // Look up by the URL supplied to AppKit, but preserve the caller's spelling
-        // (NSURL.path removes a directory's trailing slash, for example).
-        if let Some(new_url) = mapping.objectForKey(&file_url(original)) {
+    for (original, original_url) in inputs {
+        // Retain the exact key supplied to AppKit: reconstructing a URL after Trash
+        // loses directory semantics once the original path no longer exists.
+        if let Some(new_url) = mapping.objectForKey(original_url) {
             if let Some(new) = url_path(&new_url) {
                 result.mappings.push((original.clone(), new));
             }
         }
     }
-    if result.mappings.len() != paths.len() && result.error.is_none() && !result.cancelled {
+    if result.mappings.len() != inputs.len() && result.error.is_none() && !result.cancelled {
         result.error = Some("系统未返回全部文件的完成位置，请检查文件位置。".into());
     }
     result
@@ -298,14 +298,17 @@ fn workspace(app: &AppHandle, paths: &[String], recycle: bool) -> Result<Complet
     let (sender, receiver) = mpsc::channel();
     let paths = paths.to_vec();
     app.run_on_main_thread(move || {
-        let urls: Vec<_> = paths.iter().map(|path| file_url(path)).collect();
-        let urls = NSArray::from_retained_slice(&urls);
+        let original_urls: Vec<_> = paths.iter().map(|path| file_url(path)).collect();
+        let urls = NSArray::from_retained_slice(&original_urls);
+        // The escaping block owns these retained NSURLs and request strings until
+        // AppKit finishes, independently of this stack frame and its input array.
+        let inputs: Vec<_> = paths.into_iter().zip(original_urls).collect();
         let callback = block2::RcBlock::new(
             move |mapping: NonNull<NSDictionary<NSURL, NSURL>>, error: *mut NSError| {
                 // AppKit owns these objects for the duration of this callback. Copy only
                 // Rust strings/errors across the channel; no borrowed Objective-C value escapes.
                 let mapping = unsafe { mapping.as_ref() };
-                let result = workspace_completion(&paths, mapping, unsafe { error.as_ref() });
+                let result = workspace_completion(&inputs, mapping, unsafe { error.as_ref() });
                 // Receiver may disappear during shutdown; that does not cancel/retry system work.
                 let _ = sender.send(result);
             },
@@ -626,11 +629,62 @@ mod tests {
     }
 
     #[test]
+    fn workspace_receipt_survives_source_directory_disappearing_before_callback() {
+        let root = std::env::temp_dir().join(format!(
+            "bento-native-directory-receipt-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(root.clone());
+        let source = root.join("source");
+        let moved = root.join("moved");
+        std::fs::create_dir(&source).unwrap();
+        let paths = vec![source.to_str().unwrap().to_string()];
+        // NSWorkspace keys its completion dictionary by the URL it received while
+        // this source was still a directory. Simulate only the filesystem transition.
+        let original = file_url(&paths[0]);
+        std::fs::rename(&source, &moved).unwrap();
+        let new = file_url(moved.to_str().unwrap());
+        let mapping = NSDictionary::from_slices(&[&*original], &[&*new]);
+        let (sender, receiver) = mpsc::channel();
+        let callback = {
+            let inputs = vec![(paths[0].clone(), original)];
+            block2::RcBlock::new(move |mapping: NonNull<NSDictionary<NSURL, NSURL>>| {
+                let result = workspace_completion(&inputs, unsafe { mapping.as_ref() }, None);
+                sender.send(result).unwrap();
+            })
+        };
+        // Invoke after the original local binding and source path are gone; only
+        // the escaping block retains the input key used for receipt decoding.
+        callback.call((NonNull::from(&*mapping),));
+        let result = trash_result(receiver.recv().unwrap());
+        assert_eq!(
+            result.entries.len(),
+            1,
+            "completed directory receipt must survive source disappearance"
+        );
+        assert_eq!(result.entries[0].original, paths[0]);
+        assert_eq!(result.entries[0].trashed, moved.to_str().unwrap());
+        assert!(result.entries[0].identity.is_some());
+        assert!(result.error.is_none());
+    }
+
+    #[test]
     fn workspace_mapping_preserves_request_spelling_and_partial_success_on_cancel() {
         let paths = vec!["/tmp/source/".to_string(), "/tmp/other".to_string()];
-        let original = file_url(&paths[0]);
+        let inputs: Vec<_> = paths
+            .iter()
+            .map(|path| (path.clone(), file_url(path)))
+            .collect();
+        let original = &inputs[0].1;
         let new = file_url("/tmp/actual-trash/source 2");
-        let mapping = NSDictionary::from_slices(&[&*original], &[&*new]);
+        let mapping = NSDictionary::from_slices(&[&**original], &[&*new]);
         let error = unsafe {
             NSError::errorWithDomain_code_userInfo(
                 &NSString::from_str("NSCocoaErrorDomain"),
@@ -638,12 +692,12 @@ mod tests {
                 None,
             )
         };
-        let result = trash_result(workspace_completion(&paths, &mapping, Some(&error)));
+        let result = trash_result(workspace_completion(&inputs, &mapping, Some(&error)));
         assert_eq!(result.entries[0].original, "/tmp/source/");
         assert_eq!(result.entries[0].trashed, "/tmp/actual-trash/source 2");
         assert!(result.cancelled);
         assert!(result.error.is_none());
-        let missing = workspace_completion(&paths, &mapping, None);
+        let missing = workspace_completion(&inputs, &mapping, None);
         assert!(
             missing.error.is_some(),
             "nil NSError cannot invent success for missing mapping"
