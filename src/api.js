@@ -8,6 +8,7 @@ export const api = hasTauri
   ? {
       ...searchApi(invoke),
       listDir: (path, showHidden) => invoke('list_dir', { path, showHidden }),
+      listSubdirectories: (path, showHidden) => invoke('list_subdirectories', { path, showHidden }),
       // 当前目录分批推送。onBatch 是 Tauri Channel；约 500 条一批，最后一批 done=true。
       listDirStream: (path, showHidden, requestId, sortKey, sortDir, onBatch) =>
         invoke('list_dir_stream', {
@@ -308,6 +309,14 @@ function mockApi() {
     return Promise.resolve(results)
   }
   const mock = {
+    listSubdirectories: async (path, showHidden) => {
+      const resolved = await mockResolvePath(path)
+      return {
+        entries: (TREE[resolved] || []).filter(e => e.is_dir && (showHidden || !e.name.startsWith('.')))
+          .map(e => ({ name: e.name, path: `${path.endsWith('/') ? path : path + '/'}${e.name}`, is_symlink: false })),
+        truncated: false,
+      }
+    },
     listDir: (path, showHidden) => {
       if (path !== HUGE_PATH && !TREE[path]) return Promise.reject(new Error(`无法读取目录 ${path}`))
       return Promise.resolve({ entries: entriesFor(path, showHidden) })

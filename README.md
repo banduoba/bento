@@ -41,6 +41,7 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | --- | --- |
 | **Multi-pane layouts** | 10 presets — single, side-by-side, stacked, 2×2, and several 3-pane arrangements. Switch with <kbd>⌘1</kbd> <kbd>⌘2</kbd> <kbd>⌘4</kbd> or the layout picker. |
 | **Tabs & workspaces** | Every pane has its own Finder-style tabs. Save whole layouts (panes, tabs, paths) as named workspaces in the sidebar. |
+| **Sidebar folder tree** | Expand Home, favorites and volumes one folder level at a time; folder names open in the focused pane. Only expanded branches are watched, with retry and a full-folder link for limited results. |
 | **Instant search** | Global file-name search backed by the [fsearch](https://github.com/noahdunnagan/fsearch) index — fuzzy matching, `*` / `?` wildcards, `ext:` filters and `re:` regular expressions — plus **content search** with a side preview that highlights matching lines. |
 | **Native drag & drop** | Drag files out to Finder or any other app, drop files in from anywhere, or move them between panes. It works even when Bento sits behind other windows, and drop targets are highlighted as you hover. |
 | **Real clipboard** | <kbd>⌘C</kbd> puts real file URLs on the system pasteboard, so <kbd>⌘V</kbd> in Finder and other apps pastes the files themselves. |
