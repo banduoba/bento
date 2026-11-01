@@ -28,7 +28,7 @@ const favoriteIcons = {
 
 function SystemIcon({ src, template }) {
   const kind = template ? 'sb-template-icon' : 'sb-color-icon'
-  return <img className={`sb-system-icon ${kind}`} src={src} width={16} height={16} alt="" draggable={false} />
+  return <img className={`sb-system-icon ${kind}`} src={src} width={20} height={20} alt="" draggable={false} />
 }
 
 // Finder / QSpace 侧边栏用独立彩色字形。iconForFile 对 Desktop、Downloads 等
@@ -44,7 +44,7 @@ function FavoriteIcon({ favorite, native }) {
   const src = bundledFavoriteSrc(favorite)
   if (src) return <SystemIcon src={src} template={false} />
   if (native?.icon) return <SystemIcon src={native.icon} template={!!native.template} />
-  return <IconFolder size={15} />
+  return <IconFolder size={20} />
 }
 
 const trace = (m) => invoke('log_debug', { msg: m }).catch(() => {})
@@ -98,7 +98,18 @@ function FavItem({ icon, label, path, removable, active, dropping, setDropKey, o
           onMouseDown={(e) => { e.preventDefault(); e.stopPropagation() }}
           onKeyDown={(e) => e.stopPropagation()}
           onClick={(e) => { e.stopPropagation(); onToggle() }}
-        ><span aria-hidden="true">{expanded ? '▾' : '▸'}</span></button>
+        >
+          <svg
+            className="sb-disclosure-icon"
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            aria-hidden="true"
+            focusable="false"
+          >
+            <path d="M5.5 3.5 L10 8 L5.5 12.5" />
+          </svg>
+        </button>
       ) : <span className="sb-disclosure-space" />}
       {icon}
       <span className="sb-label">{label}</span>
@@ -135,7 +146,7 @@ function FolderBranch({ id, tree, branches, parent = null, leaf = false, depth =
           branches={branches}
           leaf={entry.is_symlink}
           depth={depth + 1}
-          icon={<IconFolder size={16} />}
+          icon={<IconFolder size={20} />}
           label={entry.name}
           path={entry.path}
           removable={false}
@@ -285,7 +296,7 @@ export default function Sidebar({
         id={`home:${home}`} tree={tree} branches={branches} focusedPath={focusedPath}
         icon={home
           ? <SystemIcon src={homeIcon} template={false} />
-          : <IconHouse size={15} />}
+          : <IconHouse size={20} />}
         label="主目录"
         path={home}
         removable={false}
@@ -322,7 +333,7 @@ export default function Sidebar({
               key={v.path}
               icon={getCachedIcon(v.path)?.icon
                 ? <SystemIcon src={getCachedIcon(v.path).icon} template={!!getCachedIcon(v.path).template} />
-                : <IconDrive size={15} />}
+                : <IconDrive size={20} />}
               label={v.name}
               path={v.path}
               removable={false}
