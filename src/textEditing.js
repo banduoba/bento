@@ -18,21 +18,6 @@ export function createTextEditing({ doc, readText, writeText, writeFallback }) {
   let disposed = false
   const cancelPending = () => { for (const cancel of [...pending]) cancel() }
   const command = (name, value = null) => doc.execCommand?.(name, false, value)
-  const historyCommand = (name, el) => {
-    // WebKit history belongs to the document. Cancel before it edits a different
-    // root or restores that root's selection, keeping the invoking editor focused.
-    let root = el
-    if (el.isContentEditable) {
-      while (root.parentElement?.isContentEditable) root = root.parentElement
-    }
-    const guard = e => {
-      if (e.inputType !== 'historyUndo' && e.inputType !== 'historyRedo') return
-      if (e.target !== root && !root.contains?.(e.target)) e.preventDefault()
-    }
-    doc.addEventListener?.('beforeinput', guard, true)
-    try { command(name) }
-    finally { doc.removeEventListener?.('beforeinput', guard, true) }
-  }
   const snapshot = el => {
     const selection = selectionSnapshot(doc, el)
     const value = el.isContentEditable ? el.textContent : el.value
@@ -86,7 +71,7 @@ export function createTextEditing({ doc, readText, writeText, writeFallback }) {
       if (key === 'z') {
         e.preventDefault()
         cancelPending()
-        historyCommand(e.shiftKey ? 'redo' : 'undo', el)
+        command(e.shiftKey ? 'redo' : 'undo')
         return
       }
       if (e.shiftKey) return

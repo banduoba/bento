@@ -154,8 +154,10 @@ test('returning to the application does not revive a pending paste', async t => 
   assert.deepEqual(commands,[])
 })
 
+// Native WebKit history may restore another editor. Do not cancel that history
+// event: on macOS cancellation consumes its entry (native round-2 evidence).
 for (const [shortcut, inputType] of [['z', 'historyUndo'], ['Z', 'historyRedo']]) {
-  test(`${inputType} cancels a native command targeting another editor before mutation`, async t => {
+  test(`${inputType} keeps native document history intact across editors`, async t => {
     const h=await mountApp(t),{el}=inputFixture(h),other={tagName:'INPUT'}
     let before
     document.execCommand=()=>{
@@ -166,51 +168,20 @@ for (const [shortcut, inputType] of [['z', 'historyUndo'], ['Z', 'historyRedo']]
       return true
     }
     await key(h,shortcut,{metaKey:true,shiftKey:shortcut==='Z'})
-    assert.equal(before.defaultPrevented,true)
-    assert.equal(document.activeElement,el)
+    assert.equal(before.defaultPrevented,false)
+    assert.equal(document.activeElement,el) // command boundary never manufactures focus changes
   })
 }
 
-test('same-editor history and ordinary editing events remain native, and the temporary history guard is removed', async t => {
-  const h=await mountApp(t),{el}=inputFixture(h),events=[]
-  const emit=(target,inputType)=>{
-    const e=new Event('beforeinput',{cancelable:true})
-    Object.assign(e,{inputType});Object.defineProperty(e,'target',{value:target})
-    document.dispatchEvent(e);events.push(e)
-  }
-  document.execCommand=()=>{emit(el,'historyUndo');emit({tagName:'INPUT'},'insertText');return true}
-  await key(h,'z',{metaKey:true})
-  emit({tagName:'INPUT'},'historyUndo')
-  assert.deepEqual(events.map(e=>e.defaultPrevented),[false,false,false])
-})
-
-test('textarea history uses its own control as the ownership boundary', async t => {
-  const h=await mountApp(t),{el}=inputFixture(h),events=[]
-  el.tagName='TEXTAREA'
-  document.execCommand=()=>{
-    for(const target of [el,{tagName:'TEXTAREA'}]) {
-      const e=new Event('beforeinput',{cancelable:true})
-      Object.assign(e,{inputType:'historyUndo'});Object.defineProperty(e,'target',{value:target})
-      document.dispatchEvent(e);events.push(e)
-    }
-    return true
-  }
-  await key(h,'z',{metaKey:true})
-  assert.deepEqual(events.map(e=>e.defaultPrevented),[false,true])
-})
-
-test('contenteditable history permits its editing host while blocking another host', async t => {
-  const h=await mountApp(t),{el}=inputFixture(h),events=[]
-  const host={isContentEditable:true,contains:target=>target===el}
-  el.tagName='SPAN';el.isContentEditable=true;el.parentElement=host
-  document.execCommand=()=>{
-    for(const target of [host,el,{isContentEditable:true}]) {
-      const e=new Event('beforeinput',{cancelable:true})
-      Object.assign(e,{inputType:'historyRedo'});Object.defineProperty(e,'target',{value:target})
-      document.dispatchEvent(e);events.push(e)
-    }
-    return true
-  }
-  await key(h,'Z',{metaKey:true,shiftKey:true})
-  assert.deepEqual(events.map(e=>e.defaultPrevented),[false,false,true])
+test('App active pane, sidebar path and title follow the Pane focus callback', async t => {
+  const h=await mountApp(t)
+  await h.run(()=>h.panes[0].props.onNav(h.panes[0].props.pane.tabs[0].id,'/owner-left'))
+  await h.run(()=>h.panes[1].props.onNav(h.panes[1].props.pane.tabs[0].id,'/owner-right'))
+  await h.run(()=>h.panes[1].props.onFocus(1))
+  assert.deepEqual(h.panes.map(p=>p.props.focused),[false,true])
+  assert.equal(h.sidebar.props.focusedPath,'/owner-right')
+  await h.run(()=>h.panes[0].props.onFocus(0))
+  assert.deepEqual(h.panes.map(p=>p.props.focused),[true,false])
+  assert.equal(h.sidebar.props.focusedPath,'/owner-left')
+  assert.equal(h.titles.at(-1),'owner-left')
 })

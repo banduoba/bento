@@ -1145,6 +1145,7 @@ export default function Pane({
       style={{ gridArea: area, '--list-row-height': `${LIST_ROW_HEIGHT}px` }}
       data-tab-id={tab.id}
       className={`pane${focused ? ' focused' : ''}${flash ? ' flash' : ''}${dropTarget === 'bg' ? ' drop-hover' : ''}`}
+      onFocusCapture={() => onFocus(index)}
       onMouseDown={() => onFocus(index)}
       onContextMenu={(e) => {
         e.preventDefault()
