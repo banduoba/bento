@@ -210,14 +210,15 @@ input, textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.tb-center { flex: 1; display: flex; justify-content: center; }
+.tb-center { flex: 1; min-width: 72px; display: flex; justify-content: center; }
 .layout-pick-wrap { position: relative; }
 .layout-btn {
   border: none;
   background: var(--fill-bg);
   border-radius: 10px;
   box-shadow: inset 0 0 0 1px var(--inset-border);
-  padding: 5px 10px;
+  height: 32px;
+  padding: 0 10px;
   display: flex;
   align-items: center;
   gap: 5px;
@@ -263,7 +264,29 @@ input, textarea {
   gap: 2px;
 }
 .mini-grid span { background: currentColor; border-radius: 2px; }
-.tb-right { display: flex; gap: 6px; flex: none; }
+.tb-nav, .tb-right { display: flex; align-items: center; gap: 4px; flex: none; }
+.titlebar .iconbtn {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-2);
+  background: transparent;
+  cursor: pointer;
+}
+.titlebar .iconbtn:hover:not(:disabled) { background: var(--hover-bg); color: var(--text); }
+.titlebar .iconbtn.on { color: var(--accent); background: var(--accent-soft); }
+.titlebar .iconbtn:disabled { color: var(--disabled-text); background: transparent; cursor: default; }
+.titlebar .iconbtn:focus-visible, .titlebar .layout-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.titlebar .iconbtn:active:not(:disabled) { background: var(--group-bg); }
+.titlebar .iconbtn:disabled:active { transform: none; }
 
 .seg {
   display: flex;
