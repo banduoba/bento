@@ -2945,3 +2945,463 @@ fn fix3_independent_precommit_failure_still_allows_other_inverse_items() {
 
 #[path = "final_review_tests.rs"]
 mod final_review;
+
+#[test]
+fn same_folder_copy_creates_unique_siblings_and_undo_preserves_original() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("docs")).unwrap();
+    let source = d.join("docs/research.md");
+    fs::write(&source, b"original content").unwrap();
+    fs::write(d.join("docs/research copy.md"), b"existing sibling").unwrap();
+    let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let mut undos = vec![];
+    for name in [
+        "research copy 1.md",
+        "research copy 2.md",
+        "research copy 3.md",
+    ] {
+        let c = OperationContext::detached("copy");
+        let result = e.execute(
+            &Work::Operation(request(OperationKind::Copy, &source, &d.join("docs"))),
+            &c,
+        );
+        let outcomes = c.recorded_outcomes();
+        let out = &outcomes[0];
+        assert_eq!(out.status, OutcomeStatus::Succeeded, "{out:?}");
+        assert_eq!(
+            out.actual_destination,
+            Some(display(&d.join("docs").join(name)))
+        );
+        assert_eq!(out.requested_destination, Some(display(&source)));
+        assert_eq!(out.source_disposition, SourceDisposition::Unchanged);
+        assert_eq!(out.affected_directories, vec![display(&d.join("docs"))]);
+        assert_eq!(
+            fs::read(d.join("docs").join(name)).unwrap(),
+            b"original content"
+        );
+        assert!(original.matches(&source));
+        undos.push((result.undo_id.unwrap(), name));
+    }
+    for (undo_id, name) in undos {
+        assert!(
+            e.execute(&Work::Undo { undo_id }, &OperationContext::detached("undo"))
+                .undo_complete
+        );
+        assert!(!d.join("docs").join(name).exists());
+        assert!(original.matches(&source));
+        assert_eq!(
+            fs::read(d.join("docs/research copy.md")).unwrap(),
+            b"existing sibling"
+        );
+    }
+    assert!(e.recoveries().unwrap().is_empty());
+}
+
+#[test]
+fn same_folder_explicit_duplicate_preserves_source_fingerprint() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("docs")).unwrap();
+    let source = d.join("docs/research.md");
+    fs::write(&source, b"original content").unwrap();
+    let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let mut r = request(OperationKind::Copy, &source, &d.join("docs"));
+    r.options.keep_both = true;
+    let c = OperationContext::detached("duplicate");
+    let result = e.execute(&Work::Operation(r), &c);
+    assert_eq!(
+        c.recorded_outcomes()[0].status,
+        OutcomeStatus::Succeeded,
+        "{:?}",
+        c.recorded_outcomes()
+    );
+    assert!(original.matches(&source));
+    assert!(result.undo_id.is_some());
+}
+
+#[test]
+fn same_folder_copy_through_parent_alias_duplicates_files_directories_and_links() {
+    for directory in [false, true] {
+        for source_alias in [false, true] {
+            let d = Scratch::new();
+            fs::create_dir(d.join("docs")).unwrap();
+            std::os::unix::fs::symlink(d.join("docs"), d.join("alias")).unwrap();
+            let source = d.join("docs/item");
+            if directory {
+                fs::create_dir(&source).unwrap();
+                fs::create_dir(source.join("child")).unwrap();
+                fs::write(source.join("child/file"), b"nested content").unwrap();
+                std::os::unix::fs::symlink("child/file", source.join("link")).unwrap();
+            } else {
+                fs::write(&source, b"content").unwrap();
+            }
+            let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+            let (input, parent) = if source_alias {
+                (d.join("alias/item"), d.join("docs"))
+            } else {
+                (source.clone(), d.join("alias"))
+            };
+            let e = FileExecutor::new(d.join("app")).unwrap();
+            let c = OperationContext::detached("copy");
+            let r = e.execute(
+                &Work::Operation(request(OperationKind::Copy, &input, &parent)),
+                &c,
+            );
+            let out = &c.recorded_outcomes()[0];
+            assert_eq!(out.status, OutcomeStatus::Succeeded, "{out:?}");
+            assert_eq!(
+                out.actual_destination,
+                Some(display(&parent.join("item copy")))
+            );
+            assert!(out
+                .affected_directories
+                .contains(&display(input.parent().unwrap())));
+            assert!(out.affected_directories.contains(&display(&parent)));
+            assert!(original.matches(&source));
+            if directory {
+                assert_eq!(
+                    fs::read(d.join("docs/item copy/child/file")).unwrap(),
+                    b"nested content"
+                );
+                assert_eq!(
+                    fs::read_link(d.join("docs/item copy/link")).unwrap(),
+                    PathBuf::from("child/file")
+                );
+            } else {
+                assert_eq!(fs::read(d.join("docs/item copy")).unwrap(), b"content");
+            }
+            assert!(
+                e.execute(
+                    &Work::Undo {
+                        undo_id: r.undo_id.unwrap()
+                    },
+                    &OperationContext::detached("undo")
+                )
+                .undo_complete
+            );
+            assert!(!d.join("docs/item copy").exists());
+            assert!(original.matches(&source));
+        }
+    }
+}
+
+#[test]
+fn same_folder_copy_still_rejects_changed_source_and_changed_duplicate_undo() {
+    for edit_source in [true, false] {
+        let d = Scratch::new();
+        fs::create_dir(d.join("docs")).unwrap();
+        let source = d.join("docs/file");
+        fs::write(&source, b"original").unwrap();
+        let mut e = FileExecutor::new(d.join("app")).unwrap();
+        if edit_source {
+            let source = source.clone();
+            e.hook = Arc::new(move |point, _, _| {
+                if point == Point::PreparedVerify {
+                    fs::write(&source, b"modified")?;
+                }
+                Ok(())
+            });
+        }
+        let c = OperationContext::detached("copy");
+        let r = e.execute(
+            &Work::Operation(request(OperationKind::Copy, &source, &d.join("docs"))),
+            &c,
+        );
+        let out = &c.recorded_outcomes()[0];
+        if edit_source {
+            assert_eq!(out.status, OutcomeStatus::Failed, "{out:?}");
+            assert_eq!(
+                out.error.as_ref().unwrap().message,
+                identity::changed().to_string()
+            );
+            assert!(r.undo_id.is_none());
+            assert!(!d.join("docs/file copy").exists());
+            assert_eq!(fs::read(&source).unwrap(), b"modified");
+        } else {
+            assert_eq!(out.status, OutcomeStatus::Succeeded, "{out:?}");
+            fs::write(d.join("docs/file copy"), b"modified").unwrap();
+            assert!(
+                !e.execute(
+                    &Work::Undo {
+                        undo_id: r.undo_id.unwrap()
+                    },
+                    &OperationContext::detached("undo")
+                )
+                .undo_complete
+            );
+            assert_eq!(fs::read(d.join("docs/file copy")).unwrap(), b"modified");
+            assert_eq!(fs::read(&source).unwrap(), b"original");
+        }
+    }
+}
+
+#[test]
+fn same_folder_move_is_noop_and_copy_into_directory_descendants_is_rejected() {
+    let d = Scratch::new();
+    fs::create_dir_all(d.join("docs/tree/child")).unwrap();
+    fs::write(d.join("docs/tree/child/file"), b"content").unwrap();
+    std::os::unix::fs::symlink(d.join("docs"), d.join("alias")).unwrap();
+    let source = d.join("docs/tree");
+    let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    for parent in [d.join("docs"), d.join("alias")] {
+        let c = OperationContext::detached("move");
+        let r = e.execute(
+            &Work::Operation(request(OperationKind::Move, &source, &parent)),
+            &c,
+        );
+        assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Noop);
+        assert!(r.undo_id.is_none());
+        assert!(original.matches(&source));
+    }
+    for parent in [&source, &source.join("child"), &d.join("alias/tree/child")] {
+        let c = OperationContext::detached("copy");
+        let r = e.execute(
+            &Work::Operation(request(OperationKind::Copy, &source, parent)),
+            &c,
+        );
+        assert_eq!(c.recorded_outcomes()[0].status, OutcomeStatus::Failed);
+        assert!(r.undo_id.is_none());
+        assert!(original.matches(&source));
+    }
+}
+
+#[test]
+fn same_folder_copy_publication_collision_preserves_new_occupant() {
+    let d = Scratch::new();
+    fs::create_dir(d.join("docs")).unwrap();
+    let source = d.join("docs/file");
+    fs::write(&source, b"original").unwrap();
+    let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.hook = Arc::new(|point, destination, _| {
+        if point == Point::BeforePublish {
+            fs::write(destination, b"new occupant")?;
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("copy");
+    let r = e.execute(
+        &Work::Operation(request(OperationKind::Copy, &source, &d.join("docs"))),
+        &c,
+    );
+    let out = &c.recorded_outcomes()[0];
+    assert_eq!(out.status, OutcomeStatus::Succeeded, "{out:?}");
+    assert_eq!(
+        out.actual_destination,
+        Some(display(&d.join("docs/file copy 1")))
+    );
+    assert_eq!(fs::read(d.join("docs/file copy")).unwrap(), b"new occupant");
+    assert!(original.matches(&source));
+    assert!(
+        e.execute(
+            &Work::Undo {
+                undo_id: r.undo_id.unwrap()
+            },
+            &OperationContext::detached("undo")
+        )
+        .undo_complete
+    );
+    assert_eq!(fs::read(d.join("docs/file copy")).unwrap(), b"new occupant");
+    assert!(original.matches(&source));
+}
+
+#[test]
+fn same_folder_queue_copy_idempotence_and_latest_undo_preserve_original() {
+    use super::super::queue::OperationManager;
+    use std::{sync::mpsc, time::Duration};
+    let d = Scratch::new();
+    fs::create_dir(d.join("docs")).unwrap();
+    let source = d.join("docs/file");
+    fs::write(&source, b"original").unwrap();
+    let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+    let e = Arc::new(FileExecutor::new(d.join("app")).unwrap());
+    let (send, events) = mpsc::channel();
+    let q = OperationManager::new(
+        e.clone(),
+        Arc::new(move |event| {
+            let _ = send.send(event);
+        }),
+    );
+    let complete = |id: &str| loop {
+        let event = events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("queue stalled");
+        if event.job_id != id {
+            continue;
+        }
+        if event.state == JobState::WaitingConflict {
+            q.cancel(id).unwrap();
+            q.wait_idle();
+            panic!("same-folder copy asked to resolve a conflict");
+        }
+        if event.state.is_terminal() {
+            assert_eq!(
+                event.state,
+                JobState::Completed,
+                "{:?}",
+                q.outcomes(id, 0, 200).unwrap().outcomes
+            );
+            q.wait_idle();
+            break;
+        }
+    };
+    for (i, name) in ["file copy", "file copy 1", "file copy 2"]
+        .iter()
+        .enumerate()
+    {
+        let mut r = request(OperationKind::Copy, &source, &d.join("docs"));
+        r.request_id = format!("copy-{i}");
+        let job = q.enqueue(r.clone()).unwrap();
+        complete(&job.job_id);
+        assert_eq!(q.enqueue(r).unwrap().job_id, job.job_id);
+        let out = q.outcomes(&job.job_id, 0, 200).unwrap();
+        assert_eq!(
+            out.outcomes[0].actual_destination,
+            Some(display(&d.join("docs").join(name)))
+        );
+        assert_eq!(fs::read(d.join("docs").join(name)).unwrap(), b"original");
+        assert!(original.matches(&source));
+    }
+    for (i, name) in ["file copy 2", "file copy 1", "file copy"]
+        .iter()
+        .enumerate()
+    {
+        let undo = q
+            .undo(q.list().latest_undo_id.unwrap(), format!("undo-{i}"))
+            .unwrap();
+        complete(&undo.job_id);
+        assert!(!d.join("docs").join(name).exists());
+        assert!(original.matches(&source));
+    }
+    assert!(q.list().latest_undo_id.is_none());
+    assert!(e.recoveries().unwrap().is_empty());
+}
+
+#[test]
+fn same_folder_detection_keeps_unrelated_and_hardlink_conflict_policies() {
+    for hardlink in [false, true] {
+        for decision in [
+            ConflictDecision::Skip,
+            ConflictDecision::KeepBoth,
+            ConflictDecision::Replace,
+        ] {
+            let d = Scratch::new();
+            fs::create_dir(d.join("docs")).unwrap();
+            fs::create_dir(d.join("other")).unwrap();
+            let source = d.join("docs/file");
+            let destination = d.join("other/file");
+            fs::write(&source, b"original").unwrap();
+            if hardlink {
+                fs::hard_link(&source, &destination).unwrap();
+            } else {
+                fs::write(&destination, b"occupant").unwrap();
+            }
+            let original = Manifest::capture(&source, &|| Ok(())).unwrap();
+            let e = FileExecutor::new(d.join("app")).unwrap();
+            let c = OperationContext::detached_with_decisions("conflict", vec![decision]);
+            let r = e.execute(
+                &Work::Operation(request(OperationKind::Copy, &source, &d.join("other"))),
+                &c,
+            );
+            let out = &c.recorded_outcomes()[0];
+            match decision {
+                ConflictDecision::Skip => {
+                    assert_eq!(out.status, OutcomeStatus::Skipped);
+                    assert!(r.undo_id.is_none());
+                }
+                ConflictDecision::Replace if hardlink => {
+                    assert_eq!(out.status, OutcomeStatus::Failed);
+                    assert!(r.undo_id.is_none());
+                }
+                _ => {
+                    assert_eq!(out.status, OutcomeStatus::Succeeded, "{out:?}");
+                    let expected = if decision == ConflictDecision::KeepBoth {
+                        d.join("other/file copy")
+                    } else {
+                        destination.clone()
+                    };
+                    assert_eq!(out.actual_destination, Some(display(&expected)));
+                    assert_eq!(fs::read(&expected).unwrap(), b"original");
+                    assert!(
+                        e.execute(
+                            &Work::Undo {
+                                undo_id: r.undo_id.unwrap()
+                            },
+                            &OperationContext::detached("undo")
+                        )
+                        .undo_complete
+                    );
+                }
+            }
+            assert!(original.matches(&source));
+            assert_eq!(
+                fs::read(&destination).unwrap(),
+                if hardlink { b"original" } else { b"occupant" }
+            );
+            assert!(!d.join("other/file copy").exists());
+        }
+    }
+}
+
+fn assert_copy_journal_reload_undo_preserves_source(source: &Path, clone_files: bool) {
+    let d = Scratch::new();
+    fs::create_dir(d.join("destination")).unwrap();
+    let original = Manifest::capture(source, &|| Ok(())).unwrap();
+    let bytes = fs::read(source).unwrap();
+    let destination = d.join("destination").join(source.file_name().unwrap());
+    let mut e = FileExecutor::new(d.join("app")).unwrap();
+    e.clone_files = clone_files;
+    e.hook = Arc::new(|point, _, _| {
+        if point == Point::AfterPublish {
+            return Err(io::Error::other("retain completed copy journal for reload"));
+        }
+        Ok(())
+    });
+    let c = OperationContext::detached("copy");
+    let result = e.execute(
+        &Work::Operation(request(OperationKind::Copy, source, &d.join("destination"))),
+        &c,
+    );
+    assert_eq!(
+        c.recorded_outcomes()[0].status,
+        OutcomeStatus::Partial,
+        "{:?}",
+        c.recorded_outcomes()[0].error
+    );
+    assert_eq!(fs::read(&destination).unwrap(), bytes);
+    assert!(original.matches(source));
+    let mut effect = e.undo.lock().unwrap()[&result.undo_id.unwrap()][0].clone();
+    drop(e);
+
+    let e = FileExecutor::new(d.join("app")).unwrap();
+    let record = e.journal.get(&effect.journal_id).unwrap();
+    assert!(record.source_manifest.as_ref().unwrap().matches(source));
+    assert!(record
+        .destination_manifest
+        .as_ref()
+        .unwrap()
+        .matches(&destination));
+    // Undo ownership is session-local. Reuse the test's effect, but load both
+    // identity receipts from the real disk journal, with no ephemeral copy cache.
+    effect.manifest = record.destination_manifest.unwrap();
+    effect.source_manifest = record.source_manifest;
+    let undo_id = e.remember(vec![effect]).undo_id.unwrap();
+    let undone = e.execute(&Work::Undo { undo_id }, &OperationContext::detached("undo"));
+    assert!(undone.undo_complete);
+    assert!(!destination.exists());
+    assert!(original.matches(source));
+    assert_eq!(fs::read(source).unwrap(), bytes);
+    assert!(e.recoveries().unwrap().is_empty());
+}
+
+#[test]
+fn copy_reloaded_journal_receipts_undo_only_the_created_target() {
+    let d = Scratch::new();
+    let source = d.join("original.md");
+    fs::write(&source, b"original content").unwrap();
+    for clone_files in [true, false] {
+        assert_copy_journal_reload_undo_preserves_source(&source, clone_files);
+    }
+}

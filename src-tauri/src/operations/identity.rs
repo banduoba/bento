@@ -64,20 +64,35 @@ struct Entry {
     ctime: (i64, i64),
     digest: Vec<u8>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Manifest {
     entries: Vec<Entry>,
+    // Only fresh source/staging comparisons need this. Persisted identity guards
+    // keep their original schema and digest, including every extended attribute.
+    #[serde(skip)]
+    copy_digests: Vec<Vec<u8>>,
 }
+impl PartialEq for Manifest {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+impl Eq for Manifest {}
 impl Manifest {
     pub fn capture(path: &Path, checkpoint: &dyn Fn() -> io::Result<()>) -> io::Result<Self> {
         let mut entries = vec![];
-        Self::walk(path, path, &mut entries, checkpoint)?;
-        Ok(Self { entries })
+        let mut copy_digests = vec![];
+        Self::walk(path, path, &mut entries, &mut copy_digests, checkpoint)?;
+        Ok(Self {
+            entries,
+            copy_digests,
+        })
     }
     fn walk(
         root: &Path,
         path: &Path,
         entries: &mut Vec<Entry>,
+        copy_digests: &mut Vec<Vec<u8>>,
         checkpoint: &dyn Fn() -> io::Result<()>,
     ) -> io::Result<()> {
         checkpoint()?;
@@ -109,7 +124,9 @@ impl Manifest {
         } else if !m.is_dir() {
             return Err(io::Error::new(io::ErrorKind::Unsupported, "不支持此类文件"));
         }
-        metadata_digest(path, &mut hasher)?;
+        let mut copy_hasher = hasher.clone();
+        metadata_digest(path, &mut hasher, &mut copy_hasher)?;
+        copy_digests.push(copy_hasher.finalize().to_vec());
         entries.push(Entry {
             relative: path
                 .strip_prefix(root)
@@ -128,7 +145,7 @@ impl Manifest {
             let mut children = fs::read_dir(path)?.collect::<io::Result<Vec<_>>>()?;
             children.sort_by_key(|e| e.file_name());
             for child in children {
-                Self::walk(root, &child.path(), entries, checkpoint)?;
+                Self::walk(root, &child.path(), entries, copy_digests, checkpoint)?;
             }
         }
         let after = fs::symlink_metadata(path)?;
@@ -196,6 +213,7 @@ impl Manifest {
         }
         fn subtree(entries: &[Entry], prefix: &[u8]) -> Manifest {
             Manifest {
+                copy_digests: vec![],
                 entries: entries
                     .iter()
                     .filter(|e| within(&e.relative, prefix))
@@ -288,13 +306,23 @@ impl Manifest {
     }
     pub fn same_contents(&self, other: &Self) -> bool {
         self.entries.len() == other.entries.len()
-            && self.entries.iter().zip(&other.entries).all(|(a, b)| {
-                a.relative == b.relative
-                    && a.mode == b.mode
-                    && a.size == b.size
-                    && a.mtime == b.mtime
-                    && a.digest == b.digest
-            })
+            && self
+                .entries
+                .iter()
+                .zip(&other.entries)
+                .enumerate()
+                .all(|(i, (a, b))| {
+                    a.relative == b.relative
+                        && a.mode == b.mode
+                        && a.size == b.size
+                        && a.mtime == b.mtime
+                        && match self.copy_digests.get(i).zip(other.copy_digests.get(i)) {
+                            Some((a, b)) => a == b,
+                            // Journal guards have no ephemeral copy digest. Never
+                            // relax a comparison against a persisted fingerprint.
+                            None => a.digest == b.digest,
+                        }
+                })
     }
 }
 pub(crate) fn changed() -> io::Error {
@@ -303,6 +331,76 @@ pub(crate) fn changed() -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_equivalence_allows_only_provenance_changes_and_keeps_identity_strict() {
+        // Kernel-managed provenance cannot be assigned arbitrary values on macOS.
+        // Supply two creator values at the xattr-hashing boundary; exercise the
+        // same manifest comparisons used by preparation and persisted guards.
+        fn snapshot(name: &[u8], value: &[u8]) -> Manifest {
+            let mut full = Sha256::new();
+            full.update(b"unchanged file bytes");
+            let mut portable = full.clone();
+            hash_xattr(&mut full, &mut portable, name, value);
+            Manifest {
+                entries: vec![Entry {
+                    relative: vec![],
+                    identity: Identity { dev: 1, ino: 2 },
+                    mode: 0o100644,
+                    size: 20,
+                    mtime: (100, 42),
+                    ctime: (101, 43),
+                    digest: full.finalize().to_vec(),
+                }],
+                copy_digests: vec![portable.finalize().to_vec()],
+            }
+        }
+        for name in [
+            b"com.apple.provenance".as_slice(),
+            b"com.apple.macl",
+            b"com.apple.lastuseddate#PS",
+            b"com.apple.ResourceFork",
+            b"com.apple.quarantine",
+            b"com.example.user",
+        ] {
+            let before = snapshot(name, b"first");
+            let after = snapshot(name, b"other");
+            assert_eq!(
+                before.same_contents(&after),
+                name == b"com.apple.provenance"
+            );
+            assert_ne!(before, after);
+            assert!(!before.same_captured_manifest(&after));
+            assert!(!before.remaining_agrees(&after));
+
+            let stored = serde_json::to_value(&before).unwrap();
+            assert_eq!(stored.as_object().unwrap().len(), 1);
+            let restored: Manifest = serde_json::from_value(stored).unwrap();
+            assert_eq!(restored, before);
+            assert!(restored.same_contents(&before));
+            assert!(!restored.same_contents(&after));
+            assert!(!restored.same_captured_manifest(&after));
+        }
+    }
+
+    #[test]
+    fn persisted_manifest_retains_full_filesystem_guard_without_copy_cache() {
+        let root = std::env::temp_dir().join(format!("bento-m6-roundtrip-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("file");
+        fs::write(&path, b"original").unwrap();
+        let captured = Manifest::capture(&path, &|| Ok(())).unwrap();
+        let restored: Manifest =
+            serde_json::from_slice(&serde_json::to_vec(&captured).unwrap()).unwrap();
+        assert!(restored.copy_digests.is_empty());
+        assert!(restored.matches(&path));
+        assert!(restored.matches_captured(&path));
+        fs::write(&path, b"modified").unwrap();
+        assert!(!restored.matches(&path));
+        assert!(!restored.matches_captured(&path));
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn same_size_content_change_and_added_children_invalidate_manifest() {
         let root = std::env::temp_dir().join(format!("bento-m6-identity-{}", std::process::id()));
@@ -340,7 +438,7 @@ mod metadata_tests {
 }
 
 #[cfg(target_os = "macos")]
-fn metadata_digest(path: &Path, hasher: &mut Sha256) -> io::Result<()> {
+fn metadata_digest(path: &Path, hasher: &mut Sha256, copy_hasher: &mut Sha256) -> io::Result<()> {
     use std::ffi::CString;
     let path = CString::new(path.as_os_str().as_bytes())?;
     let length =
@@ -396,10 +494,7 @@ fn metadata_digest(path: &Path, hasher: &mut Sha256) -> io::Result<()> {
         {
             return Err(changed());
         }
-        hasher.update((name.len() as u64).to_le_bytes());
-        hasher.update(name);
-        hasher.update((value.len() as u64).to_le_bytes());
-        hasher.update(value);
+        hash_xattr(hasher, copy_hasher, name, &value);
     }
     unsafe extern "C" {
         fn acl_get_link_np(path: *const libc::c_char, kind: libc::c_int) -> *mut libc::c_void;
@@ -417,6 +512,7 @@ fn metadata_digest(path: &Path, hasher: &mut Sha256) -> io::Result<()> {
         // Darwin represents an absent extended ACL as ENOENT, even for an existing inode.
         if e.raw_os_error() == Some(libc::ENOENT) {
             hasher.update(b"no extended acl");
+            copy_hasher.update(b"no extended acl");
             return Ok(());
         }
         return Err(e);
@@ -433,9 +529,33 @@ fn metadata_digest(path: &Path, hasher: &mut Sha256) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     hasher.update(&data[..copied as usize]);
+    copy_hasher.update(&data[..copied as usize]);
     Ok(())
 }
 #[cfg(not(target_os = "macos"))]
-fn metadata_digest(_path: &Path, _hasher: &mut Sha256) -> io::Result<()> {
+fn metadata_digest(
+    _path: &Path,
+    _hasher: &mut Sha256,
+    _copy_hasher: &mut Sha256,
+) -> io::Result<()> {
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn hash_xattr(hasher: &mut Sha256, copy_hasher: &mut Sha256, name: &[u8], value: &[u8]) {
+    // macOS assigns provenance for the creating process; copyfile can succeed
+    // without transferring this kernel-owned value. Exclude it only from copy
+    // equivalence; same-object source/Undo/recovery checks still fingerprint it.
+    for digest in [
+        Some(hasher),
+        (name != b"com.apple.provenance").then_some(copy_hasher),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        digest.update((name.len() as u64).to_le_bytes());
+        digest.update(name);
+        digest.update((value.len() as u64).to_le_bytes());
+        digest.update(value);
+    }
 }
