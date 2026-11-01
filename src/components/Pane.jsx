@@ -1465,11 +1465,29 @@ export default function Pane({
                 >
                   <div
                     className="row-name"
-                    style={entry.depth ? { paddingLeft: entry.depth * 18 } : undefined}
                   >
+                    <span className="row-copy-slot">
+                      {!isRenaming && (
+                        <button
+                          className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
+                          title="复制路径"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          draggable={false}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            copyText(entry.path)
+                            showCopyToast(entry.path, e.currentTarget.getBoundingClientRect())
+                          }}
+                        >
+                          {copiedPath === entry.path ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                        </button>
+                      )}
+                    </span>
                     {entry.is_dir ? (
                       <button
                         className={`disclosure${expandedDirs.has(entry.path) ? ' open' : ''}`}
+                        style={entry.depth ? { marginLeft: entry.depth * 18 } : undefined}
                         title={expandedDirs.has(entry.path) ? '折叠' : '展开'}
                         onMouseDown={(e) => e.stopPropagation()}
                         onDoubleClick={(e) => e.stopPropagation()}
@@ -1479,7 +1497,7 @@ export default function Pane({
                         <IconChevronRight size={12} />
                       </button>
                     ) : (
-                      <span className="disclosure-spacer" />
+                      <span className="disclosure-spacer" style={entry.depth ? { marginLeft: entry.depth * 18 } : undefined} />
                     )}
                     <span className="fileicon">
                       {entry.isPseudo ? null : (
@@ -1523,20 +1541,6 @@ export default function Pane({
                             </span>
                           )
                         })()}
-                        <button
-                          className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
-                          title="复制路径"
-                          onMouseDown={(e) => e.stopPropagation()}
-                          onDoubleClick={(e) => e.stopPropagation()}
-                          draggable={false}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            copyText(entry.path)
-                            showCopyToast(entry.path, e.currentTarget.getBoundingClientRect())
-                          }}
-                        >
-                          {copiedPath === entry.path ? <IconCheck size={13} /> : <IconCopy size={13} />}
-                        </button>
                       </>
                     )}
                   </div>
