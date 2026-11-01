@@ -9,7 +9,7 @@ use std::{
     io::{self, Write},
     os::unix::{
         ffi::OsStrExt,
-        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        fs::{OpenOptionsExt, PermissionsExt},
         io::AsRawFd,
     },
     path::{Path, PathBuf},
@@ -92,18 +92,8 @@ impl EmptyRoot {
         {
             return Err(super::identity::changed());
         }
-        let metadata = match fs::symlink_metadata(&root.path) {
-            Ok(metadata) => metadata,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
-        };
-        if !metadata.is_dir()
-            || metadata.file_type().is_symlink()
-            || metadata.dev() != root.identity.dev
-            || metadata.ino() != root.identity.ino
-        {
-            return Err(super::identity::changed());
-        }
+        // Only an anchored leaf ENOENT proves an already-removed root. A
+        // missing, symlinked or inaccessible parent leaves ownership unproven.
         let parent = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
@@ -113,7 +103,10 @@ impl EmptyRoot {
             name: CString::new(name.as_bytes())?,
             identity: root.identity.clone(),
         };
-        if !prepared.matches()? || fs::read_dir(&root.path)?.next().transpose()?.is_some() {
+        if !prepared.matches()? {
+            return Ok(None);
+        }
+        if fs::read_dir(&root.path)?.next().transpose()?.is_some() {
             return Err(super::identity::changed());
         }
         Ok(Some(prepared))
@@ -701,6 +694,76 @@ mod startup_tests {
                 }
             }
         }
+    }
+
+    fn assert_unproven_parent_retains_recovery(case: &str) {
+        let fixture = Fixture::new();
+        let mut record = fixture.record();
+        let parent = fixture.0.join("parent");
+        fs::create_dir(&parent).unwrap();
+        let root = OwnedRoot::create(&parent).unwrap();
+        let leaf = root.path.file_name().unwrap().to_owned();
+        fs::write(root.path.join("payload"), b"old private payload").unwrap();
+        record.roots = vec![root.clone()];
+        let alias = fixture.0.join("alias");
+        if case != "missingParent" {
+            symlink(&parent, &alias).unwrap();
+            record.roots[0].path = alias.join(&leaf);
+        }
+        let (persisted, mut journal) = fixture.save(&record);
+        let surviving_root = match case {
+            "missingLeafSymlinkParent" => {
+                let retained = parent.join("retained-root");
+                fs::rename(&root.path, &retained).unwrap();
+                retained
+            }
+            "danglingSymlinkParent" | "retargetedSymlinkParent" => {
+                let other_parent = fixture.0.join("other-parent");
+                if case == "retargetedSymlinkParent" {
+                    fs::create_dir(&other_parent).unwrap();
+                }
+                fs::remove_file(&alias).unwrap();
+                symlink(other_parent, &alias).unwrap();
+                root.path
+            }
+            "missingParent" => {
+                let retained_parent = fixture.0.join("retained-parent");
+                fs::rename(&parent, &retained_parent).unwrap();
+                retained_parent.join(&leaf)
+            }
+            _ => unreachable!(),
+        };
+        let original_ledger = fs::read(&persisted).unwrap();
+        for _ in 0..2 {
+            journal = fixture.reopen(journal);
+            assert_eq!(journal.recoveries().len(), 1, "{case}");
+            assert_eq!(fs::read(&persisted).unwrap(), original_ledger, "{case}");
+            assert_eq!(
+                fs::read(surviving_root.join("payload")).unwrap(),
+                b"old private payload",
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_retains_recovery_with_missing_leaf_symlink_parent() {
+        assert_unproven_parent_retains_recovery("missingLeafSymlinkParent");
+    }
+
+    #[test]
+    fn startup_retains_recovery_with_dangling_symlink_parent() {
+        assert_unproven_parent_retains_recovery("danglingSymlinkParent");
+    }
+
+    #[test]
+    fn startup_retains_recovery_with_retargeted_symlink_parent() {
+        assert_unproven_parent_retains_recovery("retargetedSymlinkParent");
+    }
+
+    #[test]
+    fn startup_retains_recovery_with_missing_parent() {
+        assert_unproven_parent_retains_recovery("missingParent");
     }
 
     #[test]
