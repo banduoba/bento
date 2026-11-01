@@ -5,7 +5,7 @@ import multipleDragPreview from './assets/drag/n.png?inline'
 import multipleFileDragPreview from './assets/drag/n-file.png?inline'
 
 export const trace = (m) =>
-  window.__TAURI_INTERNALS__
+  import.meta.env.DEV && window.__TAURI_INTERNALS__
     ? window.__TAURI_INTERNALS__.invoke('append_trace_log', { msg: m }).catch(() => {})
     : Promise.resolve()
 

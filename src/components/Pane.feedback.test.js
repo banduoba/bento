@@ -50,24 +50,13 @@ test('manual refresh epoch rereads only the owning pane even when another pane s
   assert.equal(h.requests.length, afterOwnRefresh)
 })
 
-test('mounted Pane anchors operation feedback using only its own row, with a pane-local fallback', async t => {
-  const previous = globalThis.ResizeObserver
-  globalThis.ResizeObserver = class { observe() {} disconnect() {} }
-  t.after(() => { if (previous === undefined) delete globalThis.ResizeObserver; else globalThis.ResizeObserver = previous })
-  const pane = { left: 1000, right: 1200, top: 80, bottom: 400, width: 200, height: 320 }
-  let visibleRows = [{ dataset: { path: '/d/same' }, getBoundingClientRect: () => ({ left: 1010, right: 1190, top: 150, height: 30 }) }]
-  const node = { style: { setProperty() {} }, getBoundingClientRect: () => pane, querySelectorAll: () => visibleRows }
-  const h = await mountPane(t, { createNodeMock: element => element.type === 'section' ? node : null })
-  await h.update({ operationToast: { tabId: 'a', paths: ['/d/same'], text: 'copied' } })
-  let toast = h.root.findByProps({ className: 'copy-toast row-toast' })
-  assert.equal(toast.props.style.top, 85)
-  assert.ok(toast.props.style.left >= 0)
-  assert.ok(toast.props.style.left + toast.props.style.maxWidth <= 200)
-  visibleRows = []
-  await h.update({ operationToast: { tabId: 'a', paths: ['/d/not-visible'], text: 'copied' } })
-  toast = h.root.findByProps({ className: 'copy-toast row-toast' })
-  assert.equal(toast.props.style.top, 48)
-  assert.ok(toast.props.style.left + toast.props.style.maxWidth <= 200)
+test('completed file operation feedback leaves the file view unobstructed', async t => {
+  const h = await mountPane(t)
+  await h.batch(h.requests[0], [entry('copied.txt')], true, 1)
+  await h.resolve(h.requests[0])
+  await h.update({ operationToast: { tabId: 'a', paths: ['/d/copied.txt'], text: 'copied' } })
+  assert.deepEqual(h.rows.map(r => r.path), ['/d/copied.txt'])
+  assert.equal(h.root.findAll(n => n.props.className === 'copy-toast row-toast').length, 0)
 })
 
 test('an expanded symlink directory updates when a different pane writes through its physical path', async t => {

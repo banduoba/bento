@@ -15,6 +15,7 @@ const bundle = await build({
   write: false,
   format: 'cjs',
   platform: 'node',
+  define: { 'import.meta.env.DEV': 'false' },
   jsx: 'automatic',
   plugins: [{
     name: 'pane-native-boundaries',
@@ -71,7 +72,7 @@ export async function mountPane(t, rendererOptions, apiOverrides = {}) {
     pane: { active: 0, tabs: [{ id: 'a', path: '/d', history: ['/d'], hi: 0, sortKey: 'name', sortDir: 'asc' }] },
     cfg: { showHidden: false }, selection: new Set(), cutSet: new Set(), tick: 0,
     onRowsCache: (_, value) => { rows = value }, onStats: (_, value) => { stats = value },
-    onNav: (...args) => navigations.push(args),
+    onNav: (...args) => navigations.push(args), onFocus: () => {},
   }
   globalThis[bridgeKey] = {
     api: {

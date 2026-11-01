@@ -6,6 +6,7 @@ import { confirm } from '@tauri-apps/plugin-dialog'
 import { blankTab, blankPane, freshId, navigateTab, restoreSession, sessionForDisk, preferencesForDisk } from './session'
 import { createSerialSaver } from './persistence'
 import { createSessionClose } from './sessionClose'
+import { createTextEditing, isTextEditingElement } from './textEditing'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
 import { api, hasTauri } from './api'
 import { bumpManualRefreshTick, directoryKey, invalidateDirectories, rootRefreshKey } from './paneFeedback'
@@ -53,53 +54,9 @@ const EMPTY_SELECTION = new Set()
 
 // 调试埋点：写进 dev 日志（stderr）
 const trace = (m) => {
+  if (!import.meta.env.DEV) return
   invoke('append_trace_log', { msg: m }).catch(() => {})
   invoke('log_debug', { msg: m }).catch(() => {})
-}
-
-// 输入框文本编辑辅助（无系统编辑菜单时 WKWebView 输入框原生 ⌘C/⌘V 失效）
-function applyInputValue(el, value, selStart, selEnd) {
-  const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype
-  Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, value)
-  el.dispatchEvent(new Event('input', { bubbles: true }))
-  requestAnimationFrame(() => {
-    try {
-      el.setSelectionRange(selStart, selEnd)
-    } catch {}
-  })
-}
-
-async function handleTextShortcut(e, el) {
-  if (!e.metaKey || e.altKey || e.ctrlKey || e.shiftKey) return
-  const key = e.key.toLowerCase()
-  const s = el.selectionStart ?? 0
-  const t = el.selectionEnd ?? 0
-  const sel = el.value.slice(s, t)
-  if (key === 'a') {
-    e.preventDefault()
-    el.select?.()
-    return
-  }
-  if (key === 'c' || key === 'x') {
-    if (!sel) return
-    e.preventDefault()
-    try {
-      await writeText(sel)
-    } catch {
-      try {
-        await navigator.clipboard.writeText(sel)
-      } catch {}
-    }
-    if (key === 'x') applyInputValue(el, el.value.slice(0, s) + el.value.slice(t), s, s)
-    return
-  }
-  if (key === 'v') {
-    e.preventDefault()
-    try {
-      const text = await readText()
-      if (text) applyInputValue(el, el.value.slice(0, s) + text + el.value.slice(t), s + text.length, s + text.length)
-    } catch {}
-  }
 }
 
 const freshWsId = () => `w${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`
@@ -190,10 +147,8 @@ export default function App() {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
   const [hoverTip, setHoverTip] = useState(null) // { x, y, text } 原生拖拽目标提示
-  const [undoToast, setUndoToast] = useState(null) // { label, fn } 可撤销操作提示
-  const [rowToast, setRowToast] = useState(null) // { tabId, paths, text } feedback owned by one pane
-  const rowToastTimer = useRef(null)
-  const undoStackRef = useRef([]) // { label, undo: () => Promise }
+  const undoStackRef = useRef([]) // identified inverse callbacks, kept in memory only
+  const fileOperationsPending = useRef(0)
   const flashTimer = useRef(null)
   // 活动窗格，以及上一次离开的窗格。多于两个窗格时，F5/F6 送到刚离开的那个。
   // now 在按键时同步更新，长按 Tab 不用等下一次渲染才能继续切。
@@ -212,12 +167,8 @@ export default function App() {
   const [tick, setTick] = useState(0)
   const [manualRefreshTicks, setManualRefreshTicks] = useState({})
   const [directoryVersions, setDirectoryVersions] = useState({})
-  const [progress, setProgress] = useState(null)
 
   const rowsCache = useRef({}) // tabId -> 当前排序后的条目数组
-  const modeRef = useRef('copy')
-  const progTimer = useRef(null)
-  const toastTimer = useRef(null)
   const cfgRef = useRef(null)
   cfgRef.current = cfg
   useEffect(() => subscribeClip(setClipState), [])
@@ -417,19 +368,6 @@ export default function App() {
       return { ...c, focusedIdx: clamped }
     })
   }, [focused])
-
-  // ---------- 传输进度 ----------
-  useEffect(() => {
-    if (!hasTauri) return
-    const un = listen('transfer-progress', (e) => {
-      setProgress({ ...e.payload, mode: modeRef.current })
-      clearTimeout(progTimer.current)
-      progTimer.current = setTimeout(() => setProgress(null), 1500)
-    })
-    return () => {
-      un.then((f) => f())
-    }
-  }, [])
 
   // ---------- 拦截外部文件拖放（WebView 默认行为会导航离开） ----------
   useEffect(() => {
@@ -886,22 +824,8 @@ export default function App() {
 
   // ---------- 文件操作 ----------
   const reportErrors = (items) => {
-    const bad = (items || []).filter((x) => !x.ok)
+    const bad = (items || []).filter((x) => !x.ok && !x.cancelled && x.error)
     if (bad.length) alert(bad.map((b) => `${basename(b.source)}: ${b.error}`).join('\n'))
-  }
-
-  // The owner is captured at operation start; Pane resolves its own visible row or local fallback.
-  const targetTabFor = (dest) => {
-    const panes = cfgRef.current?.panes || []
-    const candidates = panes.slice(0, visibleCount).map(p => p.tabs[p.active] || p.tabs[0])
-    return candidates.find(t => t?.id === activeTabOf(focusIdx)?.id && directoryKeyFor(t.path) === directoryKeyFor(dest))?.id
-      || candidates.find(t => t && directoryKeyFor(t.path) === directoryKeyFor(dest))?.id
-  }
-  const showRowToast = (tabId, paths, text) => {
-    if (!tabId) return
-    setRowToast({ tabId, paths, text })
-    clearTimeout(rowToastTimer.current)
-    rowToastTimer.current = setTimeout(() => setRowToast(null), 2200)
   }
 
   // 多选时按当前列表顺序输出，避免 Set 插入序和肉眼看到的行序不一致。
@@ -917,183 +841,147 @@ export default function App() {
     const list = (paths || []).filter((p) => typeof p === 'string' && p)
     if (!list.length) return
     const text = list.join('\n')
-    const done = () => showRowToast(tabId, list, list.length === 1 ? '已复制路径' : `已复制 ${list.length} 条路径`)
-    writeText(text).then(done).catch(() => {
-      copyText(text).then(done)
-    })
+    writeText(text).catch(() => copyText(text)).catch(e => alert(String(e)))
   }
 
-  // Retain only unfinished reverse moves, including exact original names.
+  // Receipts stay in memory only. An inverse must identify the actual native result.
+  const identified = r => typeof r.dest === 'string' && r.dest.startsWith('/')
+    && typeof r.identity?.dev === 'string' && /^\d+$/.test(r.identity.dev)
+    && typeof r.identity?.ino === 'string' && /^\d+$/.test(r.identity.ino)
+  const undoError = (message, cancelled = false) => Object.assign(new Error(message), { cancelled })
   const restoreUndo = (moves) => {
-    let pending = [...moves].reverse().filter((m) => m.dest !== m.source)
-      .map((m) => ({ source: m.dest, dest: m.source }))
+    let pending = [...moves].reverse().filter(m => m.dest !== m.source)
+      .map(m => ({ source: m.dest, dest: m.source, identity: m.identity }))
     return async () => {
+      if (!pending.length) return
       const results = await api.restoreMoves(pending)
-      pending = pending.filter((m) => !results?.some((r) => r.ok && r.source === m.source && r.dest === m.dest))
+      pending = pending.filter(m => !results?.some(r => r.ok && r.source === m.source && r.dest === m.dest))
       if (pending.length) {
-        const errors = (results || []).filter((r) => !r.ok).map((r) => `${basename(r.source)}: ${r.error}`)
-        throw new Error(`${pending.length} 个项目未恢复，已保留以便重试${errors.length ? '\n' + errors.join('\n') : ''}`)
+        const errors = (results || []).filter(r => !r.ok && !r.cancelled && r.error)
+        throw undoError(errors.map(r => `${basename(r.source)}: ${r.error}`).join('\n') || '部分项目未恢复',
+          !errors.length && results?.some(r => r.cancelled))
       }
-      return results
     }
   }
 
-  const trashUndo = (paths) => {
-    let pending = [...paths].reverse()
+  const trashUndo = (copies) => {
+    let pending = [...copies].reverse()
     return async () => {
-      const failed = []
-      for (const path of [...pending]) {
-        try {
-          await api.trash([path])
-          pending = pending.filter((p) => p !== path)
-        } catch (error) { failed.push(`${basename(path)}: ${error}`) }
-      }
-      if (failed.length) throw new Error(failed.join('\n'))
+      if (!pending.length) return
+      const result = await api.trash(pending.map(r => r.dest), pending.map(r => ({ path: r.dest, ...r.identity })))
+      const completed = new Set((result?.entries || []).map(e => e.original))
+      pending = pending.filter(r => !completed.has(r.dest))
+      if (result?.error || pending.length) throw undoError(result?.error || '部分项目未移到废纸篓', !!result?.cancelled)
     }
   }
 
-  const transferInto = async (dest, paths, mode, onSuccess, ownerTabId = targetTabFor(dest)) => {
+  const releaseMoved = (completed, originalClip) => {
+    const gone = new Set(completed.filter(r => r.dest !== r.source).map(r => r.source))
+    if (gone.size) {
+      setSel(s => Object.fromEntries(Object.entries(s).map(([id, paths]) => [id, new Set([...paths].filter(p => !gone.has(p)))])))
+      window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths: [...gone] } }))
+    }
+    // Do not consume a clipboard replaced while the native operation was running.
+    if (originalClip?.mode === 'cut' && getClip() === originalClip) {
+      const done = new Set(completed.map(r => r.source))
+      retainCut(originalClip.paths.filter(p => !done.has(p)))
+    }
+  }
+
+  const completeTransfer = (results, dest, paths, mode, originalClip, onSuccess) => {
+    const items = results || []
+    const ok = items.filter(r => r.ok)
+    const known = ok.filter(identified)
+    // A native failure can have unreported effects. Never expose an older,
+    // unrelated inverse after an operation whose actual result is unknown.
+    if (items.length !== paths.length || items.some(r => !r.ok) || known.length !== ok.length) undoStackRef.current = []
+    refreshDirectories([...new Set([
+      ...items.flatMap(r => r.affectedDirectories || []),
+      dest,
+      ...(mode === 'move' ? paths.map(parentPath) : []),
+      ...ok.filter(r => r.dest).map(r => parentPath(r.dest)),
+    ])])
+    const changed = known.filter(r => r.dest !== r.source)
+    if (changed.length) pushUndo(mode === 'move' ? restoreUndo(changed) : trashUndo(changed),
+      [...new Set(changed.flatMap(r => mode === 'move' ? [parentPath(r.source), parentPath(r.dest)] : [parentPath(r.dest)]))])
+    if (mode === 'move') releaseMoved(ok, originalClip)
+    if (ok.length === paths.length) onSuccess?.()
+    reportErrors(items)
+  }
+
+  const transferInto = async (dest, paths, mode, onSuccess) => {
     if (!paths?.length) return
-    modeRef.current = mode
+    const originalClip = getClip()
+    fileOperationsPending.current++
     try {
       const results = await api.transfer(paths, dest, mode)
-      reportErrors(results)
-      // 记录成功的操作供 ⌘Z 撤销
-      const ok = (results || []).filter((r) => r.ok && r.dest)
-      if (ok.length === paths.length) onSuccess?.()
-      refreshDirectories([...new Set((results || []).flatMap(r => r.ok && r.dest
-        ? (mode === 'move' ? [parentPath(r.source), parentPath(r.dest)] : [parentPath(r.dest)])
-        : r.affectedDirectories || []))])
-      const moves = ok.filter((r) => r.dest !== r.source)
-      if (mode === 'move' && moves.length) {
-        pushUndo(
-          moves.length === 1 ? `移动：${basename(moves[0].dest)}` : `移动 ${moves.length} 个项目`,
-          restoreUndo(moves),
-          { directories: [...new Set(moves.flatMap(m => [parentPath(m.source), parentPath(m.dest)]))] }
-        )
-      }
-      if (mode === 'copy' && ok.length) {
-        const copies = ok.map((r) => r.dest)
-        pushUndo(
-          copies.length === 1 ? `拷贝：${basename(copies[0])}` : `拷贝 ${copies.length} 个项目`,
-          trashUndo(copies),
-          { silent: true, directories: [...new Set(copies.map(parentPath))] }
-        )
-        // Pane repositions its own feedback when the copied row becomes visible.
-        showRowToast(ownerTabId, copies, copies.length === 1 ? `已拷贝：${basename(copies[0])}` : `已拷贝 ${copies.length} 个项目`)
-      }
+      completeTransfer(results, dest, paths, mode, originalClip, onSuccess)
     } catch (e) {
+      undoStackRef.current = []
+      refreshDirectories([dest, ...(mode === 'move' ? paths.map(parentPath) : [])])
       alert(`操作失败: ${e}`)
-    }
-    if (mode === 'move') setClip(null)
+    } finally { fileOperationsPending.current-- }
   }
 
-  // ⌘V 剪切：同卷 rename，跨卷仅在复制成功后删除源。成功的源立刻从列表消失。
   const moveInto = async (dest, paths) => {
     if (!paths?.length) return
-    modeRef.current = 'move'
-    const movedFrom = [...paths]
+    const originalClip = getClip()
+    fileOperationsPending.current++
     try {
-      const results = await api.moveItems(movedFrom, dest)
-      reportErrors(results)
-      const ok = (results || []).filter((r) => r.ok && r.dest && r.dest !== r.source)
-      refreshDirectories([...new Set((results || []).flatMap(r => r.ok && r.dest && r.dest !== r.source
-        ? [parentPath(r.source), parentPath(r.dest)] : r.affectedDirectories || []))])
-      if (ok.length) {
-        pushUndo(
-          ok.length === 1 ? `移动：${basename(ok[0].dest)}` : `移动 ${ok.length} 个项目`,
-          restoreUndo(ok),
-          { directories: [...new Set(ok.flatMap(m => [parentPath(m.source), parentPath(m.dest)]))] }
-        )
-        const gone = new Set(ok.map((r) => r.source))
-        setSel((s) => {
-          let changed = false
-          const next = {}
-          for (const [id, set] of Object.entries(s)) {
-            const filtered = new Set([...set].filter((p) => !gone.has(p)))
-            if (filtered.size !== set.size) changed = true
-            next[id] = filtered
-          }
-          return changed ? next : s
-        })
-        window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths: [...gone] } }))
-      }
-      const current = getClip()
-      const sameCut = current?.mode === 'cut'
-        && current.paths.length === movedFrom.length
-        && current.paths.every((p, i) => p === movedFrom[i])
-      if (sameCut) {
-        const completed = new Set((results || []).filter((r) => r.ok).map((r) => r.source))
-        retainCut(movedFrom.filter((p) => !completed.has(p)))
-      }
+      const results = await api.moveItems(paths, dest)
+      completeTransfer(results, dest, paths, 'move', originalClip)
     } catch (e) {
+      undoStackRef.current = []
+      refreshDirectories([dest, ...paths.map(parentPath)])
       alert(`移动失败: ${e}`)
-    }
+    } finally { fileOperationsPending.current-- }
   }
 
-  // 统一记录可撤销操作并提示（4 秒）
-  const pushUndo = (label, undo, opts = {}) => {
-    undoStackRef.current.push({ label, undo, directories: opts.directories || [] })
+  const pushUndo = (undo, directories = []) => {
+    undoStackRef.current.push({ undo, directories })
     if (undoStackRef.current.length > 30) undoStackRef.current.shift()
-    if (opts.silent) return
-    setUndoToast({ label })
-    clearTimeout(toastTimer.current)
-    toastTimer.current = setTimeout(() => setUndoToast(null), 4000)
   }
 
-  // ⌘Z：撤销最近一次移动
   const undoLast = async () => {
     const op = undoStackRef.current.at(-1)
-    if (!op || undoStackRef.current.some((item) => item.busy)) return
+    if (!op || fileOperationsPending.current || undoStackRef.current.some(item => item.busy)) return
     op.busy = true
+    fileOperationsPending.current++
     try {
       await op.undo()
       const index = undoStackRef.current.indexOf(op)
       if (index >= 0) undoStackRef.current.splice(index, 1)
-      clearTimeout(toastTimer.current)
-      setUndoToast({ label: op.label, undone: true })
-      setTimeout(() => setUndoToast(null), 2500)
-      refreshDirectories(op.directories)
     } catch (e) {
-      setUndoToast({ label: op.label })
-      alert(`撤销失败: ${e}`)
-      refreshDirectories(op.directories)
+      const index = undoStackRef.current.indexOf(op)
+      if (index > 0) undoStackRef.current.splice(0, index)
+      if (!e.cancelled) alert(`撤销失败: ${e}`)
     } finally {
+      refreshDirectories(op.directories)
       op.busy = false
+      fileOperationsPending.current--
     }
   }
 
-  const doTrash = (tabId, paths) => {
+  const doTrash = async (tabId, paths) => {
     const list = paths?.length ? paths : selArr(tabId)
     if (!list.length) return
-    api
-      .trash(list)
-      .then((entries) => {
-        if (entries?.length) {
-          pushUndo(
-            entries.length === 1
-              ? `废纸篓：${basename(entries[0].original)}`
-              : `废纸篓 ${entries.length} 个项目`,
-            restoreUndo(entries.map((e) => ({ source: e.original, dest: e.trashed }))),
-            { directories: [...new Set(entries.flatMap(e => [parentPath(e.original), parentPath(e.trashed)]))] }
-          )
-        }
-      })
-      .catch((e) => alert(String(e)))
-      .finally(() => {
-        setSel((s) => ({ ...s, [tabId]: new Set() }))
-        refreshDirectories(list.map(parentPath))
-      })
-  }
-
-  // 描述一组条目：单个 →「文件「a.txt」/文件夹「b」」，多个 →「N 个项目（x 个文件、y 个文件夹）」
-  const describeItems = (tabId, paths) => {
-    const byPath = new Map((rowsCache.current[tabId] || []).map((r) => [r.path, r]))
-    const dirs = paths.filter((p) => byPath.get(p)?.is_dir).length
-    const files = paths.length - dirs
-    if (paths.length === 1) return `${dirs ? '文件夹' : '文件'}「${basename(paths[0])}」`
-    const parts = [files && `${files} 个文件`, dirs && `${dirs} 个文件夹`].filter(Boolean)
-    return `${paths.length} 个项目（${parts.join('、')}）`
+    fileOperationsPending.current++
+    try {
+      const result = await api.trash(list)
+      const entries = result?.entries || []
+      const receipts = entries.map(e => ({ source: e.original, dest: e.trashed, identity: e.identity }))
+      const known = receipts.filter(identified)
+      if (result?.error || result?.cancelled || entries.length !== list.length || known.length !== entries.length) undoStackRef.current = []
+      refreshDirectories([...list.map(parentPath), ...entries.filter(e => e.trashed).map(e => parentPath(e.trashed))])
+      const gone = new Set(entries.map(e => e.original))
+      setSel(s => ({ ...s, [tabId]: new Set([...(s[tabId] || [])].filter(p => !gone.has(p))) }))
+      if (known.length) pushUndo(restoreUndo(known), [...new Set(known.flatMap(r => [parentPath(r.source), parentPath(r.dest)]))])
+      if (result?.error && !result.cancelled) alert(result.error)
+    } catch (e) {
+      undoStackRef.current = []
+      refreshDirectories(list.map(parentPath))
+      alert(String(e))
+    } finally { fileOperationsPending.current-- }
   }
 
   const doCopyCut = (tabId, mode) => {
@@ -1105,13 +993,10 @@ export default function App() {
       return
     }
     setClip({ mode: cut ? 'cut' : 'copy', paths: [...paths] })
-    // 提示贴在被复制的文件旁边，而不是屏幕底部
-    showRowToast(tabId, paths, `${cut ? '已剪切' : '已复制'}${describeItems(tabId, paths)}`)
     // 文件引用写进系统剪贴板：其他软件 ⌘V 可直接粘贴文件本体。剪切只留在应用内。
     if (!cut) {
       api
         .copyFilesToClipboard(paths)
-        .then(() => trace(`clipboard ok ${paths.length} paths`))
         .catch((e) => trace(`clipboard FAILED ${e}`))
     }
   }
@@ -1135,9 +1020,7 @@ export default function App() {
   }
 
   // ---------- 压缩（QSpace 风格「创建归档」）----------
-  const runZip = (paths, dir, o, ownerTabId = targetTabFor(dir)) => {
-    clearTimeout(rowToastTimer.current)
-    showRowToast(ownerTabId, paths, '正在压缩…')
+  const runZip = (paths, dir, o) => {
     api
       .zipPaths(paths, dir, {
         name: o.name,
@@ -1146,20 +1029,10 @@ export default function App() {
         separate: o.separate,
       })
       .then((created) => {
+        undoStackRef.current = []
         refreshDirectories(created?.length ? [dir] : [])
-        if (!created?.length) {
-          setRowToast(null)
-          return
-        }
-        pushUndo(
-          created.length === 1 ? `压缩：${basename(created[0])}` : `压缩 ${created.length} 个`,
-          trashUndo(created),
-          { silent: true, directories: [dir] }
-        )
-        showRowToast(ownerTabId, created, created.length === 1 ? `已压缩：${basename(created[0])}` : `已压缩为 ${created.length} 个文件`)
       })
       .catch((e) => {
-        setRowToast(null)
         alert(String(e))
       })
   }
@@ -1197,7 +1070,7 @@ export default function App() {
         refreshDirectories([dest])
         setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
         setRenaming({ tabId, path: created, value: basename(created), selectAll: true })
-        pushUndo(`新建文件夹：${basename(created)}`, trashUndo([created]), { directories: [dest] })
+        undoStackRef.current = []
       })
       .catch((e) => alert(String(e)))
   }
@@ -1207,7 +1080,7 @@ export default function App() {
     setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
     // 与普通重命名一样只选中主文件名，扩展名留着（模板 .docx 不会被一次输入冲掉）
     setRenaming({ tabId, path: created, value: basename(created) })
-    pushUndo(`新建文件：${basename(created)}`, trashUndo([created]), { directories: [parentPath(created)] })
+    undoStackRef.current = []
   }
 
   const newFile = (tabId, kind) => {
@@ -1255,11 +1128,7 @@ export default function App() {
     if (!value || value.trim() === current) return
     api
       .rename(path, value)
-      .then((newPath) => {
-        pushUndo(`重命名：${current} → ${value}`, async () => {
-          await api.rename(newPath, current)
-        }, { directories: [parentPath(path)] })
-      })
+      .then(() => { undoStackRef.current = [] })
       .catch((e) => alert(String(e)))
       .finally(() => {
         setSel((s) => ({ ...s, [tabId]: new Set() }))
@@ -1498,6 +1367,7 @@ export default function App() {
 
   // ---------- 全局快捷键 ----------
   const keyRef = useRef(null)
+  const textEditing = useRef(null)
   keyRef.current = (e) => {
     // ⌘,：输入框聚焦时也可打开设置
     if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key === ',') {
@@ -1508,10 +1378,10 @@ export default function App() {
       setSettingsOpen(true)
       return
     }
-    // ⌘Z：撤销最近一次移动
-    if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
-      e.preventDefault()
-      undoLast()
+    // Text Undo/Redo belongs to WebKit, including document history across editors.
+    if (e.metaKey && !e.altKey && !e.ctrlKey && e.key.toLowerCase() === 'z') {
+      if (isTextEditingElement(document.activeElement)) textEditing.current?.handleKeyDown(e)
+      else if (!e.shiftKey) { e.preventDefault(); undoLast() }
       return
     }
     // ⌘K：打开/聚焦搜索面板（浏览器习惯）
@@ -1542,15 +1412,14 @@ export default function App() {
       copyPlainPaths(tab.id, orderedPaths(tab.id))
       return
     }
-    const tag = document.activeElement?.tagName
     if (e.metaKey && !e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === 'r' || e.key === 'R')) {
       e.preventDefault()
       const tab = activeTabOf(focusIdx)
       if (tab) refreshTab(tab.id)
       return
     }
-    if (tag === 'INPUT' || tag === 'TEXTAREA') {
-      handleTextShortcut(e, document.activeElement)
+    if (isTextEditingElement(document.activeElement)) {
+      textEditing.current?.handleKeyDown(e)
       return
     }
     const meta = e.metaKey
@@ -1720,9 +1589,11 @@ export default function App() {
   }
 
   useEffect(() => {
-    const h = (e) => keyRef.current?.(e)
+    const editor = createTextEditing({ doc: document, readText, writeText, writeFallback: text => navigator.clipboard.writeText(text) })
+    textEditing.current = editor
+    const h = e => keyRef.current?.(e)
     window.addEventListener('keydown', h)
-    return () => window.removeEventListener('keydown', h)
+    return () => { window.removeEventListener('keydown', h); editor.dispose(); textEditing.current = null }
   }, [])
 
   const cutSet = useMemo(() => new Set(clip?.mode === 'cut' ? clip.paths : []), [clip])
@@ -1854,7 +1725,6 @@ export default function App() {
               tick={rootRefreshKey(tick, directoryVersions, directoryKeyFor(p.tabs[p.active]?.path), manualRefreshTicks[p.tabs[p.active]?.id] || 0)}
               directoryVersions={directoryVersions}
               directoryKeyFor={directoryKeyFor}
-              operationToast={rowToast?.tabId === p.tabs[p.active]?.id ? rowToast : null}
               onColWidths={(w) => {
                 const path = p.tabs[p.active]?.path
                 if (!path) return
@@ -1928,30 +1798,11 @@ export default function App() {
         </div>
       </div>
 
-      <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]} progress={progress} />
+      <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]} />
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
       {hoverTip && (
         <div className="drag-tip" style={{ left: hoverTip.x, top: hoverTip.y }}>
           {hoverTip.text}
-        </div>
-      )}
-      {undoToast && (
-        <div className="undo-toast">
-          <span>
-            {undoToast.undone && '已撤销：'}
-            <b>{undoToast.label}</b>
-          </span>
-          {!undoToast.undone && (
-            <button
-              className="undo-btn"
-              onClick={() => {
-                setUndoToast(null)
-                undoLast()
-              }}
-            >
-              撤销
-            </button>
-          )}
         </div>
       )}
       <SearchOverlay

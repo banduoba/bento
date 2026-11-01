@@ -993,10 +993,6 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   animation: toastIn var(--ui-duration) var(--ui-ease);
 }
 .copy-toast.place-left { transform: translate(-100%, -50%); }
-/* 贴在文件行旁边的提示：文字从左往右读，不用 rtl 省略（rtl 用于长路径） */
-.row-toast { z-index: 220; }
-.row-toast .copy-toast-text { direction: ltr; }
-.row-toast.center { transform: translate(-50%, -50%); }
 .copy-toast svg { flex: none; color: #30d158; }
 .copy-toast-text {
   white-space: nowrap;
@@ -1095,7 +1091,6 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   font-size: 11.5px;
   color: var(--text-2);
 }
-.statusbar .prog { color: var(--accent); font-weight: 600; }
 
 /* ---------- 右键菜单 ---------- */
 .menu {
@@ -1172,7 +1167,7 @@ button, .tab, .sb-item, .row, .row::before, .search-item, .settings-row,
     box-shadow var(--ui-duration) var(--ui-ease);
 }
 .btn, .layout-btn, .iconbtn, .navbtns button, .seg button, .seg-btn,
-.tab-new, .tab-close, .sb-add, .undo-btn, .lp-item, .settings-nav-item {
+.tab-new, .tab-close, .sb-add, .lp-item, .settings-nav-item {
   transition: background-color var(--ui-duration) var(--ui-ease),
     color var(--ui-duration) var(--ui-ease),
     border-color var(--ui-duration) var(--ui-ease),
@@ -1188,7 +1183,6 @@ button, .tab, .sb-item, .row, .row::before, .search-item, .settings-row,
 .tab-new:active,
 .tab-close:active,
 .sb-add:active,
-.undo-btn:active,
 .lp-item:active,
 .settings-nav-item:active {
   transform: scale(0.98);
@@ -1794,8 +1788,8 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 
 .tb-group.disabled { opacity: 0.5; pointer-events: none; }
 
-/* 撤销提示条 */
-.undo-toast, .drag-tip {
+/* 原生拖拽目标提示 */
+.drag-tip {
   position: fixed;
   z-index: 210;
   background: var(--toast-bg);
@@ -1803,17 +1797,6 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
   font-size: 12.5px;
   box-shadow: var(--toast-shadow);
   backdrop-filter: blur(16px);
-}
-.undo-toast {
-  bottom: 40px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 6px 6px 14px;
-  border-radius: 12px;
-  animation: toastIn var(--ui-duration) var(--ui-ease);
 }
 .drag-tip {
   transform: translate(-50%, -100%);
@@ -1826,20 +1809,6 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.undo-toast b { font-weight: 600; max-width: 260px; display: inline-block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: bottom; }
-.undo-btn {
-  border: none;
-  background: rgba(255, 255, 255, 0.14);
-  color: #6cb8ff;
-  font-size: 12.5px;
-  font-weight: 600;
-  padding: 4px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-family: inherit;
-}
-.undo-btn:hover { background: rgba(255, 255, 255, 0.24); }
-
 /* 搜索双栏：右侧内容预览面板 */
 .search-body { flex: 1; min-height: 0; display: grid; }
 .search-body.two-col { grid-template-columns: minmax(300px, 5fr) minmax(280px, 4fr); }
