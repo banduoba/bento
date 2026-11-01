@@ -483,12 +483,35 @@ mod startup_tests {
             record.roots.push(OwnedRoot::create(&self.0).unwrap());
             record
         }
-        fn save(&self, record: &Record) -> PathBuf {
+        fn save(&self, record: &Record) -> (PathBuf, Journal) {
             let journal = Journal::open(&self.app()).unwrap();
             journal.save(record).unwrap();
-            self.app()
+            let path = self
+                .app()
                 .join("operations-recovery")
-                .join(format!("{}.json", record.id))
+                .join(format!("{}.json", record.id));
+            (path, journal)
+        }
+        fn reopen(&self, journal: Journal) -> Journal {
+            // Taking ownership proves this fixture's prior owner is dropped.
+            // Other parallel tests fork subprocesses: their inherited CLOEXEC
+            // fd can retain flock briefly until exec, even after our fd closes.
+            drop(journal);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            loop {
+                match Journal::open(&self.app()) {
+                    Ok(journal) => return journal,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::WouldBlock
+                            && std::time::Instant::now() < deadline =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => {
+                        panic!("journal did not reopen after dropping its owner: {error}")
+                    }
+                }
+            }
         }
     }
     impl Drop for Fixture {
@@ -506,9 +529,9 @@ mod startup_tests {
             Some(Manifest::capture(record.source.as_ref().unwrap(), &|| Ok(())).unwrap());
         record.destination_manifest =
             Some(Manifest::capture(&record.destination, &|| Ok(())).unwrap());
-        let persisted = fixture.save(&record);
+        let (persisted, mut journal) = fixture.save(&record);
         for _ in 0..2 {
-            let journal = Journal::open(&fixture.app()).unwrap();
+            journal = fixture.reopen(journal);
             assert!(journal.recoveries().is_empty());
             assert!(!persisted.exists());
             assert!(record.roots.iter().all(|root| !root.path.exists()));
@@ -528,18 +551,16 @@ mod startup_tests {
         let fixture = Fixture::new();
         let mut record = fixture.record();
         record.roots.push(OwnedRoot::create(&fixture.0).unwrap());
-        let persisted = fixture.save(&record);
+        let (persisted, journal) = fixture.save(&record);
         fs::remove_dir(&record.roots[0].path).unwrap();
         let payload = record.roots[1].path.join("payload");
         fs::write(&payload, b"keep me").unwrap();
-        {
-            let journal = Journal::open(&fixture.app()).unwrap();
-            assert_eq!(journal.recoveries().len(), 1);
-            assert!(persisted.exists());
-            assert_eq!(fs::read(&payload).unwrap(), b"keep me");
-        }
+        let journal = fixture.reopen(journal);
+        assert_eq!(journal.recoveries().len(), 1);
+        assert!(persisted.exists());
+        assert_eq!(fs::read(&payload).unwrap(), b"keep me");
         fs::remove_file(&payload).unwrap();
-        let journal = Journal::open(&fixture.app()).unwrap();
+        let journal = fixture.reopen(journal);
         assert!(journal.recoveries().is_empty());
         assert!(!persisted.exists());
         assert!(!record.roots[1].path.exists());
@@ -651,9 +672,9 @@ mod startup_tests {
                 }
                 _ => unreachable!(),
             }
-            let persisted = fixture.save(&record);
+            let (persisted, mut journal) = fixture.save(&record);
             for _ in 0..2 {
-                let journal = Journal::open(&fixture.app()).unwrap();
+                journal = fixture.reopen(journal);
                 assert_eq!(journal.recoveries().len(), 1, "{case}");
                 assert!(persisted.exists(), "{case}");
                 assert!(fs::symlink_metadata(&root.path).is_ok(), "{case}");
@@ -714,8 +735,8 @@ mod startup_tests {
         let mut record = fixture.record();
         record.roots.push(OwnedRoot::create(&fixture.0).unwrap());
         fs::write(record.roots[1].path.join("payload"), b"keep me").unwrap();
-        let persisted = fixture.save(&record);
-        let journal = Journal::open(&fixture.app()).unwrap();
+        let (persisted, journal) = fixture.save(&record);
+        let journal = fixture.reopen(journal);
         assert_eq!(journal.recoveries().len(), 1);
         assert!(persisted.exists());
         assert!(record.roots.iter().all(|root| root.path.is_dir()));
