@@ -1,4 +1,4 @@
-import { build } from 'esbuild'
+import { build, transformSync } from 'esbuild'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
@@ -15,21 +15,21 @@ const bundle = await build({
     b.onResolve({ filter: /(?:^|\/)(api|systemIcons|fsWatch)(?:\.js)?$|^@tauri-apps\/api\/core$/ }, ({ path }) => ({ path, namespace: 'sidebar-io' }))
     b.onLoad({ filter: /.*/, namespace: 'sidebar-io' }, ({ path }) => ({ contents:
       path.includes('systemIcons') ? 'export const getCachedIcon = () => null; export const requestSystemIcons = p => globalThis.__sidebar.icons.push([...p]); export const subscribeSystemIcons = () => () => {}' :
-      path.includes('fsWatch') ? 'export const setWatch = (o,p) => globalThis.__sidebar.watches.set(o,p); export const clearWatch = o => globalThis.__sidebar.watches.delete(o); export const onFsChange = cb => { globalThis.__sidebar.change = cb; return () => { globalThis.__sidebar.change = null } }' :
+      path.includes('fsWatch') ? 'export const setWatch = (o,p) => { globalThis.__sidebar.watchOps.push(["set",o,p]); globalThis.__sidebar.watches.set(o,p) }; export const clearWatch = o => { globalThis.__sidebar.watchOps.push(["clear",o]); globalThis.__sidebar.watches.delete(o) }; export const onFsChange = cb => { globalThis.__sidebar.change = cb; return () => { globalThis.__sidebar.change = null } }' :
       path.includes('@tauri') ? 'export const invoke = () => Promise.resolve()' :
-      'export const api = { listDir: () => Promise.resolve({ entries: [{name:"FixtureVolume", path:"/Volumes/FixtureVolume", is_dir:true}] }), listSubdirectories: (...args) => globalThis.__sidebar.list(...args) }',
+      'export const api = { listDir: (...args) => (globalThis.__sidebar.dirReads.push(args), Promise.resolve({ entries: [{name:"FixtureVolume", path:"/Volumes/FixtureVolume", is_dir:true}] })), listSubdirectories: (...args) => globalThis.__sidebar.list(...args) }',
     }))
   } }],
 })
 export async function mountSidebar(t, patch = {}) {
   const previous = { __sidebar: globalThis.__sidebar, IS_REACT_ACT_ENVIRONMENT: globalThis.IS_REACT_ACT_ENVIRONMENT }
-  const requests = [], opens = [], menus = [], drops = [], switched = [], workspaceMenus = [], icons = [], watches = new Map()
+  const requests = [], opens = [], menus = [], drops = [], switched = [], workspaceMenus = [], icons = [], tabActivations = [], dirReads = [], watchOps = [], watches = new Map()
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
-  globalThis.__sidebar = { icons, watches, list: (...args) => new Promise((resolve, reject) => requests.push({ args, resolve, reject })) }
+  globalThis.__sidebar = { icons, watches, watchOps, dirReads, list: (...args) => new Promise((resolve, reject) => requests.push({ args, resolve, reject })) }
   const mod = { exports: {} }; new Function('require', 'module', 'exports', bundle.outputFiles[0].text)(require, mod, mod.exports)
   const props = { home: '/home', favorites: [{ name: 'Docs', path: '/docs' }], focusedPath: '/home', tick: 0, showHidden: false, autoRefresh: true,
     workspaces: [{ id: 'w', name: 'Workspace' }], activeWorkspace: 'w', onSwitchWorkspace: id => switched.push(id), onWorkspaceMenu: (...args) => workspaceMenus.push(args), onCreateWorkspace() {},
-    onOpen: p => opens.push(p), onMenu: (...args) => menus.push(args), onDropPin: e => drops.push(e), ...patch }
+    onActivateTab: id => tabActivations.push(id), onOpen: p => opens.push(p), onMenu: (...args) => menus.push(args), onDropPin: e => drops.push(e), ...patch }
   let renderer; const oldError = console.error
   try { console.error = (...args) => { if (!String(args[0]).startsWith('react-test-renderer is deprecated.')) oldError(...args) }
     await act(async () => { renderer = create(React.createElement(mod.exports.default, props), { createNodeMock: () => ({ addEventListener() {}, removeEventListener() {}, focus() {}, select() {} }) }) })
@@ -37,15 +37,15 @@ export async function mountSidebar(t, patch = {}) {
   let mounted = true
   const unmount = async () => { if (mounted) { await act(async () => renderer.unmount()); mounted = false } }
   t.after(async () => { await unmount(); for (const [k,v] of Object.entries(previous)) { if (v === undefined) delete globalThis[k]; else globalThis[k] = v } })
-  const h = { requests, opens, menus, drops, switched, workspaceMenus, icons, watches, get root() { return renderer.root }, text: () => JSON.stringify(renderer.toJSON()), unmount,
+  const h = { requests, tabActivations, dirReads, watchOps, opens, menus, drops, switched, workspaceMenus, icons, watches, get root() { return renderer.root }, text: () => JSON.stringify(renderer.toJSON()), unmount,
     row: path => renderer.root.findAll(n => n.type === 'div' && n.props.className?.includes('sb-item') && n.props.title === path)[0],
     disclosure: label => renderer.root.findAllByType('button').find(b => b.props['aria-label'] === label),
     run: fn => act(async () => fn()), resolve: (i, entries = [], truncated = false) => act(async () => requests[i].resolve({ entries, truncated })), reject: (i, e) => act(async () => requests[i].reject(e)),
     update: patch => act(async () => { Object.assign(props, patch); renderer.update(React.createElement(mod.exports.default, props)) }),
     emit: payload => act(async () => globalThis.__sidebar.change?.(payload)),
-    buttonKey: async (button, key, app) => {
+    buttonKey: async (button, key, app, modifiers = {}) => {
       const event = new Event('keydown', { bubbles: true, cancelable: true })
-      Object.defineProperties(event, { key: { value: key }, target: { value: button.instance } })
+      Object.defineProperties(event, { key: { value: key }, target: { value: button.instance }, ...Object.fromEntries(Object.entries(modifiers).map(([k,v]) => [k, { value: v }])) })
       await act(async () => {
         // Renderer has no DOM propagation/default actions: walk the real host ancestors,
         // then App's unchanged window callback, then the uncancelled button default.
@@ -83,4 +83,19 @@ export function createAppShortcutBoundary() {
   }
   const handler = new Function(...Object.keys(state), `return (${handlerSource})`)(...Object.values(state))
   return { actions, handle: event => { doc.activeElement = event.target || { tagName: 'BUTTON' }; handler(event) } }
+}
+
+// Execute the actual leading Sidebar JSX props, including its real config updater.
+// IO and the rest of the App remain outside this focused boundary.
+const sidebarStart = appSource.indexOf('<Sidebar\n')
+const sidebarEnd = appSource.indexOf('              tick={tick}', sidebarStart)
+if (sidebarStart < 0 || sidebarEnd < 0) throw new Error('App Sidebar binding boundary changed')
+const sidebarBinding = transformSync(`const props = ${appSource.slice(sidebarStart, sidebarEnd)} />`, { loader: 'jsx', jsx: 'transform' }).code
+export function createAppSidebarBoundary(config, focused, visibleCount) {
+  let live = config
+  const focusIdx = Math.min(focused, visibleCount - 1)
+  const pane = config.panes[focusIdx]
+  const state = { React, Sidebar: props => props, home: '/home', cfg: config, focusIdx, focusedTab: pane.tabs[pane.active] || pane.tabs[0], setCfg: updater => { live = updater(live) } }
+  const element = new Function(...Object.keys(state), `${sidebarBinding}; return props`)(...Object.values(state))
+  return { props: element.props, get config() { return live }, replace: config => { live = config } }
 }

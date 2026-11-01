@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mountSidebar, event, createAppShortcutBoundary } from '../test/SidebarHarness.js'
+import { mountSidebar, event, createAppShortcutBoundary, createAppSidebarBoundary } from '../test/SidebarHarness.js'
 const e = (name, path = `/home/${name}`, is_symlink = false) => ({ name, path, is_symlink })
 test('initial collapse, disclosure and text navigation isolate mouse/keyboard while root callbacks survive', async t => {
   const h = await mountSidebar(t); assert.equal(h.requests.length, 0)
@@ -109,4 +109,74 @@ test('open-limit full-folder Enter/Space opens the limited folder without invoki
     assert.deepEqual(app.actions, [])
   }
   assert.deepEqual(h.opens, ['/d63', '/d63'])
+})
+
+const tabRows = h => h.root.findAllByType('button').filter(b => b.props.className?.includes('sb-pane-tab'))
+const tabs = [
+  { id: 'a', path: '/first/shared', history: ['/old'], future: [] },
+  { id: 'b', path: '/second/shared', history: [], future: [] },
+  { id: 'c', path: '/first/shared', history: [], future: [] },
+]
+
+test('current pane tab section retains ordered duplicate tabs and only activates an existing ID', async t => {
+  const h = await mountSidebar(t, { paneTabs: tabs, activeTabId: 'c' })
+  const rows = tabRows(h)
+  assert.equal(rows.length, 3)
+  assert.deepEqual(rows.map(b => b.props.title), ['/first/shared', '/second/shared', '/first/shared'])
+  assert.deepEqual(rows.map(b => b.props['aria-current']), [undefined, undefined, 'page'])
+  assert.deepEqual(rows.map(b => b.props.className.includes(' active')), [false, false, true])
+  assert.deepEqual(rows.map(b => b.findByType('span').children.join('')), ['shared', 'shared', 'shared'])
+  assert.ok(h.text().indexOf('当前窗格标签') < h.text().indexOf('个人收藏'))
+  await h.run(() => rows[1].props.onClick(event()))
+  assert.deepEqual(h.tabActivations, ['b']); assert.deepEqual(h.opens, []); assert.deepEqual(h.menus, []); assert.deepEqual(h.drops, [])
+})
+
+test('tab focus/open/close/navigation/workspace replacement follows props without filesystem work', async t => {
+  const h = await mountSidebar(t, { paneTabs: tabs, activeTabId: 'a' })
+  await h.run(() => h.disclosure('展开 主目录').props.onClick(event())); await h.resolve(0, [e('child')])
+  const watchBefore = [...h.watches], iconsBefore = h.icons.length, readsBefore = h.dirReads.length, watchOpsBefore = h.watchOps.length
+  for (const paneTabs of [[{ id: 'other', path: '/other' }], [...tabs, { id: 'new', path: '/new' }], tabs.slice(1), [{ ...tabs[0], path: '/navigated' }], [{ id: 'workspace-tab', path: '/workspace' }], []]) {
+    await h.update({ paneTabs, activeTabId: paneTabs[0]?.id })
+    assert.deepEqual(tabRows(h).map(b => b.props.title), paneTabs.map(t => t.path))
+    assert.equal(h.requests.length, 1); assert.equal(h.dirReads.length, readsBefore); assert.equal(h.icons.length, iconsBefore); assert.deepEqual([...h.watches], watchBefore); assert.equal(h.watchOps.length, watchOpsBefore)
+    assert.ok(h.disclosure('收起 主目录'))
+  }
+})
+
+test('tab button Enter/Space activates once before real App selected-file shortcuts; Tab and modified globals pass', async t => {
+  const h = await mountSidebar(t, { paneTabs: tabs, activeTabId: 'a' }), app = createAppShortcutBoundary()
+  assert.equal(tabRows(h).length, 3)
+  for (const key of ['Enter', ' ']) {
+    const keydown = await h.buttonKey(tabRows(h)[1], key, app)
+    assert.equal(keydown.defaultPrevented, false); assert.deepEqual(app.actions, [])
+  }
+  assert.deepEqual(h.tabActivations, ['b', 'b'])
+  const seen = [], global = { handle: e => seen.push(e.key) }
+  for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', 'F2', 'Backspace', 'Delete', 'Escape']) await h.buttonKey(tabRows(h)[0], key, global)
+  assert.deepEqual(seen, [])
+  await h.buttonKey(tabRows(h)[0], 'Tab', global)
+  for (const modifier of ['metaKey', 'ctrlKey', 'altKey']) await h.buttonKey(tabRows(h)[0], 'ArrowLeft', global, { [modifier]: true })
+  assert.deepEqual(seen, ['Tab', 'ArrowLeft', 'ArrowLeft', 'ArrowLeft'])
+})
+
+test('actual App Sidebar binding selects visible focus pane and resolves IDs against live config only', () => {
+  const other = { tabs: [{ id: 'other', path: '/other' }], active: 0 }
+  const target = { tabs, active: 0 }
+  const config = { panes: [other, target, other], favorites: [], untouched: { selected: ['keep'] } }
+  const app = createAppSidebarBoundary(config, 2, 2)
+  assert.equal(app.props.paneTabs, tabs); assert.equal(app.props.activeTabId, 'a')
+  app.props.onActivateTab('b')
+  assert.equal(app.config.panes[1].active, 1); assert.equal(app.config.panes[0], other); assert.equal(app.config.panes[2], other)
+  assert.equal(app.config.panes[1].tabs, tabs); assert.equal(app.config.untouched, config.untouched)
+  const active = app.config; app.props.onActivateTab('b'); assert.equal(app.config, active)
+  app.props.onActivateTab('closed'); assert.equal(app.config, active)
+  const reordered = { ...active, panes: [other, { tabs: [tabs[2], tabs[0], tabs[1]], active: 0 }, other] }
+  app.replace(reordered); app.props.onActivateTab('b')
+  assert.equal(app.config.panes[1].active, 2, 'live ID wins over captured index')
+  const closed = { ...config, panes: [other, { tabs: [tabs[0]], active: 0 }, other] }
+  app.replace(closed); app.props.onActivateTab('b'); assert.equal(app.config, closed)
+  const replaced = { ...config, panes: [other] }
+  app.replace(replaced); app.props.onActivateTab('b'); assert.equal(app.config, replaced)
+  const focusedFirst = createAppSidebarBoundary(config, 0, 3)
+  assert.equal(focusedFirst.props.paneTabs, other.tabs); assert.equal(focusedFirst.props.activeTabId, 'other')
 })

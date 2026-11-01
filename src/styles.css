@@ -389,7 +389,7 @@ input, textarea {
   background: var(--control-bg);
   color: var(--text);
 }
-.sb-item {
+.sb-item, .sb-pane-tab {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -402,13 +402,20 @@ input, textarea {
   text-overflow: ellipsis;
   color: var(--text);
 }
-.sb-item:hover { background: var(--hover-bg); }
-.sb-item.active {
+.sb-item:hover, .sb-pane-tab:hover { background: var(--hover-bg); }
+.sb-item.active, .sb-pane-tab.active {
   background: var(--sidebar-active);
   box-shadow: inset 0 0 0 1px var(--sidebar-active-ring);
 }
-.sb-item.active:hover { background: var(--sidebar-active); }
-.sb-item svg { flex: none; color: var(--accent); }
+.sb-item.active:hover, .sb-pane-tab.active:hover { background: var(--sidebar-active); }
+.sb-item svg, .sb-pane-tab svg { flex: none; color: var(--accent); }
+.sb-pane-tab {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+}
 .sb-system-icon { flex: none; border-radius: 3px; object-fit: contain; }
 .sb-system-icon.sb-color-icon { border-radius: 0; }
 .sb-item.drive svg { color: var(--muted-icon); }
