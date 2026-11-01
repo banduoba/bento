@@ -10,25 +10,33 @@ const owners = new Map() // ownerId -> string[]
 const subs = new Set()
 let pushTimer = null
 let lastPushed = ''
+let forcePush = false
 let listening = false
 
 function push() {
   const paths = [...new Set([...owners.values()].flat())].sort()
   const sig = paths.join('\n')
-  if (sig === lastPushed) return
+  const force = forcePush
+  forcePush = false
+  if (sig === lastPushed && !force) return
   lastPushed = sig
   invoke('set_watched', { paths }).catch(() => {})
 }
 
-function schedulePush() {
+function schedulePush(force = false) {
+  forcePush ||= force
   clearTimeout(pushTimer)
   pushTimer = setTimeout(push, 80)
 }
 
 export function setWatch(ownerId, paths) {
   if (!hasTauri) return
+  const previous = owners.get(ownerId) || []
+  // A recovered path may still be held by another owner, or re-added before
+  // debounce fires. Reconcile native registrations even if the union is equal.
+  const added = paths.some(path => !previous.includes(path))
   owners.set(ownerId, paths)
-  schedulePush()
+  schedulePush(added)
 }
 
 export function clearWatch(ownerId) {
