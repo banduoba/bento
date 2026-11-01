@@ -972,7 +972,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .row-name {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-width: 0;
   line-height: 22px;
 }
