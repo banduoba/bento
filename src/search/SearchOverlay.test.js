@@ -237,7 +237,8 @@ test('format change reissues backend query before limit; keyboard and preview st
   await h.run(() => h.previews[1].resolve({ kind: 'text', text: 'CURRENT', matchLines: [1] }))
   assert.ok(h.text().includes('CURRENT'))
   await h.run(() => h.input().props.onKeyDown({ key: 'Enter', preventDefault() {} }))
-  assert.equal(h.opened[0].name, 'two.txt')
+  assert.deepEqual(h.located, [['/work', '/work/two.txt']])
+  assert.deepEqual(h.opened, [])
   await h.run(() => h.button('文档').props.onClick())
   await h.flush()
   assert.equal(h.requests[1].args[7], 'document')
@@ -275,20 +276,40 @@ async function showResults(t, items, props) {
   return h
 }
 
-test('single click selects and previews without opening; Enter and context Open retain explicit activation', async t => {
-  const h = await showResults(t, [item('one.txt'), item('two.txt')])
-  await h.run(() => h.rows()[1].props.onClick(rowEvent()))
-  assert.deepEqual(h.opened, [])
-  assert.deepEqual(h.closed, [])
-  assert.ok(h.rows()[1].props.className.endsWith(' on'))
-  assert.equal(h.previews.length, 2)
-  await h.run(() => h.input().props.onKeyDown({ key: 'Enter', preventDefault() {} }))
-  assert.equal(h.opened[0].name, 'two.txt')
-  assert.equal(h.closed.length, 1)
+for (const is_dir of [false, true]) {
+  test(`single click locates and selects a ${is_dir ? 'folder' : 'file'} result; hover only previews`, async t => {
+    const entry = { ...item('报告 [一] '), is_dir }
+    const h = await showResults(t, [item('one.txt'), entry])
+    await h.run(() => h.rows()[1].props.onMouseEnter())
+    assert.ok(h.rows()[1].props.className.endsWith(' on'))
+    assert.equal(h.previews.length, 2)
+    assert.deepEqual(h.located, [])
+    assert.deepEqual(h.closed, [])
+    await h.run(() => h.rows()[1].props.onClick(rowEvent()))
+    assert.deepEqual(h.located, [[entry.dir, entry.path]])
+    assert.equal(h.closed.length, 1)
+    assert.deepEqual(h.opened, [])
+  })
+  test(`Enter locates and selects a ${is_dir ? 'folder' : 'file'} result without opening it`, async t => {
+    const entry = { ...item('报告 [一] '), is_dir }
+    const h = await showResults(t, [item('one.txt'), entry], { mode: 'name' })
+    await h.run(() => h.input().props.onKeyDown({ key: 'ArrowDown', preventDefault() {} }))
+    await h.run(() => h.input().props.onKeyDown({ key: 'Enter', preventDefault() {} }))
+    assert.deepEqual(h.located, [[entry.dir, entry.path]])
+    assert.equal(h.closed.length, 1)
+    assert.deepEqual(h.opened, [])
+  })
+}
+
+test('explicit context Open opens the item and closes without locating', async t => {
+  const entry = item()
+  const h = await showResults(t, [entry])
   await h.run(() => h.rows()[0].props.onContextMenu({ ...rowEvent(), clientX: 0, clientY: 0 }))
   const menu = h.root.find(n => !!n.props.menu?.items).props.menu
   await h.run(() => menu.items.find(n => n.label === '打开').action())
-  assert.equal(h.opened[1].name, 'one.txt')
+  assert.deepEqual(h.opened, [entry])
+  assert.deepEqual(h.located, [])
+  assert.equal(h.closed.length, 1)
 })
 
 for (const is_dir of [false, true]) {
