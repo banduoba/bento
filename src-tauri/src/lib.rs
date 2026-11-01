@@ -3,6 +3,8 @@ use serde::Serialize;
 
 #[cfg(target_os = "macos")]
 mod quick_look;
+#[cfg(target_os = "macos")]
+mod native_files;
 
 use std::ffi::CString;
 use std::fs;
@@ -129,6 +131,7 @@ fn unique_path(dir: &Path, name: &str) -> PathBuf {
 /// 拷贝/移动时目标重名的命名：「name copy.ext」，再重名依次「name copy 1.ext」「name copy 2.ext」…
 /// 对已带「copy[ N]」后缀的名字（以及旧版的中文「副本[N]」）先去掉后缀再编号
 /// （「a copy.txt」再拷 → 「a copy 1.txt」，而不是「a copy copy.txt」）
+#[cfg(any(not(target_os = "macos"), test))]
 fn strip_copy_suffix(stem: &str) -> &str {
     if let Some(i) = stem.rfind(" copy") {
         let rest = &stem[i + " copy".len()..];
@@ -145,6 +148,7 @@ fn strip_copy_suffix(stem: &str) -> &str {
     stem
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn copy_name_path(dir: &Path, name: &str) -> PathBuf {
     let candidate = dir.join(name);
     if entry_available(&candidate) {
@@ -202,6 +206,7 @@ fn rename_no_replace(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn create_private_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new().mode(0o700).create(path)?;
@@ -245,6 +250,7 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
 }
 
 // Keep APFS clone-on-write copies; the private staging parent protects cloned ACLs.
+#[cfg(any(not(target_os = "macos"), test))]
 fn copy_regular_file(src: &Path, dst: &Path) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -268,6 +274,7 @@ fn copy_regular_file(src: &Path, dst: &Path) -> io::Result<()> {
 
 /// macOS metadata includes mode, ACLs, extended attributes, and timestamps.
 /// Any unsupported/failed metadata operation aborts publication and source deletion.
+#[cfg(any(not(target_os = "macos"), test))]
 fn preserve_move_metadata(src: &Path, dst: &Path) -> io::Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -297,15 +304,18 @@ fn preserve_move_metadata(src: &Path, dst: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn is_exdev(err: &io::Error) -> bool {
     err.raw_os_error() == Some(libc::EXDEV) || err.kind() == io::ErrorKind::CrossesDevices
 }
 
 /// 跨卷复制用：保留符号链接本身，不跟随链接去复制（或删除）目标。
+#[cfg(any(not(target_os = "macos"), test))]
 fn copy_for_move(src: &Path, dst: &Path) -> io::Result<()> {
     copy_for_move_with(src, dst, &preserve_move_metadata)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn copy_for_move_with(
     src: &Path,
     dst: &Path,
@@ -345,6 +355,7 @@ fn copy_for_move_with(
     Ok(())
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn remove_path(path: &Path) -> io::Result<()> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -358,6 +369,7 @@ fn remove_path(path: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn temp_move_dir(dir: &Path) -> io::Result<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     for _ in 0..1000 {
@@ -376,6 +388,7 @@ fn temp_move_dir(dir: &Path) -> io::Result<PathBuf> {
 }
 
 // Only called on our exclusively created private staging tree.
+#[cfg(any(not(target_os = "macos"), test))]
 fn cleanup_staging(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = fs::symlink_metadata(path) {
@@ -395,28 +408,34 @@ fn cleanup_staging(path: &Path) {
 
 // Keep publication state structured across the io::Error boundary. A later deletion failure
 // must refresh changed directories and must never retry under a new destination name.
+#[cfg(any(not(target_os = "macos"), test))]
 #[derive(Debug)]
 struct PublishedDestination {
     dest: PathBuf,
     error: io::Error,
 }
+#[cfg(any(not(target_os = "macos"), test))]
 impl std::fmt::Display for PublishedDestination {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "已复制到「{}」，但无法删除源（请检查源是否残留）: {}", self.dest.display(), self.error)
     }
 }
+#[cfg(any(not(target_os = "macos"), test))]
 impl std::error::Error for PublishedDestination {}
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn published_destination(error: &io::Error) -> Option<&Path> {
     error.get_ref()?.downcast_ref::<PublishedDestination>().map(|state| state.dest.as_path())
 }
 
 /// 跨卷移动：先把内容复制到目标卷的临时名，改名成功后才删除源。
 /// 复制或改名失败时删掉临时文件，源保持原样。
+#[cfg(any(not(target_os = "macos"), test))]
 fn copy_then_remove(src: &Path, dst: &Path) -> io::Result<()> {
     copy_then_remove_with(src, dst, copy_for_move, remove_path)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn copy_then_remove_with(
     src: &Path,
     dst: &Path,
@@ -453,10 +472,12 @@ fn copy_then_remove_with(
 }
 
 /// 同卷 rename；仅当内核返回 EXDEV 时才复制后删除。
+#[cfg(any(not(target_os = "macos"), test))]
 fn relocate(src: &Path, dst: &Path) -> io::Result<()> {
     relocate_with(src, dst, rename_no_replace)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn relocate_with(
     src: &Path,
     dst: &Path,
@@ -469,6 +490,7 @@ fn relocate_with(
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn do_transfer(sp: &Path, dp: &Path, mode: &str) -> io::Result<()> {
     if mode == "move" {
         relocate(sp, dp)
@@ -477,6 +499,7 @@ fn do_transfer(sp: &Path, dp: &Path, mode: &str) -> io::Result<()> {
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn failed_transfer(source: &str, error: io::Error) -> TransferItem {
     let published = published_destination(&error);
     let affected_directories = if let Some(dest) = published {
@@ -489,13 +512,16 @@ fn failed_transfer(source: &str, error: io::Error) -> TransferItem {
         ok: false,
         error: Some(error.to_string()),
         affected_directories,
+        ..Default::default()
     }
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn transfer_one_item(source: &str, dest_dir: &Path, mode: &str) -> TransferItem {
     transfer_one_item_with(source, dest_dir, mode, do_transfer)
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn transfer_one_item_with(
     source: &str,
     dest_dir: &Path,
@@ -508,6 +534,7 @@ fn transfer_one_item_with(
         ok: false,
         error: Some(error),
         affected_directories: Vec::new(),
+        ..Default::default()
     };
     let sp = PathBuf::from(source);
     if fs::symlink_metadata(&sp).is_err() {
@@ -521,6 +548,7 @@ fn transfer_one_item_with(
             ok: true,
             error: None,
             affected_directories: Vec::new(),
+            ..Default::default()
         };
     }
     let name = sp
@@ -540,6 +568,7 @@ fn transfer_one_item_with(
                     ok: true,
                     error: None,
                     affected_directories: Vec::new(),
+                    ..Default::default()
                 }
             }
             Err(err) if published_destination(&err).is_some() => return failed_transfer(source, err),
@@ -550,10 +579,12 @@ fn transfer_one_item_with(
     fail("目标重名冲突过多，请重试".into())
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn move_one_item(source: &str, dest_dir: &Path) -> TransferItem {
     transfer_one_item(source, dest_dir, "move")
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn move_into(
     sources: &[String],
     dest: &str,
@@ -572,7 +603,7 @@ fn move_into(
     Ok(out)
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug, Default)]
 struct TransferItem {
     source: String,
     dest: String,
@@ -580,9 +611,36 @@ struct TransferItem {
     error: Option<String>,
     #[serde(rename = "affectedDirectories", skip_serializing_if = "Vec::is_empty")]
     affected_directories: Vec<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    cancelled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<FileIdentity>,
 }
 
-/// 复制/移动多个文件到目标目录，逐项上报进度事件 transfer-progress
+#[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    dev: String,
+    ino: String,
+}
+
+fn file_identity(path: &Path) -> io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(path)?;
+    Ok(FileIdentity {
+        dev: metadata.dev().to_string(),
+        ino: metadata.ino().to_string(),
+    })
+}
+
+fn check_identity(path: &Path, expected: Option<&FileIdentity>) -> io::Result<()> {
+    let actual = file_identity(path)?;
+    if expected.is_some_and(|expected| *expected != actual) {
+        return Err(io::Error::other("文件已被替换，无法安全撤销"));
+    }
+    Ok(())
+}
+
+/// macOS delegates progress, conflicts and cancellation to Finder/AppKit.
 #[tauri::command]
 async fn transfer(
     app: AppHandle,
@@ -591,21 +649,22 @@ async fn transfer(
     mode: String,
 ) -> Result<Vec<TransferItem>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let dest_dir = PathBuf::from(&dest);
-        if !dest_dir.is_dir() {
-            return Err(format!("目标不是文件夹: {}", dest));
+        #[cfg(target_os = "macos")]
+        {
+            native_files::transfer(&app, &sources, &dest, &mode)
         }
-        let total = sources.len();
-        let mut out = Vec::with_capacity(total);
-        for (i, s) in sources.iter().enumerate() {
-            let item = transfer_one_item(s, &dest_dir, &mode);
-            out.push(item);
-            let _ = app.emit(
-                "transfer-progress",
-                serde_json::json!({ "done": i + 1, "total": total }),
-            );
+        #[cfg(not(target_os = "macos"))]
+        {
+            let dest_dir = PathBuf::from(&dest);
+            if !dest_dir.is_dir() {
+                return Err(format!("目标不是文件夹: {dest}"));
+            }
+            let _ = app;
+            Ok(sources
+                .iter()
+                .map(|s| transfer_one_item(s, &dest_dir, &mode))
+                .collect())
         }
-        Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -615,8 +674,10 @@ async fn transfer(
 struct RestoreMove {
     source: String,
     dest: String,
+    identity: Option<FileIdentity>,
 }
 
+#[cfg(any(not(target_os = "macos"), test))]
 fn restore_into(moves: &[RestoreMove]) -> Vec<TransferItem> {
     moves
         .iter()
@@ -630,7 +691,7 @@ fn restore_into(moves: &[RestoreMove]) -> Vec<TransferItem> {
                         "恢复需要完整文件路径",
                     ));
                 }
-                fs::symlink_metadata(src)?;
+                check_identity(src, m.identity.as_ref())?;
                 if src == dst {
                     return Ok(());
                 }
@@ -649,6 +710,7 @@ fn restore_into(moves: &[RestoreMove]) -> Vec<TransferItem> {
                 ok: result.is_ok(),
                 error: result.err().map(|e| e.to_string()),
                 affected_directories: Vec::new(),
+                ..Default::default()
             }
         })
         .collect()
@@ -656,69 +718,82 @@ fn restore_into(moves: &[RestoreMove]) -> Vec<TransferItem> {
 
 #[tauri::command]
 async fn restore_moves(moves: Vec<RestoreMove>) -> Result<Vec<TransferItem>, String> {
-    tauri::async_runtime::spawn_blocking(move || restore_into(&moves))
-        .await
-        .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        {
+            native_files::restore(&moves)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            restore_into(&moves)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
-/// ⌘X / ⌘V：把条目移动到目标文件夹。同卷 rename；仅 EXDEV 时复制成功后再删除源。
+/// Cut/paste uses the same native move path as drag/drop.
 #[tauri::command]
 async fn move_items(
     app: AppHandle,
     sources: Vec<String>,
     dest: String,
 ) -> Result<Vec<TransferItem>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        move_into(&sources, &dest, |done, total| {
-            let _ = app.emit(
-                "transfer-progress",
-                serde_json::json!({ "done": done, "total": total }),
-            );
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    transfer(app, sources, dest, "move".into()).await
 }
 
-/// 自管废纸篓：主盘文件移入 ~/.Trash（与 Finder 一致），挂载卷/其他用户目录
-/// 移入 Bento 回收站（应用数据目录）。返回原始位置与实际废纸篓位置，供 ⌘Z 撤销。
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 struct TrashEntry {
     original: String,
     trashed: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<FileIdentity>,
 }
 
-fn bento_trash_dir(app_dir: &Path) -> std::path::PathBuf {
-    app_dir.join("Trash")
+#[derive(Serialize, Default, Debug)]
+struct TrashResult {
+    entries: Vec<TrashEntry>,
+    error: Option<String>,
+    cancelled: bool,
+}
+
+#[derive(serde::Deserialize)]
+struct ExpectedIdentity {
+    path: String,
+    dev: String,
+    ino: String,
 }
 
 #[tauri::command]
-async fn trash(paths: Vec<String>, app: AppHandle) -> Result<Vec<TrashEntry>, String> {
-    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut entries = Vec::new();
-    for p in &paths {
-        let src = Path::new(p);
-        let name = src
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "file".into());
-        // 主盘（home 内）→ ~/.Trash；否则 → Bento 回收站（该卷可能无可写 .Trashes）
-        let in_home = !home.is_empty() && p.starts_with(home.as_str());
-        let trash_root = if in_home {
-            PathBuf::from(&home).join(".Trash")
-        } else {
-            bento_trash_dir(&app_dir)
-        };
-        fs::create_dir_all(&trash_root).map_err(|e| format!("创建废纸篓目录失败: {}", e))?;
-        let dest = unique_path(&trash_root, &name);
-        do_transfer(src, &dest, "move").map_err(|e| format!("移到废纸篓失败: {}", e))?;
-        entries.push(TrashEntry {
-            original: p.clone(),
-            trashed: dest.to_string_lossy().into_owned(),
-        });
-    }
-    Ok(entries)
+async fn trash(
+    paths: Vec<String>,
+    expected: Option<Vec<ExpectedIdentity>>,
+    app: AppHandle,
+) -> Result<TrashResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        {
+            native_files::trash(&app, &paths, expected.as_deref())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = app;
+            for path in &paths {
+                let identity = expected
+                    .as_ref()
+                    .and_then(|items| items.iter().find(|i| &i.path == path))
+                    .map(|i| FileIdentity {
+                        dev: i.dev.clone(),
+                        ino: i.ino.clone(),
+                    });
+                check_identity(Path::new(path), identity.as_ref()).map_err(|e| e.to_string())?;
+            }
+            trash::delete_all(&paths).map_err(|e| e.to_string())?;
+            Ok(TrashResult::default())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 新建文件夹，自动命名「未命名文件夹」「未命名文件夹 2」…，返回实际路径
@@ -2390,6 +2465,22 @@ mod file_safety_tests {
     }
 
     #[test]
+    fn restore_identity_guard_rejects_a_replaced_source() {
+        let root = Scratch::new();
+        let source = root.0.join("src/note.txt");
+        let dest = root.0.join("dst/note.txt");
+        fs::write(&source, "replacement").unwrap();
+        let request: RestoreMove = serde_json::from_value(serde_json::json!({
+            "source": source, "dest": dest,
+            "identity": {"dev": "0", "ino": "0"}
+        })).unwrap();
+        let result = restore_into(&[request]);
+        assert!(!result[0].ok, "a replacement must never be moved by Undo");
+        assert_eq!(fs::read(&source).unwrap(), b"replacement");
+        assert!(!dest.exists());
+    }
+
+    #[test]
     fn exact_restore_recovers_original_name_and_rejects_conflicts_per_item() {
         let root = Scratch::new();
         let source = root.0.join("src/note.txt");
@@ -2404,6 +2495,7 @@ mod file_safety_tests {
         let moves = vec![RestoreMove {
             source: forward[0].dest.clone(),
             dest: source.to_string_lossy().into_owned(),
+            identity: None,
         }];
         fs::write(&source, "conflict").unwrap();
         let blocked = restore_into(&moves);
