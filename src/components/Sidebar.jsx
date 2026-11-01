@@ -294,25 +294,6 @@ export default function Sidebar({
 
   return (
     <div className="sidebar" ref={ref}>
-      <div className="sb-title">当前窗格标签</div>
-      {paneTabs.map(tab => (
-        <button
-          key={tab.id}
-          type="button"
-          className={`sb-pane-tab${tab.id === activeTabId ? ' active' : ''}`}
-          title={tab.path}
-          aria-current={tab.id === activeTabId ? 'page' : undefined}
-          onKeyDown={(e) => {
-            if (e.metaKey || e.ctrlKey || e.altKey || e.key === 'Tab') return
-            // Keep native button activation, but isolate pane file shortcuts.
-            if (e.key.length > 1 || e.key === ' ') e.stopPropagation()
-          }}
-          onClick={() => onActivateTab(tab.id)}
-        >
-          <IconFolder size={20} />
-          <span className="sb-label">{labelOf(tab.path, home)}</span>
-        </button>
-      ))}
       <div className="sb-title">个人收藏</div>
       <FolderBranch
         id={`home:${home}`} tree={tree} branches={branches} focusedPath={focusedPath}
@@ -388,6 +369,25 @@ export default function Sidebar({
           onRenameCommit={onWsRenameCommit}
           onRenameCancel={onWsRenameCancel}
         />
+      ))}
+      <div className="sb-title">当前窗格标签</div>
+      {paneTabs.map(tab => (
+        <button
+          key={tab.id}
+          type="button"
+          className={`sb-pane-tab${tab.id === activeTabId ? ' active' : ''}`}
+          title={tab.path}
+          aria-current={tab.id === activeTabId ? 'page' : undefined}
+          onKeyDown={(e) => {
+            if (e.metaKey || e.ctrlKey || e.altKey || e.key === 'Tab') return
+            // Keep native button activation, but isolate pane file shortcuts.
+            if (e.key.length > 1 || e.key === ' ') e.stopPropagation()
+          }}
+          onClick={() => onActivateTab(tab.id)}
+        >
+          <IconFolder size={20} />
+          <span className="sb-label">{labelOf(tab.path, home)}</span>
+        </button>
       ))}
     </div>
   )
