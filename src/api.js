@@ -21,20 +21,29 @@ export const api = hasTauri
       moveItems: (sources, dest) => invoke('move_items', { sources, dest }),
       restoreMoves: (moves) => invoke('restore_moves', { moves }),
       trash: (paths, expected) => invoke('trash', { paths, expected: expected || null }),
-      makeDir: (path) => invoke('make_dir', { path }),
-      rename: (oldPath, newName) => invoke('rename', { oldPath, newName }),
+      makeDirWithReceipt: (path) => invoke('make_dir_with_receipt', { path }),
+      makeDir: async (path) => (await invoke('make_dir_with_receipt', { path })).path,
+      renameWithReceipt: (oldPath, newName) => invoke('rename_with_receipt', { oldPath, newName }),
+      rename: async (oldPath, newName) => (await invoke('rename_with_receipt', { oldPath, newName })).path,
       openPath: (path) => invoke('open_path', { path }),
       reveal: (path) => invoke('reveal_in_finder', { path }),
       openTerminal: (path) => invoke('open_terminal', { path }),
-      zipPaths: (sources, destDir, options) => invoke('zip_paths', { sources, destDir, options: options || null }),
+      zipPathsWithReceipt: (sources, destDir, options) => invoke('zip_paths_with_receipt', { sources, destDir, options: options || null }),
+      zipPaths: async (sources, destDir, options) => {
+        const result = await invoke('zip_paths_with_receipt', { sources, destDir, options: options || null })
+        if (result.error) throw result.error
+        return result.entries.map(entry => entry.path)
+      },
       quickLook: (path, paths, session = null) =>
         invoke('quick_look', { path, paths: paths && paths.length ? paths : null, session }),
       updateQuickLook: (path, paths, session, revision) =>
         invoke('update_quick_look', { path, paths, session, revision }),
       makeFile: (path) => invoke('make_file', { path }),
-      createFile: (dir, kind) => invoke('create_file', { dir, kind }),
+      createFileWithReceipt: (dir, kind) => invoke('create_file_with_receipt', { dir, kind }),
+      createFile: async (dir, kind) => (await invoke('create_file_with_receipt', { dir, kind })).path,
       listTemplates: () => invoke('list_templates'),
-      copyTemplate: (dir, template) => invoke('copy_template', { dir, template }),
+      copyTemplateWithReceipt: (dir, template) => invoke('copy_template_with_receipt', { dir, template }),
+      copyTemplate: async (dir, template) => (await invoke('copy_template_with_receipt', { dir, template })).path,
       search: (query, scope, root, showHidden, roots, mode) =>
         invoke('search', { query, scope, root: root || null, showHidden, roots: roots || [], mode: mode || 'name' }),
       copyFilesToClipboard: (paths) => invoke('copy_files_to_clipboard', { paths }),
@@ -297,7 +306,7 @@ function mockApi() {
     }
     return Promise.resolve(results)
   }
-  return {
+  const mock = {
     listDir: (path, showHidden) => {
       if (path !== HUGE_PATH && !TREE[path]) return Promise.reject(new Error(`无法读取目录 ${path}`))
       return Promise.resolve({ entries: entriesFor(path, showHidden) })
@@ -404,14 +413,10 @@ function mockApi() {
     makeDir: (dir) => {
       const list = (TREE[dir] = TREE[dir] || [])
       const name = uniqueName(list, '未命名文件夹')
-      list.push(E(name, true))
-      return Promise.resolve(`${dir}/${name}`)
-    },
-    makeFile: (dir) => {
-      const list = (TREE[dir] = TREE[dir] || [])
-      const name = uniqueName(list, '未命名.txt')
-      list.push(E(name, false, 0))
-      return Promise.resolve(`${dir}/${name}`)
+      const entry = E(name, true)
+      list.push(entry)
+      TREE[`${dir}/${name}`] = []
+      return Promise.resolve({ path: `${dir}/${name}`, identity: entry.identity })
     },
     createFile: (dir, kind) => {
       if (kind !== 'text' && kind !== 'txt' && kind !== 'markdown' && kind !== 'md') {
@@ -420,8 +425,9 @@ function mockApi() {
       const list = (TREE[dir] = TREE[dir] || [])
       const base = kind === 'markdown' || kind === 'md' ? '未命名.md' : '未命名.txt'
       const name = uniqueName(list, base)
-      list.push(E(name, false, 0))
-      return Promise.resolve(`${dir}/${name}`)
+      const entry = E(name, false, 0)
+      list.push(entry)
+      return Promise.resolve({ path: `${dir}/${name}`, identity: entry.identity })
     },
     listTemplates: () => Promise.resolve(TEMPLATES.map((t) => ({ ...t }))),
     copyTemplate: (dir, template) => {
@@ -429,18 +435,23 @@ function mockApi() {
       const known = TEMPLATES.find((t) => t.path === template)
       const base = known?.name || String(template).slice(String(template).lastIndexOf('/') + 1) || '未命名'
       const name = uniqueName(list, base)
-      list.push(E(name, false, known ? 120 : 0))
-      return Promise.resolve(`${dir}/${name}`)
+      const entry = E(name, false, known ? 120 : 0)
+      list.push(entry)
+      return Promise.resolve({ path: `${dir}/${name}`, identity: entry.identity })
     },
     rename: (oldPath, newName) => {
       const parent = oldPath.slice(0, oldPath.lastIndexOf('/'))
       const oldName = oldPath.slice(oldPath.lastIndexOf('/') + 1)
       const entry = (TREE[parent] || []).find((e) => e.name === oldName)
-      if (entry) {
-        entry.name = newName
-        entry.ext = newName.includes('.') ? newName.split('.').pop().toLowerCase() : ''
-      }
-      return Promise.resolve(`${parent}/${newName}`)
+      if (!entry) return Promise.reject('源不存在')
+      newName = newName.trim()
+      if (!newName || newName.includes('/') || newName === '.' || newName === '..') return Promise.reject('名称不合法')
+      if (newName !== oldName && TREE[parent].some(e => e.name === newName)) return Promise.reject('名称已存在')
+      const path = `${parent}/${newName}`
+      entry.name = newName
+      entry.ext = newName.includes('.') ? newName.split('.').pop().toLowerCase() : ''
+      if (entry.is_dir) rekeyMockTree(oldPath, path)
+      return Promise.resolve({ path, identity: entry.identity })
     },
     readTextPreview: (path, query) => {
       const name = path.slice(path.lastIndexOf('/') + 1)
@@ -457,7 +468,19 @@ function mockApi() {
     openPath: () => Promise.resolve(),
     reveal: () => Promise.resolve(),
     openTerminal: () => Promise.resolve(),
-    zipPaths: () => Promise.resolve([]),
+    zipPaths: (sources, dir, options = {}) => {
+      if (!TREE[dir]) return Promise.reject('目标不是文件夹')
+      const names = options?.separate && sources.length > 1
+        ? sources.map(path => path.slice(path.lastIndexOf('/') + 1) + '.zip')
+        : [options?.name || (sources.length === 1 ? sources[0].slice(sources[0].lastIndexOf('/') + 1) + '.zip' : '归档.zip')]
+      const entries = names.map(name => {
+        const actual = uniqueName(TREE[dir], name.toLowerCase().endsWith('.zip') ? name : name + '.zip')
+        const entry = E(actual, false)
+        TREE[dir].push(entry)
+        return { path: `${dir}/${actual}`, identity: entry.identity }
+      })
+      return Promise.resolve({ entries, error: null })
+    },
     quickLook: () => Promise.resolve(),
     updateQuickLook: () => Promise.resolve(),
     search: (q, scope, root, showHidden, roots, mode) => {
@@ -535,6 +558,20 @@ function mockApi() {
       return Promise.resolve()
     },
   }
+  for (const name of ['makeDir', 'createFile', 'copyTemplate', 'rename']) {
+    const mutate = mock[name]
+    mock[name + 'WithReceipt'] = mutate
+    mock[name] = async (...args) => (await mutate(...args)).path
+  }
+  mock.makeFile = dir => mock.createFile(dir, 'text')
+  const zip = mock.zipPaths
+  mock.zipPathsWithReceipt = zip
+  mock.zipPaths = async (...args) => {
+    const result = await zip(...args)
+    if (result.error) throw result.error
+    return result.entries.map(entry => entry.path)
+  }
+  return mock
 }
 
 export const fileSrc = hasTauri ? convertFileSrc : (p) => ''

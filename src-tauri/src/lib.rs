@@ -632,6 +632,25 @@ fn file_identity(path: &Path) -> io::Result<FileIdentity> {
     })
 }
 
+/// A completed write remains successful even when its identity cannot be read.
+/// Only identified receipts may be registered for Undo.
+#[derive(Serialize, Debug)]
+struct WriteReceipt {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<FileIdentity>,
+}
+
+fn completion_receipt(path: PathBuf) -> WriteReceipt {
+    WriteReceipt { identity: file_identity(&path).ok(), path: path.to_string_lossy().into_owned() }
+}
+
+#[derive(Serialize, Debug, Default)]
+struct WriteBatch {
+    entries: Vec<WriteReceipt>,
+    error: Option<String>,
+}
+
 fn check_identity(path: &Path, expected: Option<&FileIdentity>) -> io::Result<()> {
     let actual = file_identity(path)?;
     if expected.is_some_and(|expected| *expected != actual) {
@@ -799,17 +818,22 @@ async fn trash(
 /// 新建文件夹，自动命名「未命名文件夹」「未命名文件夹 2」…，返回实际路径
 #[tauri::command]
 async fn make_dir(path: String) -> Result<String, String> {
-    let dir = PathBuf::from(&path);
-    if !dir.is_dir() {
-        return Err(format!("不是文件夹: {}", path));
-    }
-    let target = unique_path(&dir, "未命名文件夹");
-    fs::create_dir(&target).map_err(|e| format!("创建失败: {}", e))?;
-    Ok(target.to_string_lossy().into_owned())
+    Ok(make_dir_with_receipt(path).await?.path)
+}
+
+#[tauri::command]
+async fn make_dir_with_receipt(path: String) -> Result<WriteReceipt, String> {
+    let target = place_new_file(Path::new(&path), "未命名文件夹", |path| fs::create_dir(path), "创建失败")?;
+    Ok(completion_receipt(target))
 }
 
 #[tauri::command]
 async fn rename(old_path: String, new_name: String) -> Result<String, String> {
+    Ok(rename_with_receipt(old_path, new_name).await?.path)
+}
+
+#[tauri::command]
+async fn rename_with_receipt(old_path: String, new_name: String) -> Result<WriteReceipt, String> {
     let old = PathBuf::from(&old_path);
     let name = new_name.trim();
     if name.is_empty() {
@@ -826,7 +850,7 @@ async fn rename(old_path: String, new_name: String) -> Result<String, String> {
         return Err(format!("「{}」已存在", name));
     }
     if dest != old { rename_no_replace(&old, &dest).map_err(|e| format!("重命名失败: {}", e))?; }
-    Ok(dest.to_string_lossy().into_owned())
+    Ok(completion_receipt(dest))
 }
 
 #[tauri::command]
@@ -916,46 +940,52 @@ fn run_zip(sources: &[String], dest: &Path, level: u8, password: Option<&str>) -
 /// 压缩为 zip，返回创建的 zip 路径列表（「单独压缩」时每个源一个）
 #[tauri::command]
 async fn zip_paths(sources: Vec<String>, dest_dir: String, options: Option<ZipOptions>) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let opts = options.unwrap_or_default();
-        let dir = PathBuf::from(&dest_dir);
-        if !dir.is_dir() {
-            return Err(format!("目标不是文件夹: {}", dest_dir));
-        }
-        if sources.is_empty() {
-            return Ok(Vec::new());
-        }
-        let level = opts.level.unwrap_or(1).min(9);
-        let base_of = |s: &str| {
-            Path::new(s)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "归档".into())
+    let result = zip_paths_with_receipt(sources, dest_dir, options).await?;
+    if let Some(error) = result.error { return Err(error); }
+    Ok(result.entries.into_iter().map(|entry| entry.path).collect())
+}
+
+#[tauri::command]
+async fn zip_paths_with_receipt(sources: Vec<String>, dest_dir: String, options: Option<ZipOptions>) -> Result<WriteBatch, String> {
+    tauri::async_runtime::spawn_blocking(move || zip_paths_into(sources, PathBuf::from(dest_dir), options.unwrap_or_default()))
+        .await.map_err(|e| e.to_string())?
+}
+
+fn zip_paths_into(sources: Vec<String>, dir: PathBuf, opts: ZipOptions) -> Result<WriteBatch, String> {
+    if !dir.is_dir() {
+        return Err(format!("目标不是文件夹: {}", dir.display()));
+    }
+    if sources.is_empty() {
+        return Ok(WriteBatch::default());
+    }
+    let level = opts.level.unwrap_or(1).min(9);
+    let base_of = |s: &str| {
+        Path::new(s)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "归档".into())
+    };
+    let groups: Vec<(Vec<String>, String)> = if opts.separate.unwrap_or(false) && sources.len() > 1 {
+        sources.iter().map(|s| (vec![s.clone()], format!("{}.zip", base_of(s)))).collect()
+    } else {
+        let name = match opts.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+            Some(n) if n.to_lowercase().ends_with(".zip") => n.to_string(),
+            Some(n) => format!("{}.zip", n),
+            None if sources.len() == 1 => format!("{}.zip", base_of(&sources[0])),
+            None => "归档.zip".to_string(),
         };
-        let groups: Vec<(Vec<String>, String)> = if opts.separate.unwrap_or(false) && sources.len() > 1 {
-            sources.iter().map(|s| (vec![s.clone()], format!("{}.zip", base_of(s)))).collect()
-        } else {
-            let name = match opts.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-                Some(n) if n.to_lowercase().ends_with(".zip") => n.to_string(),
-                Some(n) => format!("{}.zip", n),
-                None if sources.len() == 1 => format!("{}.zip", base_of(&sources[0])),
-                None => "归档.zip".to_string(),
-            };
-            vec![(sources.clone(), name)]
-        };
-        let mut created: Vec<String> = Vec::new();
-        for (srcs, name) in groups {
-            let dest = unique_path(&dir, &name.replace('/', "_"));
-            if let Err(e) = run_zip(&srcs, &dest, level, opts.password.as_deref()) {
-                let _ = fs::remove_file(&dest);
-                return Err(e);
-            }
-            created.push(dest.to_string_lossy().into_owned());
+        vec![(sources.clone(), name)]
+    };
+    let mut created = Vec::new();
+    for (srcs, name) in groups {
+        let dest = unique_path(&dir, &name.replace('/', "_"));
+        if let Err(e) = run_zip(&srcs, &dest, level, opts.password.as_deref()) {
+            let _ = fs::remove_file(&dest);
+            return Ok(WriteBatch { entries: created, error: Some(e) });
         }
-        Ok(created)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+        created.push(completion_receipt(dest));
+    }
+    Ok(WriteBatch { entries: created, error: None })
 }
 
 /// 在终端中打开目录
@@ -1098,8 +1128,12 @@ async fn make_file(path: String) -> Result<String, String> {
 /// 重名时自动「未命名 2.txt」「未命名 2.md」，不覆盖。
 #[tauri::command]
 async fn create_file(dir: String, kind: String) -> Result<String, String> {
-    let path = create_named_file(Path::new(&dir), &kind)?;
-    Ok(path.to_string_lossy().into_owned())
+    Ok(create_file_with_receipt(dir, kind).await?.path)
+}
+
+#[tauri::command]
+async fn create_file_with_receipt(dir: String, kind: String) -> Result<WriteReceipt, String> {
+    Ok(completion_receipt(create_named_file(Path::new(&dir), &kind)?))
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -1185,11 +1219,16 @@ async fn list_templates(app: AppHandle) -> Result<Vec<FileTemplate>, String> {
 /// 把模板复制到当前文件夹（保留文件名与内容），重名时加「 2」后缀，然后由界面进入重命名。
 #[tauri::command]
 async fn copy_template(dir: String, template: String, app: AppHandle) -> Result<String, String> {
+    Ok(copy_template_with_receipt(dir, template, app).await?.path)
+}
+
+#[tauri::command]
+async fn copy_template_with_receipt(dir: String, template: String, app: AppHandle) -> Result<WriteReceipt, String> {
     let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     tauri::async_runtime::spawn_blocking(move || {
         let root = ensure_templates_dir(&app_dir)?;
         let created = copy_template_file(&root, Path::new(&dir), Path::new(&template))?;
-        Ok(created.to_string_lossy().into_owned())
+        Ok(completion_receipt(created))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2465,6 +2504,49 @@ mod file_safety_tests {
     }
 
     #[test]
+    fn basic_write_receipts_identify_actual_names_and_rename_unwinds_before_create() {
+        let root = Scratch::new();
+        let dir = root.0.join("src");
+        let first = tauri::async_runtime::block_on(make_dir_with_receipt(dir.to_string_lossy().into_owned())).unwrap();
+        let folder = tauri::async_runtime::block_on(make_dir_with_receipt(dir.to_string_lossy().into_owned())).unwrap();
+        assert_ne!(first.path, folder.path);
+        assert!(folder.path.ends_with("未命名文件夹 2"));
+        let file = tauri::async_runtime::block_on(create_file_with_receipt(folder.path.clone(), "text".into())).unwrap();
+        let renamed = tauri::async_runtime::block_on(rename_with_receipt(file.path.clone(), "final.txt".into())).unwrap();
+        assert_eq!(file.identity, renamed.identity);
+        assert_eq!(file.identity, Some(file_identity(Path::new(&renamed.path)).unwrap()));
+        let restored = restore_into(&[RestoreMove { source: renamed.path, dest: file.path.clone(), identity: file.identity }]);
+        assert!(restored[0].ok);
+        assert!(Path::new(&file.path).exists());
+    }
+
+    #[test]
+    fn template_receipt_and_partial_zip_preserve_completed_identity() {
+        let root = Scratch::new();
+        let dir = root.0.join("src");
+        let template = dir.join("fixture.md");
+        fs::write(&template, "fixture").unwrap();
+        let copied = copy_template_file(&dir, &root.0.join("dst"), &template).unwrap();
+        let receipt = completion_receipt(copied);
+        assert_eq!(receipt.identity, Some(file_identity(Path::new(&receipt.path)).unwrap()));
+        let result = zip_paths_into(vec![template.to_string_lossy().into_owned(), dir.join("missing").to_string_lossy().into_owned()], root.0.join("dst"), ZipOptions { separate: Some(true), ..Default::default() }).unwrap();
+        assert_eq!(result.entries.len(), 1);
+        assert!(result.error.is_some());
+        let archive = &result.entries[0];
+        assert!(archive.path.ends_with("fixture.md.zip"));
+        assert_eq!(archive.identity, Some(file_identity(Path::new(&archive.path)).unwrap()));
+    }
+
+    #[test]
+    fn unavailable_identity_does_not_turn_a_completion_into_a_failure() {
+        let root = Scratch::new();
+        let completed_path = root.0.join("gone");
+        let receipt = completion_receipt(completed_path.clone());
+        assert_eq!(receipt.path, completed_path.to_string_lossy());
+        assert_eq!(receipt.identity, None);
+    }
+
+    #[test]
     fn restore_identity_guard_rejects_a_replaced_source() {
         let root = Scratch::new();
         let source = root.0.join("src/note.txt");
@@ -3089,6 +3171,11 @@ pub fn run() {
             let close_item = MenuItemBuilder::with_id("close-win", "Close Window").build(app)?;
             let file_menu = SubmenuBuilder::new(app, "File").item(&close_item).build()?;
 
+            // The custom Undo accelerator has one frontend route for files and text.
+            // Keep clipboard accelerators in the webview's existing handlers.
+            let undo = MenuItemBuilder::with_id("edit-undo", "Undo").accelerator("CmdOrCtrl+Z").build(app)?;
+            let edit_menu = SubmenuBuilder::new(app, "Edit").item(&undo).build()?;
+
             let minimize = PredefinedMenuItem::minimize(app, None)?;
             let maximize = PredefinedMenuItem::maximize(app, None)?;
             let window_menu = SubmenuBuilder::new(app, "Window")
@@ -3097,7 +3184,7 @@ pub fn run() {
                 .build()?;
 
             let menu = MenuBuilder::new(app)
-                .items(&[&app_menu, &file_menu, &window_menu])
+                .items(&[&app_menu, &file_menu, &edit_menu, &window_menu])
                 .build()?;
             app.set_menu(menu)?;
 
@@ -3121,6 +3208,9 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
+            if event.id().0 == "edit-undo" {
+                if let Some(w) = app.get_webview_window("main") { let _ = w.emit("bento-edit-undo", ()); }
+            }
             if event.id().0 == "close-win" {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.close();
@@ -3136,17 +3226,22 @@ pub fn run() {
             restore_moves,
             trash,
             make_dir,
+            make_dir_with_receipt,
             rename,
+            rename_with_receipt,
             open_path,
             reveal_in_finder,
             open_terminal,
             zip_paths,
+            zip_paths_with_receipt,
             quick_look,
             update_quick_look,
             make_file,
             create_file,
+            create_file_with_receipt,
             list_templates,
             copy_template,
+            copy_template_with_receipt,
             search,
             search_content,
             read_text_preview,
