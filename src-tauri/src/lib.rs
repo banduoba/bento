@@ -18,6 +18,7 @@ mod session_store;
 mod session_exit;
 mod list_stream;
 mod native_icons;
+mod search_results;
 use native_icons::file_icons;
 
 use bento_fswatch::{make_entry, Entry, FsWatcher};
@@ -43,41 +44,6 @@ fn fsearch_engine() -> Option<&'static fsearch::Engine> {
             }
         })
         .as_ref()
-}
-
-fn fsearch_global(query: &str, limit: usize) -> Option<Vec<SearchItem>> {
-    let eng = fsearch_engine()?;
-    let home = std::env::var("HOME").unwrap_or_default();
-    let q = fsearch::Query::parse(query, &home).ok()?;
-    let found = eng.search(&q).ok()?;
-    Some(
-        found
-            .into_iter()
-            .take(limit)
-            .map(|f| {
-                let path = f.path;
-                let is_dir = (f.kind & 0b11) == fsearch::walk::KIND_DIR;
-                let md = fs::metadata(&path).ok();
-                SearchItem {
-                    dir: path
-                        .parent()
-                        .map(|x| x.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    name: path
-                        .file_name()
-                        .map(|x| x.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    path: path.to_string_lossy().into_owned(),
-                    is_dir,
-                    size: if f.size > 0 { f.size } else { md.as_ref().map(|m| if m.is_dir() { 0 } else { m.len() }).unwrap_or(0) },
-                    mtime_ms: md.as_ref().map(mtime_of).unwrap_or((f.mtime as i64) as f64 * 1000.0),
-                    btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
-                    lines: None,
-                    matches: None,
-                }
-            })
-            .collect(),
-    )
 }
 
 #[derive(Serialize)]
@@ -1272,9 +1238,6 @@ fn btime_of(md: &std::fs::Metadata) -> f64 {
     md.created().ok().and_then(btime_ms_of).unwrap_or(0.0)
 }
 
-/// 递归搜索时跳过的目录（避免在依赖目录/系统目录里空转）
-const SEARCH_SKIP: &[&str] = &["node_modules", ".git", "Library", ".Trash", ".npm", ".cache"];
-
 fn glob_to_regex(glob: &str) -> String {
     let mut out = String::from("^");
     for ch in glob.chars() {
@@ -1327,104 +1290,7 @@ fn build_matcher(query: &str) -> Result<impl Fn(&str, &str) -> bool + Send, Stri
     })
 }
 
-fn walk_search(root: &Path, query: &str, show_hidden: bool, limit: usize) -> Result<Vec<SearchItem>, String> {
-    let matcher = build_matcher(query)?;
-    let mut out = Vec::new();
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    while let Some((dir, depth)) = stack.pop() {
-        if depth > 8 {
-            continue;
-        }
-        let rd = match fs::read_dir(&dir) {
-            Ok(r) => r,
-            Err(_) => continue,
-        };
-        for e in rd.filter_map(|e| e.ok()) {
-            if out.len() >= limit {
-                break;
-            }
-            let p = e.path();
-            let name = e.file_name().to_string_lossy().into_owned();
-            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if !show_hidden && name.starts_with('.') {
-                continue;
-            }
-            if is_dir && SEARCH_SKIP.contains(&name.as_str()) {
-                continue;
-            }
-            let ext = p
-                .extension()
-                .map(|x| x.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            if matcher(&name, &ext) {
-                let md = e.metadata().ok();
-                let size = if is_dir {
-                    0
-                } else {
-                    md.as_ref().map(|m| m.len()).unwrap_or(0)
-                };
-                out.push(SearchItem {
-                    dir: dir.to_string_lossy().into_owned(),
-                    path: p.to_string_lossy().into_owned(),
-                    name,
-                    is_dir,
-                    size,
-                    mtime_ms: md.as_ref().map(mtime_of).unwrap_or(0.0),
-                    btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
-                    lines: None,
-                    matches: None,
-                });
-            }
-            if is_dir {
-                stack.push((p, depth + 1));
-            }
-        }
-        if out.len() >= limit {
-            break;
-        }
-    }
-    Ok(out)
-}
-
-fn mdfind_search(query: &str, onlyin: Option<&str>, limit: usize) -> Vec<SearchItem> {
-    let mut cmd = std::process::Command::new("mdfind");
-    if let Some(d) = onlyin {
-        cmd.args(["-onlyin", d]);
-    }
-    cmd.args(["-name", query]);
-    let out = match cmd.output() {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let paths: Vec<&str> = stdout.lines().take(limit).collect();
-    paths
-        .par_iter()
-        .filter_map(|p| {
-            let pb = Path::new(p);
-            let name = pb.file_name()?.to_string_lossy().into_owned();
-            let md = fs::metadata(pb).ok();
-            let is_dir = md.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-            let size = md.as_ref().map(|m| if m.is_dir() { 0 } else { m.len() }).unwrap_or(0);
-            Some(SearchItem {
-                dir: pb
-                    .parent()
-                    .map(|x| x.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
-                path: p.to_string(),
-                name,
-                is_dir,
-                size,
-                mtime_ms: md.as_ref().map(mtime_of).unwrap_or(0.0),
-                btime_ms: md.as_ref().map(btime_of).unwrap_or(0.0),
-                lines: None,
-                matches: None,
-            })
-        })
-        .collect()
-}
-
-/// 搜索：scope = "pane"(递归 root) | "home"(递归主目录) | "global"(Spotlight)
+/// Compatibility endpoint: one implementation owns every scope and filter.
 #[tauri::command]
 async fn search(
     query: String,
@@ -1434,56 +1300,12 @@ async fn search(
     limit: Option<usize>,
     roots: Option<Vec<String>>,
     mode: Option<String>,
-) -> Result<Vec<SearchItem>, String> {
-    let q = query.trim().to_string();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
-    let limit = limit.unwrap_or(200).min(1000);
-    // 内容模式：委托 fsearch grep（三词索引）
-    if scope == "global" && mode.as_deref() == Some("content") {
-        return search_content(q, root, Some(limit), roots).await;
-    }
-    tauri::async_runtime::spawn_blocking(move || match scope.as_str() {
-        // 全局：优先 fsearch 引擎（模糊 + 拼写容错 + 实时 + glob/ext 语法）
-        // 并合并**全盘** Spotlight 结果（-onlyin /Volumes 不会递归挂载点，必须全盘查）
-        // roots 非空时按前缀过滤（用户在设置里限定的搜索范围）
-        "global" => {
-            let mut out = match fsearch_global(&q, limit) {
-                Some(v) => v,
-                None => mdfind_search(&q, None, limit),
-            };
-            for item in mdfind_search(&q, None, limit) {
-                if !out.iter().any(|e| e.path == item.path) {
-                    out.push(item);
-                }
-            }
-            if let Some(roots) = roots {
-                if !roots.is_empty() {
-                    let trimmed: Vec<SearchItem> = out
-                        .into_iter()
-                        .filter(|item| {
-                            roots
-                                .iter()
-                                .any(|r| item.path.starts_with(r.as_str()))
-                        })
-                        .collect();
-                    out = trimmed;
-                }
-            }
-            Ok(out)
-        }
-        "home" => {
-            let h = std::env::var("HOME").unwrap_or_default();
-            walk_search(Path::new(&h), &q, show_hidden, limit)
-        }
-        _ => match root {
-            Some(r) => walk_search(Path::new(&r), &q, show_hidden, limit),
-            None => Ok(mdfind_search(&q, None, limit)),
-        },
-    })
-    .await
-    .map_err(|e| e.to_string())?
+) -> Result<Vec<SearchItem>, search_results::SearchError> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    search_results::search_query(
+        query, scope, root, show_hidden, limit, roots, mode,
+        format!("legacy_{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)), None,
+    ).await.map(|r| r.items)
 }
 
 #[cfg(target_os = "macos")]
@@ -1870,95 +1692,15 @@ async fn dir_activity(paths: Vec<String>, budget_ms: Option<u64>) -> Result<Vec<
     .map_err(|e| e.to_string())?
 }
 
-/// 文件内容搜索（fsearch grep 三词索引）
 #[tauri::command]
 async fn search_content(
     query: String,
     root: Option<String>,
     limit: Option<usize>,
     roots: Option<Vec<String>>,
-) -> Result<Vec<SearchItem>, String> {
-    let q = query.trim().to_string();
-    if q.is_empty() {
-        return Ok(Vec::new());
-    }
-    let limit = limit.unwrap_or(200).min(1000);
-    tauri::async_runtime::spawn_blocking(move || {
-        let eng = fsearch_engine().ok_or("内容搜索需要 fsearch 引擎（首次建索引中）")?;
-        let home = std::env::var("HOME").unwrap_or_default();
-        // 过滤器（ext:/kind: 等）进 Query；其余词作为内容模式
-        let mut filters = String::new();
-        let mut words = Vec::new();
-        for w in q.split_whitespace() {
-            if w.contains(':') {
-                filters.push_str(w);
-                filters.push(' ');
-            } else {
-                words.push(w);
-            }
-        }
-        let pattern: String = content_pattern(&q);
-        if pattern.is_empty() {
-            return Ok(Vec::new());
-        }
-        let query = fsearch::Query::parse(&format!("{}grep:{}", filters, pattern), &home)?;
-        let t0 = std::time::Instant::now();
-        let mut g = fsearch::Grep::new(&pattern, fsearch::GrepMode::Literal)?;
-        // 左列表徽标 = 命中行数；放宽 fsearch 默认的每文件 5 行上限，与右栏预览同口径
-        g.max_per_file = 20;
-        let (res, _) = eng.grep(&query, &g)?;
-        eprintln!(
-            "[search] content \"{}\": {} files, {} ms",
-            pattern,
-            res.files.len(),
-            t0.elapsed().as_millis()
-        );
-        let mut out: Vec<SearchItem> = res
-            .files
-            .iter()
-            .map(|f| {
-                let pb = PathBuf::from(String::from_utf8_lossy(&f.path).into_owned());
-                let lines: Vec<ContentLine> = f
-                    .lines
-                    .iter()
-                    .take(3)
-                    .map(|(no, t)| ContentLine {
-                        no: *no as f64,
-                        text: t.chars().take(200).collect::<String>(),
-                    })
-                    .collect();
-                SearchItem {
-                    dir: pb
-                        .parent()
-                        .map(|x| x.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    name: pb
-                        .file_name()
-                        .map(|x| x.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                    path: pb.to_string_lossy().into_owned(),
-                    is_dir: false,
-                    size: 0,
-                    mtime_ms: 0.0,
-                    btime_ms: 0.0,
-                    lines: Some(lines),
-                    matches: Some(f.lines.len()),
-                }
-            })
-            .collect();
-        if let Some(roots) = roots {
-            if !roots.is_empty() {
-                out.retain(|item| roots.iter().any(|r| item.path.starts_with(r.as_str())));
-            }
-        }
-                out.truncate(limit);
-if let Some(r) = root {
-            out.retain(|item| item.path.starts_with(r.as_str()));
-        }
-        Ok(out)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+) -> Result<Vec<SearchItem>, search_results::SearchError> {
+    search(query, if root.is_some() { "pane" } else { "global" }.into(), root,
+        false, limit, roots, Some("content".into())).await
 }
 
 /// 内容搜索的字面模式：与 search_content 传给 fsearch 的 pattern 完全一致
@@ -2049,6 +1791,8 @@ fn preview_file(path: &str, query: &str, max_bytes: Option<usize>) -> Result<Tex
     {
         use std::io::{BufRead, Read};
         let p = Path::new(&path);
+        let preview_metadata = fs::symlink_metadata(p).map_err(|e| format!("无法读取: {e}"))?;
+        if !preview_metadata.is_file() { return Err("仅支持预览普通文件".into()); }
         if is_image_path(p) {
             return Ok(TextPreview::empty("image"));
         }
@@ -3243,6 +2987,8 @@ pub fn run() {
             copy_template,
             copy_template_with_receipt,
             search,
+            search_results::search_query,
+            search_results::cancel_search,
             search_content,
             read_text_preview,
             dir_activity,
