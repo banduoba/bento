@@ -1021,6 +1021,8 @@ export default function App() {
 
   // ---------- 压缩（QSpace 风格「创建归档」）----------
   const runZip = (paths, dir, o) => {
+    undoStackRef.current = []
+    fileOperationsPending.current++
     api
       .zipPaths(paths, dir, {
         name: o.name,
@@ -1029,12 +1031,12 @@ export default function App() {
         separate: o.separate,
       })
       .then((created) => {
-        undoStackRef.current = []
         refreshDirectories(created?.length ? [dir] : [])
       })
       .catch((e) => {
         alert(String(e))
       })
+      .finally(() => { fileOperationsPending.current-- })
   }
   // 默认文件名：单个项目 = 该项目名.zip；多个项目 = 当前文件夹名.zip
   const zipDefaultName = (paths, dir) =>
@@ -1064,15 +1066,17 @@ export default function App() {
   const newFolder = (tabId) => {
     const dest = locateTab(tabId)?.path
     if (!dest) return
+    undoStackRef.current = []
+    fileOperationsPending.current++
     api
       .makeDir(dest)
       .then((created) => {
         refreshDirectories([dest])
         setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
         setRenaming({ tabId, path: created, value: basename(created), selectAll: true })
-        undoStackRef.current = []
       })
       .catch((e) => alert(String(e)))
+      .finally(() => { fileOperationsPending.current-- })
   }
 
   const beginCreatedRename = (tabId, created) => {
@@ -1080,25 +1084,30 @@ export default function App() {
     setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
     // 与普通重命名一样只选中主文件名，扩展名留着（模板 .docx 不会被一次输入冲掉）
     setRenaming({ tabId, path: created, value: basename(created) })
-    undoStackRef.current = []
   }
 
   const newFile = (tabId, kind) => {
     const dest = locateTab(tabId)?.path
     if (!dest) return
+    undoStackRef.current = []
+    fileOperationsPending.current++
     api
       .createFile(dest, kind)
       .then((created) => beginCreatedRename(tabId, created))
       .catch((e) => alert(String(e)))
+      .finally(() => { fileOperationsPending.current-- })
   }
 
   const newFromTemplate = (tabId, template) => {
     const dest = locateTab(tabId)?.path
     if (!dest || !template?.path) return
+    undoStackRef.current = []
+    fileOperationsPending.current++
     api
       .copyTemplate(dest, template.path)
       .then((created) => beginCreatedRename(tabId, created))
       .catch((e) => alert(String(e)))
+      .finally(() => { fileOperationsPending.current-- })
   }
 
   const openSearchResult = (item) => {
@@ -1126,11 +1135,13 @@ export default function App() {
     setRenaming(null)
     const current = basename(path)
     if (!value || value.trim() === current) return
+    undoStackRef.current = []
+    fileOperationsPending.current++
     api
       .rename(path, value)
-      .then(() => { undoStackRef.current = [] })
       .catch((e) => alert(String(e)))
       .finally(() => {
+        fileOperationsPending.current--
         setSel((s) => ({ ...s, [tabId]: new Set() }))
         refreshDirectories([parentPath(path)])
       })
