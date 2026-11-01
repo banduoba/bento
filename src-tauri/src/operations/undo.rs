@@ -583,6 +583,18 @@ impl FileExecutor {
         record: &mut Record,
         c: &OperationContext,
     ) -> io::Result<()> {
+        // Trash can rebind MACL on the moved root. Establish a fresh full guard
+        // immediately before this controlled rename; an old journal must never
+        // authorize accepting an unrelated metadata change.
+        let trash_before = if e.kind == EffectKind::Created {
+            let before = Manifest::capture(&held.path, &|| Ok(()))?;
+            if !held.manifest.same_captured_manifest(&before) {
+                return Err(identity::changed());
+            }
+            Some(before)
+        } else {
+            None
+        };
         let renamed = self
             .at(Point::UndoRename, target, c)
             .and_then(|_| rename_prepared(&held.path, target));
@@ -591,10 +603,16 @@ impl FileExecutor {
                 e.inverse_done = true;
                 e.held = None;
                 record.protected.retain(|p| p.path != held.path);
-                let actual = Manifest::capture(target, &|| Ok(()))?;
-                if !held.manifest.same_captured_manifest(&actual) {
-                    return Err(identity::changed());
-                }
+                let actual = match &trash_before {
+                    Some(before) => before.capture_trashed_root(target)?,
+                    None => {
+                        let actual = Manifest::capture(target, &|| Ok(()))?;
+                        if !held.manifest.same_captured_manifest(&actual) {
+                            return Err(identity::changed());
+                        }
+                        actual
+                    }
+                };
                 e.inverse_guard = Some(actual);
                 return Ok(());
             }
