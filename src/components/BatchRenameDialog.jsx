@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api } from '../api'
 
 const MODES = [
   { id: 'replace', label: '替换文本' },
@@ -70,7 +69,7 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   useEffect(() => {
     const onKey = (e) => {
       e.stopPropagation()
-      if (e.key === 'Escape') onCancel()
+      if (e.key === 'Escape' && !busy) onCancel()
       if (e.key === 'Enter' && !e.target?.closest?.('button') && valid && !busy) apply()
     }
     window.addEventListener('keydown', onKey, true)
@@ -80,24 +79,16 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const apply = async () => {
     if (!valid || busy) return
     setBusy(true)
-    const errors = []
-    for (const r of results) {
-      if (r.newName === r.name) continue
-      try {
-        await api.rename(r.path, r.newName)
-      } catch (e) {
-        errors.push(`${r.name} → ${r.newName}: ${e}`)
-      }
-    }
-    setBusy(false)
-    onApply(errors)
+    try {
+      await onApply(results.filter(r => r.newName !== r.name))
+    } finally { setBusy(false) }
   }
 
   const preview = results.slice(0, 6)
   const rest = results.length - preview.length
 
   return (
-    <div className="modal-backdrop" onMouseDown={onCancel}>
+    <div className="modal-backdrop" onMouseDown={() => !busy && onCancel()}>
       <div className="modal batch-rename-dialog" role="dialog" aria-modal="true"
         aria-labelledby="batch-rename-title" onMouseDown={(e) => e.stopPropagation()}>
         <header className="batch-rename-header">

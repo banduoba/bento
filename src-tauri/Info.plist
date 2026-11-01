@@ -9,6 +9,8 @@
   <array>
     <string>en</string>
   </array>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Bento 需要通过 Finder 复制和移动文件，以使用系统进度、重名处理与取消操作。</string>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © 2026 banduoba. Released under the MIT License.</string>
 </dict>
