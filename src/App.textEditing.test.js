@@ -153,3 +153,64 @@ test('returning to the application does not revive a pending paste', async t => 
   await h.run(async()=>{resolve('late');await gate})
   assert.deepEqual(commands,[])
 })
+
+for (const [shortcut, inputType] of [['z', 'historyUndo'], ['Z', 'historyRedo']]) {
+  test(`${inputType} cancels a native command targeting another editor before mutation`, async t => {
+    const h=await mountApp(t),{el}=inputFixture(h),other={tagName:'INPUT'}
+    let before
+    document.execCommand=()=>{
+      before=new Event('beforeinput',{cancelable:true})
+      Object.assign(before,{inputType})
+      Object.defineProperty(before,'target',{value:other})
+      document.dispatchEvent(before)
+      return true
+    }
+    await key(h,shortcut,{metaKey:true,shiftKey:shortcut==='Z'})
+    assert.equal(before.defaultPrevented,true)
+    assert.equal(document.activeElement,el)
+  })
+}
+
+test('same-editor history and ordinary editing events remain native, and the temporary history guard is removed', async t => {
+  const h=await mountApp(t),{el}=inputFixture(h),events=[]
+  const emit=(target,inputType)=>{
+    const e=new Event('beforeinput',{cancelable:true})
+    Object.assign(e,{inputType});Object.defineProperty(e,'target',{value:target})
+    document.dispatchEvent(e);events.push(e)
+  }
+  document.execCommand=()=>{emit(el,'historyUndo');emit({tagName:'INPUT'},'insertText');return true}
+  await key(h,'z',{metaKey:true})
+  emit({tagName:'INPUT'},'historyUndo')
+  assert.deepEqual(events.map(e=>e.defaultPrevented),[false,false,false])
+})
+
+test('textarea history uses its own control as the ownership boundary', async t => {
+  const h=await mountApp(t),{el}=inputFixture(h),events=[]
+  el.tagName='TEXTAREA'
+  document.execCommand=()=>{
+    for(const target of [el,{tagName:'TEXTAREA'}]) {
+      const e=new Event('beforeinput',{cancelable:true})
+      Object.assign(e,{inputType:'historyUndo'});Object.defineProperty(e,'target',{value:target})
+      document.dispatchEvent(e);events.push(e)
+    }
+    return true
+  }
+  await key(h,'z',{metaKey:true})
+  assert.deepEqual(events.map(e=>e.defaultPrevented),[false,true])
+})
+
+test('contenteditable history permits its editing host while blocking another host', async t => {
+  const h=await mountApp(t),{el}=inputFixture(h),events=[]
+  const host={isContentEditable:true,contains:target=>target===el}
+  el.tagName='SPAN';el.isContentEditable=true;el.parentElement=host
+  document.execCommand=()=>{
+    for(const target of [host,el,{isContentEditable:true}]) {
+      const e=new Event('beforeinput',{cancelable:true})
+      Object.assign(e,{inputType:'historyRedo'});Object.defineProperty(e,'target',{value:target})
+      document.dispatchEvent(e);events.push(e)
+    }
+    return true
+  }
+  await key(h,'Z',{metaKey:true,shiftKey:true})
+  assert.deepEqual(events.map(e=>e.defaultPrevented),[false,false,true])
+})
