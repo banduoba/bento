@@ -33,6 +33,7 @@ import SidebarLayout from './components/SidebarLayout'
 import { normalizeSidebarWidth } from './sidebarWidth'
 import Pane from './components/Pane'
 import StatusBar from './components/StatusBar'
+import TitlebarNavigation from './components/TitlebarNavigation'
 import ContextMenu from './components/ContextMenu'
 import BatchRenameDialog from './components/BatchRenameDialog'
 import ZipDialog, { normalizeZipPrefs, levelOf } from './components/ZipDialog'
@@ -1642,7 +1643,8 @@ export default function App() {
       {recoveryNotice && <div role="alert">{recoveryNotice} <button onClick={() => setRecoveryNotice(null)}>知道了</button></div>}
       {saveError && <div role="alert">保存失败：{saveError} <button onClick={() => flushPersistence().catch(error => setSaveError(String(error)))}>重试保存</button></div>}
       <div className="titlebar" onMouseDown={titlebarMouseDown}>
-        <div className="tb-title" title={windowTitle}>{windowTitle}</div>
+        <TitlebarNavigation tab={focusedTab} onBack={navBack} onForward={navForward} />
+        <div className="tb-title" title={focusedTab?.path}>{windowTitle}</div>
         <div className="tb-center">
           <div className="layout-pick-wrap">
             <button className="layout-btn" title="窗口布局" onClick={() => setLayoutPickerOpen((o) => !o)}>
@@ -1675,28 +1677,28 @@ export default function App() {
             aria-pressed={!!cfg.alwaysOnTop}
             onClick={() => setCfg((c) => ({ ...c, alwaysOnTop: !c.alwaysOnTop }))}
           >
-            <IconPin size={15} filled={!!cfg.alwaysOnTop} />
+            <IconPin size={20} filled={!!cfg.alwaysOnTop} />
           </button>
           <button
             className="iconbtn"
             title="聚焦搜索 (⌥⌘F)"
             onClick={() => setSearchOpen(true)}
           >
-            <IconSearch size={15} />
+            <IconSearch size={20} />
           </button>
           <button
             className="iconbtn"
             title={cfg.showHidden ? '隐藏隐藏文件 (⇧⌘.)' : '显示隐藏文件 (⇧⌘.)'}
             onClick={() => setCfg((c) => ({ ...c, showHidden: !c.showHidden }))}
           >
-            {cfg.showHidden ? <IconEye size={15} /> : <IconEyeOff size={15} />}
+            {cfg.showHidden ? <IconEye size={20} /> : <IconEyeOff size={20} />}
           </button>
           <button
             className="iconbtn"
             title="设置"
             onClick={() => setSettingsOpen(true)}
           >
-            <IconSettings size={15} />
+            <IconSettings size={20} />
           </button>
         </div>
       </div>
