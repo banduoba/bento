@@ -1708,6 +1708,14 @@ export default function App() {
               home={home}
               favorites={cfg.favorites}
               focusedPath={focusedTab?.path}
+              paneTabs={cfg.panes[focusIdx]?.tabs || []}
+              activeTabId={focusedTab?.id}
+              onActivateTab={(tabId) => setCfg((c) => {
+                const pane = c.panes[focusIdx]
+                const active = pane?.tabs.findIndex(tab => tab.id === tabId)
+                if (active == null || active < 0 || active === pane.active) return c
+                return { ...c, panes: c.panes.map((p, i) => i === focusIdx ? { ...p, active } : p) }
+              })}
               tick={tick}
               showHidden={cfg.showHidden}
               autoRefresh={cfg.autoRefresh !== false}
