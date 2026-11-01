@@ -97,3 +97,25 @@ test('regex uses full dotted directory name while existing literal behavior stay
   await h.regex(false)
   assert.ok(h.text().includes('part_one.folder'))
 })
+
+
+test('native Enter in the commit gap cannot apply a previous selection while the new preview waits', async t => {
+  const h = await mountBatch(t, [item('sample_1.txt')])
+  await h.change(0, 'sample'); await h.change(1, 'case'); await h.regex()
+  await h.resolve(0, ['case_1'])
+  assert.equal(h.button('重命名').props.disabled, false)
+  let dispatched = 0
+  await h.update({ items: [item('other.txt')] }, () => {
+    const event = new Event('keydown')
+    Object.defineProperty(event, 'key', { value: 'Enter' })
+    window.dispatchEvent(event)
+    dispatched++
+  })
+  assert.equal(dispatched, 1, 'Enter dispatched after commit and before passive cleanup')
+  assert.equal(h.button('重命名').props.disabled, true)
+  assert.deepEqual(h.requests[1].args[0], ['other'])
+  assert.deepEqual(h.applied, [], 'no previous-selection rows submitted during pending preview')
+  await h.resolve(1, ['current'])
+  await h.enter()
+  assert.deepEqual(h.applied, [[{ ...item('other.txt'), newBase: 'current', newName: 'current.txt' }]])
+})
