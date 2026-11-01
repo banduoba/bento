@@ -22,7 +22,7 @@ export function createFolderTree({ list, setWatch, clearWatch, onFsChange, showH
   }]))
   const emit = () => { for (const listener of listeners) listener(snapshot()) }
   const watch = () => {
-    const paths = [...new Set([...nodes.values()].map(n => n.path))]
+    const paths = [...new Set([...nodes.values()].filter(n => n.status !== 'error').map(n => n.path))]
     if (live && autoRefresh && paths.length) setWatch(owner, paths)
     else clearWatch(owner)
   }
@@ -71,7 +71,7 @@ export function createFolderTree({ list, setWatch, clearWatch, onFsChange, showH
     const node = nodes.get(id)
     if (!node) return
     node.revision++; node.status = 'loading'; node.error = ''
-    queue.add(id); emit(); pump()
+    queue.add(id); watch(); emit(); pump()
   }
   function remove(id) {
     for (const node of [...nodes.values()]) if (node.parent === id) remove(node.id)
