@@ -459,7 +459,10 @@ export default function SearchOverlay({
             )}
             {scope === 'global' && idxStatus && idxStatus.ready && idxStatus.full_disk_access === false && (
               <span className="search-idx-hint">
-                {' '}· 未授予「完全磁盘访问权限」，其他用户/资源库目录不在索引内（系统设置 → 隐私与安全性）
+                {' '}· 未授予「完全磁盘访问权限」，其他用户/资源库目录不在索引内（系统设置 → 隐私与安全性）{' '}
+                <button className="search-idx-settings-link" onClick={() => api.openPrivacySettings().catch((e) => alert(String(e)))}>
+                  打开系统设置
+                </button>
               </span>
             )}
           </div>
