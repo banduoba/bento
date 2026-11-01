@@ -325,6 +325,10 @@ impl OperationManager {
             let id = format!("{}-j-{}", state.session_id, state.next_id);
             state.next_id += 1;
             let snapshot = JobSnapshot {
+                submitted_at_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
                 session_id: state.session_id.clone(),
                 job_id: id.clone(),
                 revision: 1,

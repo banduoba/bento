@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { operationApi } from './api.js'
+import { api as browserApi, operationApi } from './api.js'
 import { createOperationClient } from './operations/client.js'
 
 test('production operation API wires queue lifecycle, ACK and exit drain using canonical native command payloads',async()=>{
@@ -27,4 +27,18 @@ test('production operation API wires queue lifecycle, ACK and exit drain using c
   assert.deepEqual(calls.find(([name])=>name==='get_operation_outcomes'),['get_operation_outcomes',{jobId:'j1',offset:0,limit:200}])
   assert.deepEqual(calls.at(-1),['prepare_operation_exit',{cancelRemaining:true}])
   client.dispose()
+})
+
+
+test('browser operation submission timestamp precedes execution completion and remains stable on replay', async t => {
+  let now = 1793453096000
+  t.mock.method(Date, 'now', () => now)
+  const request = { requestId: 'timestamp-demo', kind: 'copy', items: [{ itemId: 'i1', source: '/Users/demo/notes.txt' }], destination: '/Users/demo/Downloads' }
+  const pending = browserApi.enqueueOperation(request)
+  now += 60000
+  const accepted = await pending
+  assert.equal(accepted.submittedAtMs, 1793453096000)
+  assert.equal((await browserApi.getOperationJob(accepted.jobId)).submittedAtMs, 1793453096000)
+  assert.equal((await browserApi.enqueueOperation(request)).submittedAtMs, 1793453096000)
+  assert.equal((await browserApi.listOperationJobs()).jobs[0].submittedAtMs, 1793453096000)
 })

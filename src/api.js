@@ -537,6 +537,7 @@ function browserOperations(legacy) {
       const previous = jobs.find(j => j.requestId === request.requestId)
       if (previous) return previous
       if (!accepting) throw Error('正在退出，暂不接受文件操作')
+      const submittedAtMs = Date.now()
       const rows = []
       for (const item of request.items) {
         const source = item.source
@@ -555,7 +556,7 @@ function browserOperations(legacy) {
         rows.push({itemId:item.itemId,source:source || null,requestedDestination:request.destination || null,actualDestination,status:failure?'failed':'succeeded',effectId:null,published:!failure,sourceDisposition:!failure && ['move','trash','rename'].includes(request.kind)?'removed':'unchanged',retry:'none',error:failure,affectedDirectories:failure?[]:[...new Set([actualDestination && parent(actualDestination),source && request.kind!=='copy' && parent(source)].filter(Boolean))]})
       }
       const failed=rows.filter(r=>r.status==='failed').length
-      const job={ sessionId:'browser', jobId:`browser_${++revision}`, revision:1, requestId:request.requestId, kind:request.kind, state:failed?(failed===rows.length?'failed':'partial'):'completed', phase:'finished', ownerTabId:request.ownerTabId || null, clipRevision:request.clipRevision || null, intent:request.intent || null, cancelRequested:false,cancelability:'immediate',progress:{itemsFinished:rows.length,itemsTotal:rows.length,bytesDone:'0',bytesTotal:null,currentItemId:null,currentPath:null},conflict:null,outcomeCount:rows.length,undoId:null,error:null }
+      const job={ submittedAtMs, sessionId:'browser', jobId:`browser_${++revision}`, revision:1, requestId:request.requestId, kind:request.kind, state:failed?(failed===rows.length?'failed':'partial'):'completed', phase:'finished', ownerTabId:request.ownerTabId || null, clipRevision:request.clipRevision || null, intent:request.intent || null, cancelRequested:false,cancelability:'immediate',progress:{itemsFinished:rows.length,itemsTotal:rows.length,bytesDone:'0',bytesTotal:null,currentItemId:null,currentPath:null},conflict:null,outcomeCount:rows.length,undoId:null,error:null }
       if(jobs.length>=256) outcomes.delete(jobs.shift().jobId)
       jobs.push(job);outcomes.set(job.jobId,rows);return job
     },

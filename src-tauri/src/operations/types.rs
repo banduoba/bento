@@ -210,6 +210,9 @@ pub struct ConflictSpec {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct JobSnapshot {
+    /// Admission time in Unix milliseconds; zero denotes a legacy snapshot without a timestamp.
+    #[serde(default)]
+    pub submitted_at_ms: u64,
     pub session_id: String,
     pub job_id: String,
     pub revision: u64,

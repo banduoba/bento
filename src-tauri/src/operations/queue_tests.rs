@@ -1052,3 +1052,49 @@ fn finalreview_history_retirement_runs_unlocked_and_does_not_cross_partial_barri
     assert!(q.undo("old-4".into(), "cannot-cross".into()).is_err());
     assert_eq!(q.shared.state.lock().unwrap().undo, vec![None]);
 }
+
+#[test]
+fn submission_timestamp_is_stamped_once_and_survives_replay_events_and_snapshots() {
+    let events = Arc::new(Mutex::new(vec![]));
+    let seen = events.clone();
+    let q = OperationManager::new(
+        Arc::new(Success),
+        Arc::new(move |e| {
+            seen.lock().unwrap().push(e);
+        }),
+    );
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let accepted = q.enqueue(request("timestamp")).unwrap();
+    let after = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let stamp = serde_json::to_value(&accepted).unwrap()["submittedAtMs"]
+        .as_u64()
+        .expect("accepted job exposes numeric Unix milliseconds");
+    assert!((before..=after).contains(&stamp));
+    q.wait_idle();
+    let replay = q.enqueue(request("timestamp")).unwrap();
+    let terminal = q.get(&accepted.job_id).unwrap();
+    let listed = q
+        .list()
+        .jobs
+        .into_iter()
+        .find(|job| job.job_id == accepted.job_id)
+        .unwrap();
+    for job in [replay, terminal, listed] {
+        assert_eq!(serde_json::to_value(job).unwrap()["submittedAtMs"], stamp);
+    }
+    for job in events.lock().unwrap().iter() {
+        assert_eq!(serde_json::to_value(job).unwrap()["submittedAtMs"], stamp);
+    }
+    let mut legacy = serde_json::to_value(accepted).unwrap();
+    legacy.as_object_mut().unwrap().remove("submittedAtMs");
+    assert!(
+        serde_json::from_value::<JobSnapshot>(legacy).is_ok(),
+        "older snapshots remain decodable"
+    );
+}

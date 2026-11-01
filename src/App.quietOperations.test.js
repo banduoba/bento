@@ -98,3 +98,126 @@ test('quiet recovery and sync failures remain visible through the compact entry'
   await h.run(() => button(h, '收起').props.onClick())
   assert.match(text(trigger(h)), /操作异常/)
 })
+
+const jobRows = h => h.root.findAllByType('article').filter(n => n.props['data-job-id'])
+const clearHistory = h => h.run(() => button(h, '清除已结束记录').props.onClick())
+
+for (const resultState of ['completed', 'cancelled', 'failed', 'partial']) test(`manual clear dismisses settled ${resultState} display history and preserves native Undo and later jobs`, async t => {
+  const b = operationBoundary(), h = await mountApp(t, b.api)
+  await submit(h)
+  b.setUndo('saved-undo')
+  await b.emit(h, 'j1', { state: resultState, phase: 'finished' }, [outcome({ status: resultState === 'completed' ? 'succeeded' : resultState })])
+  await open(h)
+  assert.deepEqual(jobRows(h).map(n => n.props['data-job-id']), ['j1'])
+  const clear = button(h, '清除已结束记录')
+  assert.ok(clear, 'settled history has an explicit clear control')
+  assert.equal(clear.props.disabled, false)
+  assert.match(clear.props.title, /不.*删除文件/)
+  const calls = [...b.calls]
+  await clearHistory(h)
+  assert.equal(jobRows(h).length, 0)
+  assert.equal(button(h, '清除已结束记录').props.disabled, true)
+  assert.doesNotMatch(text(trigger(h)), /待处理/)
+  assert.deepEqual(b.calls, calls, 'display clearing must not ACK, cancel or mutate native history')
+  assert.equal(b.jobs.size, 1)
+  await h.run(() => button(h, '收起').props.onClick())
+  await open(h)
+  await h.run(() => button(h, '同步').props.onClick())
+  assert.equal(jobRows(h).length, 0, 'display choices survive closing and authoritative resync')
+  assert.equal(button(h, '撤销').props.disabled, false)
+  await h.run(() => button(h, '撤销').props.onClick())
+  assert.equal(b.calls.find(c => c[0] === 'undo')[1], 'saved-undo')
+  await submit(h)
+  assert.ok(jobRows(h).some(n => n.props['data-job-id'] === 'j2'), 'new jobs appear after a clear')
+})
+
+test('manual clear preserves active, conflict, syncing and uncertain work, recovery controls and global errors', async t => {
+  const b = operationBoundary(), gate = deferred()
+  t.after(() => gate.resolve())
+  for (const [id, state] of [['done', 'completed'], ['queued', 'queued'], ['running', 'running'], ['conflict', 'waitingConflict'], ['syncing', 'completed']]) {
+    const j = await b.api.enqueueOperation({ requestId: id, kind: 'copy', items: [{ itemId: 'i0', source: `/src/${id}` }] })
+    b.jobs.set(j.jobId, { ...j, state, phase: state === 'completed' ? 'finished' : 'preparing', outcomeCount: id === 'syncing' ? 1 : 0 })
+  }
+  const h = await mountApp(t, { ...b.api,
+    enqueueOperation: async () => { throw Error('uncertain submission') },
+    getOperationOutcomes: async (...args) => { await gate.promise; return b.api.getOperationOutcomes(...args) },
+    listOperationRecoveries: async () => [{ recoveryId: 'r1', description: '原文件待恢复', actions: ['restoreBackup'] }],
+  })
+  await submit(h)
+  await open(h)
+  await clearHistory(h)
+  assert.deepEqual(jobRows(h).map(n => n.props['data-job-id']).sort(), ['j2', 'j3', 'j4', 'j5'])
+  assert.ok(button(h, '处理冲突'))
+  assert.ok(button(h, '同步并重试提交'))
+  assert.ok(button(h, '恢复受保护的原文件'))
+  assert.match(text(details(h)[0]), /正在同步结果/)
+  assert.match(text(trigger(h)), /提交待确认/)
+  assert.match(text(trigger(h)), /待恢复/)
+  assert.match(text(trigger(h)), /操作异常/)
+  assert.equal(button(h, '清除已结束记录').props.disabled, true)
+  // Cleanup must not leave the deliberately gated outcome reader looping.
+  await h.unmount()
+})
+
+test('pending result synchronization cannot be hidden by history pagination', async t => {
+  const b = operationBoundary(), gate = deferred()
+  t.after(() => gate.resolve())
+  for (let index = 0; index < 25; index++) {
+    const j = await b.api.enqueueOperation({ requestId: `r${index}`, kind: 'copy', items: [{ itemId: 'i0', source: '/src/a' }] })
+    b.jobs.set(j.jobId, { ...j, state: 'completed', phase: 'finished', outcomeCount: index === 0 ? 1 : 0 })
+  }
+  const h = await mountApp(t, { ...b.api, getOperationOutcomes: async (...args) => { await gate.promise; return b.api.getOperationOutcomes(...args) } })
+  await open(h)
+  assert.ok(jobRows(h).some(n => n.props['data-job-id'] === 'j1'), 'old syncing results always remain accessible')
+  await clearHistory(h)
+  assert.deepEqual(jobRows(h).map(n => n.props['data-job-id']), ['j1'])
+  await h.unmount()
+})
+
+test('job submission time shows local seconds and full date and stays stable through events and rerenders', async t => {
+  const b = operationBoundary(), submittedAtMs = new Date(2026, 9, 31, 13, 24, 56).getTime()
+  const h = await mountApp(t, { ...b.api, enqueueOperation: async request => {
+    const job = await b.api.enqueueOperation(request)
+    const stamped = { ...job, submittedAtMs }
+    b.jobs.set(job.jobId, stamped)
+    return stamped
+  } })
+  await submit(h)
+  await open(h)
+  const stamp = () => jobRows(h)[0].findByType('time')
+  assert.match(text(stamp()), /13:24:56/)
+  assert.match(stamp().props.title, /2026\/10\/31 13:24:56/)
+  assert.equal(stamp().props.dateTime, new Date(submittedAtMs).toISOString())
+  const original = text(stamp())
+  await b.emit(h, 'j1', { state: 'running', phase: 'copying' })
+  await h.run(() => button(h, '同步').props.onClick())
+  assert.equal(text(stamp()), original)
+  await h.run(() => button(h, '收起').props.onClick())
+  await open(h)
+  assert.equal(text(stamp()), original)
+})
+
+test('older snapshots without a submission timestamp do not invent a current time', async t => {
+  const b = operationBoundary(), h = await mountApp(t, b.api)
+  await submit(h)
+  await open(h)
+  assert.equal(jobRows(h)[0].findAllByType('time').length, 0)
+  assert.match(text(jobRows(h)[0]), /提交时间未知/)
+})
+
+test('a settled job with unresolved outcome acknowledgement stays visible when other history is cleared', async t => {
+  const b = operationBoundary()
+  for (const id of ['ack-error', 'settled']) {
+    const job = await b.api.enqueueOperation({ requestId: id, kind: 'copy', items: [{ itemId: 'i0', source: '/src/a' }] })
+    b.jobs.set(job.jobId, { ...job, state: 'completed', phase: 'finished' })
+  }
+  const h = await mountApp(t, { ...b.api, ackOperationOutcomes: async id => {
+    if (id === 'j1') throw Error('acknowledgement unavailable')
+  } })
+  await open(h)
+  await clearHistory(h)
+  assert.deepEqual(jobRows(h).map(n => n.props['data-job-id']), ['j1'])
+  assert.match(text(jobRows(h)[0]), /acknowledgement unavailable/)
+  assert.equal(button(h, '清除已结束记录').props.disabled, true)
+  assert.match(text(trigger(h)), /操作异常/)
+})
