@@ -344,6 +344,7 @@ export default function SearchOverlay({
         aria-label={`复制路径：${item.path}`}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation()
           copyText(item.path)
@@ -354,6 +355,8 @@ export default function SearchOverlay({
       <button
         className="search-reveal"
         title="在访达中显示"
+        onMouseDown={(e) => e.stopPropagation()}
+        onDoubleClick={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation()
           onReveal(item.path)
@@ -487,11 +490,13 @@ export default function SearchOverlay({
                   if (e.button === 0) dragRef.current = { x: e.clientX, y: e.clientY, item, started: false }
                 }}
                 onClick={() => {
-                  if (suppressClickRef.current) {
-                    suppressClickRef.current = false
-                    return
-                  }
-                  choose(item)
+                  if (suppressClickRef.current) return
+                  setSelIdx(i)
+                }}
+                onDoubleClick={(e) => {
+                  if (suppressClickRef.current || e.target.closest('button')) return
+                  onLocate(item.dir, item.path)
+                  onClose()
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault()
@@ -596,7 +601,7 @@ export default function SearchOverlay({
         )}
         </div>
         <div className="search-hint">
-          ↑↓ 选择 · ↩ {query.trim() ? '打开' : '搜索'} · {query.trim() && '右键 更多操作 · '}Esc 关闭 · 范围：{SCOPES.find((s) => s.id === scope)?.label}
+          ↑↓ 选择 · 双击 定位 · ↩ {query.trim() ? '打开' : '搜索'} · {query.trim() && '右键 更多操作 · '}Esc 关闭 · 范围：{SCOPES.find((s) => s.id === scope)?.label}
         </div>
       </div>
       {menu && (

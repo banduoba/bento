@@ -23,7 +23,7 @@ const bundle = await build({
       b.onResolve({ filter: /(?:^|\/)api(?:\.js)?$/ }, () => ({
         path: 'api', namespace: 'test',
       }))
-      b.onResolve({ filter: /(?:FileIcon|ContextMenu|nativeDrag)$/ }, ({ path }) => ({
+      b.onResolve({ filter: /(?:FileIcon|ContextMenu|nativeDrag|format)$/ }, ({ path }) => ({
         path, namespace: 'test',
       }))
       b.onLoad({ filter: /.*/, namespace: 'test' }, ({ path }) => ({
@@ -31,7 +31,9 @@ const bundle = await build({
         contents: path === 'api'
           ? 'export const api=new Proxy({}, {get:(_,k)=>(...a)=>globalThis.__searchTest[k](...a)}); export const hasTauri=false; export const fileSrc=x=>x'
           : path.endsWith('nativeDrag')
-            ? 'export const makeDragPreview=async()=>""; export const runNativeDrag=async()=>{}'
+            ? 'export const makeDragPreview=async()=>""; export const runNativeDrag=(...args)=>globalThis.__searchTest.drag(...args)'
+            : path.endsWith('format')
+              ? 'export const fmtDate=()=>""; export const fmtSize=()=>""; export const copyText=path=>globalThis.__searchTest.copyText(path)'
             : 'export default function Stub(){return null}',
       }))
     },
@@ -84,6 +86,8 @@ async function mount(t, extra = {}) {
   globalThis.setTimeout = fn => { timers.set(++next, fn); return next }
   globalThis.clearTimeout = id => timers.delete(id)
   const requests = [], cancels = [], previews = [], opened = []
+  const located = [], revealed = [], copied = [], drags = [], closed = []
+  const drag = deferred()
   globalThis.__searchTest = {
     searchQuery: (...args) => {
       const d = deferred()
@@ -91,6 +95,8 @@ async function mount(t, extra = {}) {
       return d.promise
     },
     cancelSearch: async id => cancels.push(id),
+    copyText: path => copied.push(path),
+    drag: (...args) => { drags.push(args); return drag.promise },
     fsearchStatus: async () => ({ ready: true }),
     readTextPreview: () => {
       const d = deferred()
@@ -109,10 +115,10 @@ async function mount(t, extra = {}) {
     onModeChange() {},
     onScopeChange() {},
     onSortChange() {},
-    onClose() {},
+    onClose: () => closed.push(true),
     onOpenEntry: e => opened.push(e),
-    onLocate() {},
-    onReveal() {},
+    onLocate: (...args) => located.push(args),
+    onReveal: path => revealed.push(path),
     ...extra,
   }
 
@@ -144,7 +150,8 @@ async function mount(t, extra = {}) {
   })
   const run = async f => act(async () => { f() })
   return {
-    requests, cancels, previews, opened, unmount, run,
+    requests, cancels, previews, opened, located, revealed, copied, drags, drag, closed, unmount, run,
+    rows: () => renderer.root.findAll(n => n.type === 'div' && n.props.className?.split(' ').includes('search-item')),
     get root() { return renderer.root },
     text: () => JSON.stringify(renderer.toJSON()),
     input: () => renderer.root.findByType('input'),
@@ -251,4 +258,91 @@ test('incomplete zero matches and cancellation do not claim no matches', async t
   await h.run(() => h.requests[1].reject({ code: 'cancelled', message: '搜索已取消' }))
   assert.ok(h.text().includes('搜索已取消'))
   assert.ok(!h.text().includes('没有找到匹配'))
+})
+
+
+const rowEvent = (button = false) => ({
+  target: { closest: () => button ? {} : null },
+  preventDefault() {},
+  stopPropagation() { this.stopped = true },
+})
+
+async function showResults(t, items, props) {
+  const h = await mount(t, props)
+  await h.type('needle')
+  await h.flush()
+  await h.resolve(0, result(items))
+  return h
+}
+
+test('single click selects and previews without opening; Enter and context Open retain explicit activation', async t => {
+  const h = await showResults(t, [item('one.txt'), item('two.txt')])
+  await h.run(() => h.rows()[1].props.onClick(rowEvent()))
+  assert.deepEqual(h.opened, [])
+  assert.deepEqual(h.closed, [])
+  assert.ok(h.rows()[1].props.className.endsWith(' on'))
+  assert.equal(h.previews.length, 2)
+  await h.run(() => h.input().props.onKeyDown({ key: 'Enter', preventDefault() {} }))
+  assert.equal(h.opened[0].name, 'two.txt')
+  assert.equal(h.closed.length, 1)
+  await h.run(() => h.rows()[0].props.onContextMenu({ ...rowEvent(), clientX: 0, clientY: 0 }))
+  const menu = h.root.find(n => !!n.props.menu?.items).props.menu
+  await h.run(() => menu.items.find(n => n.label === '打开').action())
+  assert.equal(h.opened[1].name, 'one.txt')
+})
+
+for (const is_dir of [false, true]) {
+  test(`double click locates the containing directory and selects a ${is_dir ? 'folder' : 'file'} result`, async t => {
+    const entry = { ...item('报告 [一] '), is_dir }
+    const h = await showResults(t, [entry], { mode: 'name' })
+    await h.run(() => h.rows()[0].props.onDoubleClick?.(rowEvent()))
+    assert.deepEqual(h.located, [[entry.dir, entry.path]])
+    assert.equal(h.closed.length, 1)
+    assert.deepEqual(h.opened, [])
+  })
+}
+
+test('copy and reveal buttons keep their actions without double-click navigation or starting a drag', async t => {
+  const entry = item()
+  const h = await showResults(t, [entry], { mode: 'name' })
+  const row = h.rows()[0]
+  for (const button of row.findAllByType('button')) {
+    const down = { ...rowEvent(true), button: 0, clientX: 0, clientY: 0 }
+    await h.run(() => {
+      button.props.onMouseDown?.(down)
+      if (!down.stopped) row.props.onMouseDown(down)
+      button.props.onClick(rowEvent(true))
+      const double = rowEvent(true)
+      button.props.onDoubleClick?.(double)
+      if (!double.stopped) row.props.onDoubleClick?.(double)
+      window.dispatchEvent(Object.assign(new Event('mousemove'), { clientX: 20, clientY: 0 }))
+    })
+  }
+  assert.deepEqual(h.copied, [entry.path])
+  assert.deepEqual(h.revealed, [entry.path])
+  assert.deepEqual(h.located, [])
+  assert.deepEqual(h.opened, [])
+  assert.deepEqual(h.closed, [])
+  assert.deepEqual(h.drags, [])
+})
+
+test('native drag suppresses the following click and double click; a later gesture can locate', async t => {
+  const entry = item()
+  const h = await showResults(t, [entry], { mode: 'name' })
+  await h.run(() => {
+    h.rows()[0].props.onMouseDown({ button: 0, clientX: 0, clientY: 0 })
+    window.dispatchEvent(Object.assign(new Event('mousemove'), { clientX: 20, clientY: 0 }))
+  })
+  assert.deepEqual(h.drags[0][0], [entry.path])
+  await h.run(() => h.drag.resolve())
+  await h.run(() => {
+    h.rows()[0].props.onClick(rowEvent())
+    h.rows()[0].props.onDoubleClick?.(rowEvent())
+  })
+  assert.deepEqual(h.opened, [])
+  assert.deepEqual(h.located, [])
+  assert.deepEqual(h.closed, [])
+  await h.flush()
+  await h.run(() => h.rows()[0].props.onDoubleClick?.(rowEvent()))
+  assert.deepEqual(h.located, [[entry.dir, entry.path]])
 })
