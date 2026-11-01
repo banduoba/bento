@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mountApp, key } from './test/AppHarness.js'
+import { mountApp, key, deferred } from './test/AppHarness.js'
 const identity={dev:'12',ino:'9876543210987654321'}
 const moved=(source,dest,extra={})=>({source,dest,ok:true,error:null,identity,...extra})
 const drop=(h,resultsMode='move')=>h.run(()=>h.panes[1].props.onDropTransfer('/dst',['/src/a'],resultsMode))
@@ -82,4 +82,52 @@ test('native Trash cancellation text is not surfaced as an application error',as
   const id=h.panes[0].props.pane.tabs[0].id
   await h.run(()=>h.panes[0].props.onSelect(id,new Set(['/home/a'])))
   await key(h,'Backspace',{metaKey:true});assert.deepEqual(h.alerts,[])
+})
+
+const menuClick = (h, label) => h.run(() => h.root.findByProps({'data-label':label}).props.onClick({preventDefault(){},stopPropagation(){}}))
+async function launchBareMutation(h, kind) {
+  const pane=h.panes[0].props,id=pane.pane.tabs[0].id
+  if(kind==='makeDir') { await key(h,'N',{metaKey:true,shiftKey:true});return }
+  if(kind==='createFile'||kind==='copyTemplate') {
+    await h.run(()=>pane.onBlankMenu(id,0,0));await menuClick(h,'新建')
+    await menuClick(h,kind==='createFile'?'文本文件':'fixture.template');return
+  }
+  await h.run(()=>pane.onMenu(id,{path:'/home/note.txt',name:'note.txt',is_dir:false},0,0))
+  await menuClick(h,kind==='rename'?'重新命名':'压缩「note.txt」')
+  if(kind==='rename') {
+    await h.run(()=>h.panes[0].props.onRenameChange('renamed.txt'))
+    await h.run(()=>h.panes[0].props.onRenameCommit())
+    assert.equal(h.panes[0].props.renaming,null)
+  }
+}
+
+for(const kind of ['rename','makeDir','createFile','copyTemplate','zipPaths']) {
+  test(`${kind} blocks older file Undo before its reply and after unknown-effect rejection; text Undo stays native`,async t=>{
+    const gate=deferred(),restores=[],commands=[],mutations=[]
+    const h=await mountApp(t,{
+      transfer:async()=>[moved('/src/a','/dst/a')],
+      restoreMoves:async m=>{restores.push(m);return m.map(x=>({...x,ok:true,error:null}))},
+      loadConfig:async()=>({zipPrefs:{oneClick:true}}),
+      listTemplates:async()=>[{name:'fixture.template',path:'/templates/fixture.template'}],
+      [kind]:(...args)=>{mutations.push(args);return gate.promise},
+    })
+    await drop(h);await launchBareMutation(h,kind);assert.equal(mutations.length,1)
+    document.execCommand=(...args)=>{commands.push(args);return true}
+    document.activeElement={tagName:'INPUT'};await key(h,'z',{metaKey:true})
+    assert.deepEqual(commands,[['undo',false,null]])
+    document.activeElement=null;await key(h,'z',{metaKey:true});assert.deepEqual(restores,[])
+    await h.run(()=>gate.reject(Error('reply failed after possible mutation')))
+    await key(h,'z',{metaKey:true});assert.deepEqual(restores,[])
+    assert.deepEqual(h.alerts,['Error: reply failed after possible mutation'])
+    await drop(h);await key(h,'z',{metaKey:true});assert.equal(restores.length,1)
+  })
+}
+
+test('pending bare-path mutation blocks Undo of a guarded operation completed while it is pending',async t=>{
+  const gate=deferred(),restores=[]
+  const h=await mountApp(t,{makeDir:()=>gate.promise,transfer:async()=>[moved('/src/a','/dst/a')],restoreMoves:async m=>{restores.push(m);return m.map(x=>({...x,ok:true,error:null}))}})
+  await launchBareMutation(h,'makeDir');await drop(h)
+  await key(h,'z',{metaKey:true});assert.deepEqual(restores,[])
+  await h.run(()=>gate.reject(Error('unknown create result')))
+  await key(h,'z',{metaKey:true});assert.equal(restores.length,1)
 })
