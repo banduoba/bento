@@ -256,6 +256,7 @@ impl FileExecutor {
                 source.unwrap(),
                 &destination,
                 source_manifest.as_ref().unwrap(),
+                r.kind == OperationKind::Trash,
                 c,
                 out,
             ) {
@@ -587,6 +588,7 @@ impl FileExecutor {
         source: &Path,
         dest: &Path,
         manifest: &Manifest,
+        trashing: bool,
         c: &OperationContext,
         out: &mut ItemOutcome,
     ) -> io::Result<Option<Effect>> {
@@ -627,17 +629,27 @@ impl FileExecutor {
                 out.affected_directories = affected(Some(source), dest);
                 let moved = match self
                     .at(Point::PublishedVerify, dest, c)
-                    .and_then(|_| Manifest::capture(dest, &|| Ok(())))
+                    .and_then(|_| {
+                        if trashing {
+                            manifest.capture_trashed_root(dest)
+                        } else {
+                            let actual = Manifest::capture(dest, &|| Ok(()))?;
+                            if !manifest.same_captured_manifest(&actual) {
+                                return Err(identity::changed());
+                            }
+                            Ok(actual)
+                        }
+                    })
                 {
-                    Ok(m) if manifest.same_captured_manifest(&m) => m,
-                    other => {
+                    Ok(m) => m,
+                    Err(err) => {
                         return Ok(Some(self.published_failure(
                             &mut r,
                             &out.item_id.clone(),
                             out,
                             EffectKind::Move,
                             manifest.clone(),
-                            other.err().unwrap_or_else(identity::changed),
+                            err,
                         )))
                     }
                 };
