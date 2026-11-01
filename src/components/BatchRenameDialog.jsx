@@ -17,7 +17,7 @@ function modificationDate(mtimeMs) {
 
 /**
  * 批量重命名对话框（Finder/QSpace 风格）
- * items: [{ path, name, isDir, mtime_ms }]，newName 计算保留扩展名
+ * items: [{ path, name, is_dir, mtime_ms }]，newName 计算保留扩展名
  */
 export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const [mode, setMode] = useState('replace')
@@ -35,7 +35,7 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const [regexPreview, setRegexPreview] = useState(null)
   const regexActive = mode === 'replace' && useRegex
   const nameParts = useMemo(() => items.map(it => {
-    const dot = regexActive && it.isDir ? -1 : it.name.lastIndexOf('.')
+    const dot = regexActive && it.is_dir ? -1 : it.name.lastIndexOf('.')
     return { stem: dot > 0 ? it.name.slice(0, dot) : it.name, ext: dot > 0 ? it.name.slice(dot) : '' }
   }), [items, regexActive])
   // A render with changed inputs must immediately discard the old result, before effects run.

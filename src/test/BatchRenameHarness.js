@@ -13,7 +13,7 @@ const bundle = await build({
     b.onLoad({ filter: /.*/, namespace: 'test' }, () => ({ contents: 'export const api = { previewRegexRename: (...args) => globalThis.__batchIPC(...args) }' }))
   } }],
 })
-export const item = (name, isDir = false) => ({ name, isDir, path: `/fixture/${name}`, mtime_ms: new Date(2024, 0, 2).getTime() })
+export const item = (name, is_dir = false) => ({ name, is_dir, path: `/fixture/${name}`, size: 0, mtime_ms: new Date(2024, 0, 2).getTime(), btime_ms: 0, ext: '' })
 export async function mountBatch(t, items = [item('sample_1.txt'), item('sample_2.md')]) {
   const previous = Object.fromEntries(['window', '__batchIPC', 'IS_REACT_ACT_ENVIRONMENT'].map(k => [k, globalThis[k]]))
   const requests = [], applied = []
