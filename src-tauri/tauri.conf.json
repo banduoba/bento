@@ -33,6 +33,7 @@
   },
   "bundle": {
     "active": true,
+    "macOS": { "entitlements": "Entitlements.plist" },
     "targets": "all",
     "icon": [
       "icons/icon.icns",
