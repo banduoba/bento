@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import { api } from '../api'
+import { isTextEditingElement } from '../textEditing.js'
 
 const MODES = [
   { id: 'replace', label: '替换文本' },
@@ -16,7 +18,7 @@ function modificationDate(mtimeMs) {
 
 /**
  * 批量重命名对话框（Finder/QSpace 风格）
- * items: [{ path, name, isDir, mtime_ms }]，newName 计算保留扩展名
+ * items: [{ path, name, is_dir, mtime_ms }]，newName 计算保留扩展名
  */
 export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const [mode, setMode] = useState('replace')
@@ -30,16 +32,42 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   const [addDate, setAddDate] = useState(false)
   const [caseStyle, setCaseStyle] = useState('upper')
   const [busy, setBusy] = useState(false)
+  const [useRegex, setUseRegex] = useState(false)
+  const [regexPreview, setRegexPreview] = useState(null)
+  const regexActive = mode === 'replace' && useRegex
+  const nameParts = useMemo(() => items.map(it => {
+    const dot = regexActive && it.is_dir ? -1 : it.name.lastIndexOf('.')
+    return { stem: dot > 0 ? it.name.slice(0, dot) : it.name, ext: dot > 0 ? it.name.slice(dot) : '' }
+  }), [items, regexActive])
+  // A render with changed inputs must immediately discard the old result, before effects run.
+  const request = useMemo(() => ({ names: nameParts.map(it => it.stem), pattern: find, replacement: replaceWith }),
+    [nameParts, find, replaceWith, regexActive])
+  const currentPreview = regexPreview?.request === request ? regexPreview : null
+  const previewPending = regexActive && !currentPreview
+  const previewError = regexActive ? currentPreview?.error : null
+  useEffect(() => {
+    if (!regexActive) return
+    let active = true
+    Promise.resolve().then(() => api.previewRegexRename(request.names, request.pattern, request.replacement)).then(names => {
+      if (!active) return
+      if (!Array.isArray(names) || names.length !== items.length || Array.from(names).some(name => typeof name !== 'string')) {
+        throw new Error('正则预览结果无效，请重试')
+      }
+      setRegexPreview({ request, names })
+    }).catch(error => {
+      if (active) setRegexPreview({ request, error: String(error?.message || error) })
+    })
+    return () => { active = false }
+  }, [regexActive, request, items.length])
 
   const results = useMemo(
     () =>
       items.map((it, i) => {
-        const dot = it.name.lastIndexOf('.')
-        const ext = dot > 0 ? it.name.slice(dot) : ''
-        const stem = dot > 0 ? it.name.slice(0, dot) : it.name
+        const { stem, ext } = nameParts[i]
         let base = stem
         if (mode === 'replace') {
-          if (find) base = stem.split(find).join(replaceWith)
+          if (regexActive) base = currentPreview?.names?.[i] ?? stem
+          else if (find) base = stem.split(find).join(replaceWith)
         } else if (mode === 'add') {
           base = addPos === 'before' ? addText + stem : stem + addText
         } else if (mode === 'format') {
@@ -57,17 +85,30 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
         }
         return { ...it, newBase: base, newName: base + ext }
       }),
-    [items, mode, find, replaceWith, addText, addPos, fmtName, startNum, digits, addDate, caseStyle]
+    [items, nameParts, mode, find, replaceWith, addText, addPos, fmtName, startNum, digits, addDate, caseStyle, regexActive, currentPreview]
   )
 
   const lowerNames = results.map((r) => r.newName.toLowerCase())
-  const hasDup = new Set(lowerNames).size !== lowerNames.length
+  const seenNames = new Set()
+  const duplicateNames = new Set()
+  for (const name of lowerNames) {
+    if (seenNames.has(name)) duplicateNames.add(name)
+    else seenNames.add(name)
+  }
+  const hasDup = duplicateNames.size > 0
   const anyEmpty = results.some((r) => !r.newBase.trim())
   const changed = results.some((r, i) => r.newName !== items[i].name)
-  const valid = !hasDup && !anyEmpty && changed
+  const invalidName = r => !r.newBase.trim() || /[/\0]/.test(r.newName) || r.newName === '.' || r.newName === '..'
+  const anyInvalid = results.some(invalidName)
+  const valid = !hasDup && !anyInvalid && changed && !previewPending && !previewError
 
-  useEffect(() => {
+  // Native events must use the committed render before passive preview effects run.
+  useLayoutEffect(() => {
     const onKey = (e) => {
+      const key = e.key.toLowerCase()
+      // App's bubble listener owns text editing; keep file shortcuts isolated here.
+      if (isTextEditingElement(e.target) && e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey &&
+          !e.isComposing && ['a', 'c', 'x', 'v'].includes(key)) return
       e.stopPropagation()
       if (e.key === 'Escape' && !busy) onCancel()
       if (e.key === 'Enter' && !e.target?.closest?.('button') && valid && !busy) apply()
@@ -120,7 +161,13 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
                     onChange={(e) => setReplaceWith(e.target.value)} />
                 </label>
               </div>
-              <p className="batch-rename-note">替换名称中的所有匹配文本，保留扩展名。</p>
+              <label className="batch-rename-regex">
+                <input type="checkbox" checked={useRegex} onChange={e => setUseRegex(e.target.checked)} />
+                使用正则表达式
+              </label>
+              <p className="batch-rename-note">{useRegex
+                ? '替换所有匹配；捕获组可用 $1、$2（如 case_$1）。文件保留扩展名，目录使用完整名称。'
+                : '替换名称中的所有匹配文本，保留扩展名。'}</p>
             </>
           )}
 
@@ -214,15 +261,18 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
               <div key={r.path} className="preview-line">
                 <span className={r.newName === r.name ? '' : 'old'} title={r.name}>{r.name}</span>
                 <span className="arrow" aria-hidden="true">→</span>
-                <span className={r.newName === r.name ? '' : 'new'} title={r.newName}>{r.newName}</span>
+                <span className={invalidName(r) || duplicateNames.has(r.newName.toLowerCase()) ? 'new invalid' : r.newName === r.name ? '' : 'new'} title={r.newName}>{r.newName}</span>
               </div>
             ))}
             {rest > 0 && <div className="preview-more">…以及另外 {rest} 个项目</div>}
           </div>
           <div className="batch-rename-validation" aria-live="polite">
+            {previewPending && <div>正在预览正则替换…</div>}
+            {previewError && <div className="modal-error">{previewError}</div>}
+            {anyInvalid && !anyEmpty && <div className="modal-error">名称不合法：不能包含 /、NUL 或使用 .、..</div>}
             {hasDup && <div className="modal-error">重命名后的名称有重复，请调整规则</div>}
             {anyEmpty && <div className="modal-error">名称不能为空，请调整规则</div>}
-            {!anyEmpty && !changed && !hasDup && mode === 'replace' && find && (
+            {!anyInvalid && !changed && !hasDup && !previewPending && !previewError && mode === 'replace' && find && (
               <div className="modal-error">没有找到可替换的文本</div>
             )}
           </div>

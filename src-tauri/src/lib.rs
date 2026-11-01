@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 
+mod rename_preview;
 mod session_store;
 mod session_exit;
 mod list_stream;
@@ -791,6 +792,13 @@ async fn make_dir(path: String) -> Result<String, String> {
 async fn make_dir_with_receipt(path: String) -> Result<WriteReceipt, String> {
     let target = place_new_file(Path::new(&path), "未命名文件夹", |path| fs::create_dir(path), "创建失败")?;
     Ok(completion_receipt(target))
+}
+
+/// Pure name preview; deliberately does not receive paths or touch the filesystem.
+#[tauri::command]
+async fn regex_rename_preview(names: Vec<String>, pattern: String, replacement: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || rename_preview::replace_names(&names, &pattern, &replacement))
+        .await.map_err(|error| format!("正则预览失败：{error}"))?
 }
 
 #[tauri::command]
@@ -2973,6 +2981,7 @@ pub fn run() {
             make_dir_with_receipt,
             rename,
             rename_with_receipt,
+            regex_rename_preview,
             open_path,
             reveal_in_finder,
             open_terminal,
