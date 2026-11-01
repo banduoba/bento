@@ -888,13 +888,18 @@ export default function App() {
     }
   }
 
-  const completeTransfer = (results, dest, paths, mode, originalClip, onSuccess) => {
+  const undoBoundary = () => new Set(undoStackRef.current)
+  const invalidateUndo = boundary => {
+    undoStackRef.current = undoStackRef.current.filter(item => !boundary.has(item))
+  }
+
+  const completeTransfer = (results, dest, paths, mode, originalClip, onSuccess, boundary) => {
     const items = results || []
     const ok = items.filter(r => r.ok)
     const known = ok.filter(identified)
     // A native failure can have unreported effects. Never expose an older,
     // unrelated inverse after an operation whose actual result is unknown.
-    if (items.length !== paths.length || items.some(r => !r.ok) || known.length !== ok.length) undoStackRef.current = []
+    if (items.length !== paths.length || items.some(r => !r.ok) || known.length !== ok.length) invalidateUndo(boundary)
     refreshDirectories([...new Set([
       ...items.flatMap(r => r.affectedDirectories || []),
       dest,
@@ -912,12 +917,13 @@ export default function App() {
   const transferInto = async (dest, paths, mode, onSuccess) => {
     if (!paths?.length) return
     const originalClip = getClip()
+    const boundary = undoBoundary()
     fileOperationsPending.current++
     try {
       const results = await api.transfer(paths, dest, mode)
-      completeTransfer(results, dest, paths, mode, originalClip, onSuccess)
+      completeTransfer(results, dest, paths, mode, originalClip, onSuccess, boundary)
     } catch (e) {
-      undoStackRef.current = []
+      invalidateUndo(boundary)
       refreshDirectories([dest, ...(mode === 'move' ? paths.map(parentPath) : [])])
       alert(`操作失败: ${e}`)
     } finally { fileOperationsPending.current-- }
@@ -926,12 +932,13 @@ export default function App() {
   const moveInto = async (dest, paths) => {
     if (!paths?.length) return
     const originalClip = getClip()
+    const boundary = undoBoundary()
     fileOperationsPending.current++
     try {
       const results = await api.moveItems(paths, dest)
-      completeTransfer(results, dest, paths, 'move', originalClip)
+      completeTransfer(results, dest, paths, 'move', originalClip, undefined, boundary)
     } catch (e) {
-      undoStackRef.current = []
+      invalidateUndo(boundary)
       refreshDirectories([dest, ...paths.map(parentPath)])
       alert(`移动失败: ${e}`)
     } finally { fileOperationsPending.current-- }
@@ -965,20 +972,21 @@ export default function App() {
   const doTrash = async (tabId, paths) => {
     const list = paths?.length ? paths : selArr(tabId)
     if (!list.length) return
+    const boundary = undoBoundary()
     fileOperationsPending.current++
     try {
       const result = await api.trash(list)
       const entries = result?.entries || []
       const receipts = entries.map(e => ({ source: e.original, dest: e.trashed, identity: e.identity }))
       const known = receipts.filter(identified)
-      if (result?.error || result?.cancelled || entries.length !== list.length || known.length !== entries.length) undoStackRef.current = []
+      if (result?.error || result?.cancelled || entries.length !== list.length || known.length !== entries.length) invalidateUndo(boundary)
       refreshDirectories([...list.map(parentPath), ...entries.filter(e => e.trashed).map(e => parentPath(e.trashed))])
       const gone = new Set(entries.map(e => e.original))
       setSel(s => ({ ...s, [tabId]: new Set([...(s[tabId] || [])].filter(p => !gone.has(p))) }))
       if (known.length) pushUndo(restoreUndo(known), [...new Set(known.flatMap(r => [parentPath(r.source), parentPath(r.dest)]))])
       if (result?.error && !result.cancelled) alert(result.error)
     } catch (e) {
-      undoStackRef.current = []
+      invalidateUndo(boundary)
       refreshDirectories(list.map(parentPath))
       alert(String(e))
     } finally { fileOperationsPending.current-- }
@@ -1020,23 +1028,25 @@ export default function App() {
   }
 
   // ---------- 压缩（QSpace 风格「创建归档」）----------
-  const runZip = (paths, dir, o) => {
-    undoStackRef.current = []
+  const runZip = async (paths, dir, o) => {
+    const boundary = undoBoundary()
     fileOperationsPending.current++
-    api
-      .zipPaths(paths, dir, {
-        name: o.name,
-        level: o.level,
-        password: o.password || undefined,
-        separate: o.separate,
+    try {
+      const result = await api.zipPathsWithReceipt(paths, dir, {
+        name: o.name, level: o.level, password: o.password || undefined, separate: o.separate,
       })
-      .then((created) => {
-        refreshDirectories(created?.length ? [dir] : [])
-      })
-      .catch((e) => {
-        alert(String(e))
-      })
-      .finally(() => { fileOperationsPending.current-- })
+      const entries = result?.entries || []
+      const known = entries.map(r => ({ dest: r.path, identity: r.identity })).filter(identified)
+      if (!Array.isArray(result?.entries) || result?.error || known.length !== entries.length) invalidateUndo(boundary)
+      if (known.length) pushUndo(trashUndo(known), [dir])
+      if (result?.error) alert(result.error)
+    } catch (e) {
+      invalidateUndo(boundary)
+      alert(String(e))
+    } finally {
+      refreshDirectories([dir])
+      fileOperationsPending.current--
+    }
   }
   // 默认文件名：单个项目 = 该项目名.zip；多个项目 = 当前文件夹名.zip
   const zipDefaultName = (paths, dir) =>
@@ -1063,51 +1073,39 @@ export default function App() {
     if (list.length && dest) transferInto(dest, list, 'copy', undefined, tabId)
   }
 
-  const newFolder = (tabId) => {
-    const dest = locateTab(tabId)?.path
-    if (!dest) return
-    undoStackRef.current = []
+  // Create and its optional inline rename are two explicit Undo entries.
+  // Completion identity is supplied by the same backend mutation, never inferred from a listing.
+  const createItem = async (tabId, method, args, selectAll = false) => {
+    const boundary = undoBoundary()
     fileOperationsPending.current++
-    api
-      .makeDir(dest)
-      .then((created) => {
-        refreshDirectories([dest])
-        setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
-        setRenaming({ tabId, path: created, value: basename(created), selectAll: true })
-      })
-      .catch((e) => alert(String(e)))
-      .finally(() => { fileOperationsPending.current-- })
+    try {
+      const receipt = await api[method](...args)
+      const item = { dest: receipt?.path, identity: receipt?.identity }
+      if (identified(item)) pushUndo(trashUndo([item]), [parentPath(item.dest)])
+      else invalidateUndo(boundary)
+      if (receipt?.path) {
+        setSel(s => ({ ...s, [tabId]: new Set([receipt.path]) }))
+        setRenaming({ tabId, path: receipt.path, value: basename(receipt.path), selectAll })
+      }
+    } catch (e) {
+      invalidateUndo(boundary)
+      alert(String(e))
+    } finally {
+      refreshDirectories([args[0]])
+      fileOperationsPending.current--
+    }
   }
-
-  const beginCreatedRename = (tabId, created) => {
-    refreshDirectories([parentPath(created)])
-    setSel((s) => ({ ...s, [tabId]: new Set([created]) }))
-    // 与普通重命名一样只选中主文件名，扩展名留着（模板 .docx 不会被一次输入冲掉）
-    setRenaming({ tabId, path: created, value: basename(created) })
+  const newFolder = tabId => {
+    const dest = locateTab(tabId)?.path
+    if (dest) createItem(tabId, 'makeDirWithReceipt', [dest], true)
   }
-
   const newFile = (tabId, kind) => {
     const dest = locateTab(tabId)?.path
-    if (!dest) return
-    undoStackRef.current = []
-    fileOperationsPending.current++
-    api
-      .createFile(dest, kind)
-      .then((created) => beginCreatedRename(tabId, created))
-      .catch((e) => alert(String(e)))
-      .finally(() => { fileOperationsPending.current-- })
+    if (dest) createItem(tabId, 'createFileWithReceipt', [dest, kind])
   }
-
   const newFromTemplate = (tabId, template) => {
     const dest = locateTab(tabId)?.path
-    if (!dest || !template?.path) return
-    undoStackRef.current = []
-    fileOperationsPending.current++
-    api
-      .copyTemplate(dest, template.path)
-      .then((created) => beginCreatedRename(tabId, created))
-      .catch((e) => alert(String(e)))
-      .finally(() => { fileOperationsPending.current-- })
+    if (dest && template?.path) createItem(tabId, 'copyTemplateWithReceipt', [dest, template.path])
   }
 
   const openSearchResult = (item) => {
@@ -1129,22 +1127,38 @@ export default function App() {
     if (items.length > 1) setBatchRename({ tabId, items })
   }
 
+  const renameItems = async items => {
+    const boundary = undoBoundary(), completed = [], errors = []
+    fileOperationsPending.current++
+    try {
+      for (const item of items) {
+        if (item.newName === basename(item.path)) continue
+        try {
+          const receipt = await api.renameWithReceipt(item.path, item.newName)
+          const moved = { source: item.path, dest: receipt?.path, identity: receipt?.identity }
+          if (identified(moved)) completed.push(moved)
+          else invalidateUndo(boundary)
+        } catch (e) {
+          invalidateUndo(boundary)
+          errors.push(`${basename(item.path)} → ${item.newName}: ${e}`)
+        }
+      }
+      if (completed.length) pushUndo(restoreUndo(completed), [...new Set(completed.flatMap(r => [parentPath(r.source), parentPath(r.dest)]))])
+      return errors
+    } finally {
+      refreshDirectories(items.map(item => parentPath(item.path)))
+      fileOperationsPending.current--
+    }
+  }
   const commitRename = () => {
     if (!renaming) return
     const { tabId, path, value } = renaming
     setRenaming(null)
-    const current = basename(path)
-    if (!value || value.trim() === current) return
-    undoStackRef.current = []
-    fileOperationsPending.current++
-    api
-      .rename(path, value)
-      .catch((e) => alert(String(e)))
-      .finally(() => {
-        fileOperationsPending.current--
-        setSel((s) => ({ ...s, [tabId]: new Set() }))
-        refreshDirectories([parentPath(path)])
-      })
+    if (!value || value.trim() === basename(path)) return
+    renameItems([{ path, newName: value }]).then(errors => {
+      if (errors.length) alert(errors.join('\n'))
+      setSel(s => ({ ...s, [tabId]: new Set() }))
+    })
   }
 
   // ---------- 右键菜单 ----------
@@ -1379,6 +1393,13 @@ export default function App() {
   // ---------- 全局快捷键 ----------
   const keyRef = useRef(null)
   const textEditing = useRef(null)
+  useEffect(() => {
+    if (!hasTauri) return
+    const registration = listen('bento-edit-undo', () => keyRef.current?.({
+      metaKey: true, key: 'z', preventDefault() {},
+    }))
+    return () => { registration.then(unlisten => unlisten()).catch(() => {}) }
+  }, [])
   keyRef.current = (e) => {
     // ⌘,：输入框聚焦时也可打开设置
     if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key === ',') {
@@ -1879,7 +1900,8 @@ export default function App() {
         <BatchRenameDialog
           items={batchRename.items}
           onCancel={() => setBatchRename(null)}
-          onApply={(errors) => {
+          onApply={async (items) => {
+            const errors = await renameItems(items)
             const tid = batchRename.tabId
             setBatchRename(null)
             setSel((s) => ({ ...s, [tid]: new Set() }))
