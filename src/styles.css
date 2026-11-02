@@ -697,11 +697,12 @@ input, textarea {
   border-radius: 15px;
   outline: none;
   padding: 0 7px;
-  box-shadow: var(--focus-ring);
+  box-shadow: none;
 }
+.path-more { flex: none; font-size: 18px; }
 .path-edit.invalid .path-input {
   border-color: var(--danger);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 28%, transparent);
+  box-shadow: none;
 }
 .path-error {
   position: absolute;

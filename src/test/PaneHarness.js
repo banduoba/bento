@@ -20,6 +20,7 @@ const bundle = await build({
   plugins: [{
     name: 'pane-native-boundaries',
     setup(builder) {
+      builder.onResolve({ filter: /^react-dom$/ }, () => ({ path: 'portal', namespace: 'test' }))
       builder.onResolve({ filter: /^react(?:\/.*)?$/ }, ({ path }) => ({ path: require.resolve(path), external: true }))
       builder.onResolve({ filter: /(?:^|\/)api(?:\.js)?$/ }, () => ({ path: 'api', namespace: 'test' }))
       builder.onResolve({ filter: /(?:^|\/)fsWatch$/ }, () => ({ path: 'watch', namespace: 'test' }))
@@ -29,7 +30,9 @@ const bundle = await build({
       builder.onResolve({ filter: /(?:^|\/)FileIcon$/ }, () => ({ path: 'icon', namespace: 'test' }))
       builder.onResolve({ filter: /^@tauri-apps\/api\/core$/ }, () => ({ path: 'channel', namespace: 'test' }))
       builder.onLoad({ filter: /.*/, namespace: 'test' }, ({ path }) => ({
-        contents: path === 'api'
+        contents: path === 'portal'
+          ? 'export const createPortal = (children) => children'
+          : path === 'api'
           ? `export const hasTauri = true; export const fileSrc = (path) => path; export const api = new Proxy({}, { get: (_, key) => (...args) => globalThis.${bridgeKey}.api[key](...args) })`
           : path === 'watch'
             ? `export const setWatch = () => {}; export const clearWatch = () => {}; export const onFsChange = (fn) => globalThis.${bridgeKey}.subscribe(fn)`
