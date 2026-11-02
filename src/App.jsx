@@ -12,8 +12,8 @@ import { api, hasTauri } from './api'
 import { bumpManualRefreshTick, directoryKey, invalidateDirectories, rootRefreshKey } from './paneFeedback'
 import { createQuickLookNavigation } from './quickLookNavigation'
 import { clearCut, getClip, retainCut, setClip, subscribeClip } from './clipboard'
-import { basename, parentPath, labelOf, copyText, folderTitle } from './format'
-import { dragState } from './nativeDrag'
+import { basename, parentPath, labelOf, copyText, folderTitle, makeMatcher } from './format'
+import { dragState, isInternalDrag } from './nativeDrag'
 import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
 import {
   applyToAllFolders,
@@ -138,6 +138,8 @@ export default function App() {
   const [focused, setFocused] = useState(0)
   const [sel, setSel] = useState({}) // tabId -> Set(paths)
   const [filters, setFilters] = useState({}) // tabId -> string
+  const filtersRef = useRef(filters)
+  filtersRef.current = filters
   const [clip, setClipState] = useState(getClip) // { mode: 'copy' | 'cut', paths }
   const [menu, setMenu] = useState(null) // { x, y, items, kind? }
   const [templates, setTemplates] = useState([]) // 应用支持目录 templates/ 里的文件
@@ -150,9 +152,24 @@ export default function App() {
   const [wsRenaming, setWsRenaming] = useState(null) // { id, value }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
+  const revealReqRef = useRef(null)
+  revealReqRef.current = revealReq
+  const transferRevealSequence = useRef(0)
   const [hoverTip, setHoverTip] = useState(null) // { x, y, text } 原生拖拽目标提示
   const undoStackRef = useRef([]) // identified inverse callbacks, kept in memory only
+  const [undoRevision, setUndoRevision] = useState(0)
+  const [menuFocusRevision, setMenuFocusRevision] = useState(0)
   const fileOperationsPending = useRef(0)
+  const beginFileOperation = () => {
+    fileOperationsPending.current++
+    setUndoRevision(revision => revision + 1)
+  }
+  const finishFileOperation = () => {
+    fileOperationsPending.current--
+    setUndoRevision(revision => revision + 1)
+  }
+  const failedFileClipboard = useRef(null) // { changeCount: number | null, error }
+  const consumedCutClipboard = useRef(null) // one completed Bento Cut transaction
   const flashTimer = useRef(null)
   // 活动窗格，以及上一次离开的窗格。多于两个窗格时，F5/F6 送到刚离开的那个。
   // now 在按键时同步更新，长按 Tab 不用等下一次渲染才能继续切。
@@ -173,6 +190,12 @@ export default function App() {
   const [directoryVersions, setDirectoryVersions] = useState({})
 
   const rowsCache = useRef({}) // tabId -> 当前排序后的条目数组
+  const columnDirectories = useRef({}) // tabId -> { root, directory }; only valid while that tab uses columns
+  const tabLocationRevisions = useRef({})
+  const tabSelectionRevisions = useRef({})
+  const previousTabModes = useRef({})
+  const columnNavSequence = useRef(0)
+  const [columnNavigate, setColumnNavigate] = useState({})
   const cfgRef = useRef(null)
   cfgRef.current = cfg
   useEffect(() => subscribeClip(setClipState), [])
@@ -363,6 +386,37 @@ export default function App() {
     })
   }, [viewPathSig, cfg?.viewSettings, keyEpoch])
 
+  // A view override can change through the context menu as well as Cmd+1/2/3.
+  // Keep selection limited to rows the resulting root view can actually show.
+  useLayoutEffect(() => {
+    if (!cfg?.viewSettings) return
+    const leavingColumns = []
+    const nextModes = {}
+    for (const pane of cfg.panes) {
+      for (const tab of pane.tabs) {
+        const mode = viewForPath(cfg.viewSettings, keyFor(tab.path)).mode
+        const before = previousTabModes.current[tab.id]
+        if (before?.root === tab.path && before.mode === 'columns' && mode !== 'columns') leavingColumns.push(tab)
+        nextModes[tab.id] = { root: tab.path, mode }
+        const column = columnDirectories.current[tab.id]
+        if (mode !== 'columns' || column?.root !== tab.path) delete columnDirectories.current[tab.id]
+      }
+    }
+    previousTabModes.current = nextModes
+    if (!leavingColumns.length) return
+    setSel(previous => {
+      let changed = false
+      const next = { ...previous }
+      for (const tab of leavingColumns) {
+        const old = previous[tab.id]
+        if (!old) continue
+        const visible = new Set([...old].filter(path => parentPath(path) === tab.path))
+        if (visible.size !== old.size) { next[tab.id] = visible; changed = true }
+      }
+      return changed ? next : previous
+    })
+  }, [viewPathSig, cfg?.viewSettings, keyEpoch])
+
   // 聚焦窗格变化时持久化
   useEffect(() => {
     if (!cfg) return
@@ -446,8 +500,21 @@ export default function App() {
     }
     return null
   }
+  const workingDirectory = tabId => {
+    const current = cfgRef.current
+    const tab = current?.panes.flatMap(pane => pane.tabs).find(tab => tab.id === tabId)
+    if (!tab) return null
+    const column = columnDirectories.current[tabId]
+    return column?.directory && column.root === tab.path && viewForPath(current.viewSettings, keyFor(tab.path)).mode === 'columns'
+      ? column.directory : tab.path
+  }
 
   const paneIndexOf = (tabId) => cfg.panes.findIndex((p) => p.tabs.some((t) => t.id === tabId))
+  const locationChanged = tabId => {
+    if (!tabId) return
+    tabLocationRevisions.current[tabId] = (tabLocationRevisions.current[tabId] || 0) + 1
+    setRevealReq(request => request?.tabId === tabId && request.selectionPaths ? null : request)
+  }
 
   const nav = (tabId, path, isRefresh) => {
     if (isRefresh || !path) {
@@ -455,16 +522,28 @@ export default function App() {
       return
     }
     trace(`nav tab=${tabId} -> ${path}`)
+    locationChanged(tabId)
     updateTab(tabId, t => navigateTab(t, { path }))
     setSel(s => ({ ...s, [tabId]: new Set() }))
   }
 
   const travel = (tabId, step) => {
+    locationChanged(tabId)
     updateTab(tabId, t => navigateTab(t, { step }))
     setSel(s => ({ ...s, [tabId]: new Set() }))
   }
   const navBack = tabId => travel(tabId, -1)
   const navForward = tabId => travel(tabId, 1)
+  const navParent = tabId => {
+    const tab = locateTab(tabId)
+    if (!tab) return
+    const directory = workingDirectory(tabId)
+    if (directory && directory !== tab.path) {
+      setColumnNavigate(requests => ({ ...requests, [tabId]: { target: parentPath(directory), nonce: ++columnNavSequence.current } }))
+    } else {
+      nav(tabId, parentPath(tab.path))
+    }
+  }
 
   const openEntry = (tabId, entry) => {
     if (entry.is_dir) nav(tabId, entry.path)
@@ -477,16 +556,22 @@ export default function App() {
       panes: c.panes.map((p, i) => {
         if (i !== pi) return p
         const cur = p.tabs[p.active] || p.tabs[0]
-        const tabs = [...p.tabs, blankTab(cur.path)]
+        const tabs = [...p.tabs, blankTab(workingDirectory(cur.id) || cur.path)]
         return { ...p, tabs, active: tabs.length - 1 }
       }),
     }))
 
-  const switchTab = (pi, ti) =>
+  const switchTab = (pi, ti) => {
+    const pane = cfgRef.current?.panes[pi]
+    if (pane && pane.active !== ti) {
+      locationChanged(pane.tabs[pane.active]?.id)
+      locationChanged(pane.tabs[ti]?.id)
+    }
     setCfg((c) => ({
       ...c,
       panes: c.panes.map((p, i) => (i === pi ? { ...p, active: ti } : p)),
     }))
+  }
 
   const closeTabOf = (tabId) =>
     setCfg((c) => {
@@ -540,7 +625,8 @@ export default function App() {
       if (!paneEl) return null
       const idx = [...document.querySelectorAll('.panes > .pane')].indexOf(paneEl)
       const pane = cfgRef.current?.panes[idx]
-      return pane?.tabs[pane.active]?.path
+      const tab = pane?.tabs[pane.active]
+      return tab ? workingDirectory(tab.id) : null
     }
     const transferMode = (dest, paths) => {
       const volOf = (p) => p.match(/^\/Volumes\/[^/]+/)?.[0] || '/'
@@ -577,15 +663,16 @@ export default function App() {
       if (!paneEl) return null
       const base = paneDestination(paneEl)
       if (!base) return null
-      const row = hit.closest('.row[data-dir]')
-      const dest = row ? row.dataset.path : base
-      const label = row ? row.querySelector('.name')?.textContent || basename(dest) : basename(base) || base
+      const row = hit.closest('.row[data-dir], .icon-item[data-dir], .column-item[data-dir]')
+      const column = hit.closest('[data-column-path]')
+      const dest = row ? row.dataset.path : column?.dataset.columnPath || base
+      const label = row ? row.querySelector('.name, .view-file-name')?.textContent || basename(dest) : basename(dest) || dest
       if (paths?.length) {
         // 不能拖进自己/自己的子目录；全部本来就在目标目录里则无事可做
         if (paths.some((p) => dest === p || dest.startsWith(p + '/'))) return null
         if (paths.every((p) => dirOf(p) === dest)) return null
       }
-      const mode = !paths?.length || !dragState.internal ? 'copy' : transferMode(dest, paths)
+      const mode = !isInternalDrag(paths) ? 'copy' : transferMode(dest, paths)
       const verb = mode === 'move' ? '移动' : '复制'
       return {
         kind: row ? 'folder' : 'pane',
@@ -791,6 +878,8 @@ export default function App() {
 
   // ---------- 选择 ----------
   const onSelect = (tabId, next) => {
+    tabSelectionRevisions.current[tabId] = (tabSelectionRevisions.current[tabId] || 0) + 1
+    setRevealReq(request => request?.tabId === tabId && request.selectionPaths ? null : request)
     setSel((s) => ({ ...s, [tabId]: next }))
     if (next.size === 1) previewNavigation.current?.selectionChanged(tabId, [...next][0])
   }
@@ -859,7 +948,9 @@ export default function App() {
     return async () => {
       if (!pending.length) return
       const results = await api.restoreMoves(pending)
-      pending = pending.filter(m => !results?.some(r => r.ok && r.source === m.source && r.dest === m.dest))
+      const completed = (results || []).filter(r => r.ok && pending.some(m => r.source === m.source && r.dest === m.dest))
+      releasePaths(completed.map(r => r.source))
+      pending = pending.filter(m => !completed.some(r => r.source === m.source && r.dest === m.dest))
       if (pending.length) {
         const errors = (results || []).filter(r => !r.ok && !r.cancelled && r.error)
         throw undoError(errors.map(r => `${basename(r.source)}: ${r.error}`).join('\n') || '部分项目未恢复',
@@ -874,36 +965,90 @@ export default function App() {
       if (!pending.length) return
       const result = await api.trash(pending.map(r => r.dest), pending.map(r => ({ path: r.dest, ...r.identity })))
       const completed = new Set((result?.entries || []).map(e => e.original))
+      releasePaths(pending.filter(r => completed.has(r.dest)).map(r => r.dest))
       pending = pending.filter(r => !completed.has(r.dest))
       if (result?.error || pending.length) throw undoError(result?.error || '部分项目未移到废纸篓', !!result?.cancelled)
     }
   }
 
-  const releaseMoved = (completed, originalClip) => {
-    const gone = new Set(completed.filter(r => r.dest !== r.source).map(r => r.source))
+  const releasePaths = paths => {
+    const gone = new Set(paths)
     if (gone.size) {
       setSel(s => Object.fromEntries(Object.entries(s).map(([id, paths]) => [id, new Set([...paths].filter(p => !gone.has(p)))])))
+      setRevealReq(request => gone.has(request?.path) ? null : request)
       window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths: [...gone] } }))
     }
+  }
+
+  const releaseMoved = (completed, originalClip) => {
+    releasePaths(completed.filter(r => r.dest !== r.source).map(r => r.source))
     // Do not consume a clipboard replaced while the native operation was running.
     if (originalClip?.mode === 'cut' && getClip() === originalClip) {
       const done = new Set(completed.map(r => r.source))
-      retainCut(originalClip.paths.filter(p => !done.has(p)))
+      const remaining = originalClip.paths.filter(p => !done.has(p))
+      if (!remaining.length && originalClip.ownerToken) {
+        consumedCutClipboard.current = {
+          changeCount: originalClip.changeCount,
+          ownerToken: originalClip.ownerToken,
+          paths: originalClip.clipboardPaths,
+        }
+      }
+      retainCut(remaining)
     }
+  }
+
+  // A transfer may finish after the user has changed tabs or directories. Only
+  // reveal results in the visible destination that initiated the operation.
+  const transferTarget = (dest, tabId) => {
+    if (!tabId || workingDirectory(tabId) !== dest) return null
+    const current = cfgRef.current
+    const visible = current?.panes.slice(0, paneCount(current.layout))
+    const pane = visible?.find(p => p.tabs[p.active]?.id === tabId)
+    return pane ? { tabId, tab: pane.tabs[pane.active], dest,
+      locationRevision: tabLocationRevisions.current[tabId] || 0,
+      selectionRevision: tabSelectionRevisions.current[tabId] || 0 } : null
+  }
+
+  const revealTransfer = (receipts, target) => {
+    if (!target || !receipts.length) return
+    const current = cfgRef.current
+    const visible = current?.panes.slice(0, paneCount(current.layout))
+    const pane = visible?.find(p => p.tabs[p.active]?.id === target.tabId)
+    if (pane?.tabs[pane.active] !== target.tab || workingDirectory(target.tabId) !== target.dest
+      || (tabLocationRevisions.current[target.tabId] || 0) !== target.locationRevision
+      || (tabSelectionRevisions.current[target.tabId] || 0) !== target.selectionRevision) return
+    const match = makeMatcher(filtersRef.current[target.tabId])
+    const paths = [...new Set(receipts.map(r => r.dest).filter(path => parentPath(path) === target.dest
+      && (current.showHidden || !basename(path).startsWith('.')) && (!match || match(basename(path)))))]
+    if (!paths.length) return // folder-row drops and paths outside this listing keep their existing feedback
+    setSel(s => ({ ...s, [target.tabId]: new Set(paths) }))
+    // Column child directories use their row selection; list and icon views can
+    // scroll to a receipt through Pane's existing reveal request.
+    if (viewForPath(current.viewSettings, keyFor(target.tab.path)).mode === 'columns') return
+    setRevealReq({ tabId: target.tabId, path: paths[0], selectionPaths: paths,
+      nonce: ++transferRevealSequence.current })
   }
 
   const undoBoundary = () => new Set(undoStackRef.current)
   const invalidateUndo = boundary => {
-    undoStackRef.current = undoStackRef.current.filter(item => !boundary.has(item))
+    const next = undoStackRef.current.filter(item => !boundary.has(item))
+    if (next.length !== undoStackRef.current.length) {
+      undoStackRef.current = next
+      setUndoRevision(revision => revision + 1)
+    }
   }
 
-  const completeTransfer = (results, dest, paths, mode, originalClip, onSuccess, boundary) => {
+  const completeTransfer = (results, dest, paths, mode, originalClip, onSuccess, boundary, target) => {
     const items = results || []
+    // Only the native path can confirm that cancellation preceded all changes.
+    // Keep the last Undo and listing untouched for that explicit no-op.
+    if (items.length === paths.length && items.every(r => !r.ok && r.cancelled && r.unchanged)) return
     const ok = items.filter(r => r.ok)
     const known = ok.filter(identified)
     // A native failure can have unreported effects. Never expose an older,
     // unrelated inverse after an operation whose actual result is unknown.
-    if (items.length !== paths.length || items.some(r => !r.ok) || known.length !== ok.length) invalidateUndo(boundary)
+    if (items.length !== paths.length || items.some(r => !r.ok && !(r.cancelled && r.unchanged))
+      || known.length !== ok.length) invalidateUndo(boundary)
     refreshDirectories([...new Set([
       ...items.flatMap(r => r.affectedDirectories || []),
       dest,
@@ -912,52 +1057,56 @@ export default function App() {
     ])])
     const changed = known.filter(r => r.dest !== r.source)
     if (changed.length) pushUndo(mode === 'move' ? restoreUndo(changed) : trashUndo(changed),
-      [...new Set(changed.flatMap(r => mode === 'move' ? [parentPath(r.source), parentPath(r.dest)] : [parentPath(r.dest)]))])
+      [...new Set([dest, ...changed.flatMap(r => mode === 'move' ? [parentPath(r.source), parentPath(r.dest)] : [parentPath(r.dest)])])])
     if (mode === 'move') releaseMoved(ok, originalClip)
+    revealTransfer(known, target)
     if (ok.length === paths.length) onSuccess?.()
     reportErrors(items)
   }
 
-  const transferInto = async (dest, paths, mode, onSuccess) => {
+  const transferInto = async (dest, paths, mode, onSuccess, targetTabId, startedTarget) => {
     if (!paths?.length) return
+    const target = startedTarget === undefined ? transferTarget(dest, targetTabId) : startedTarget
     const originalClip = getClip()
     const boundary = undoBoundary()
-    fileOperationsPending.current++
+    beginFileOperation()
     try {
       const results = await api.transfer(paths, dest, mode)
-      completeTransfer(results, dest, paths, mode, originalClip, onSuccess, boundary)
+      completeTransfer(results, dest, paths, mode, originalClip, onSuccess, boundary, target)
     } catch (e) {
       invalidateUndo(boundary)
       refreshDirectories([dest, ...(mode === 'move' ? paths.map(parentPath) : [])])
       alert(`操作失败: ${e}`)
-    } finally { fileOperationsPending.current-- }
+    } finally { finishFileOperation() }
   }
 
-  const moveInto = async (dest, paths) => {
+  const moveInto = async (dest, paths, targetTabId, startedTarget) => {
     if (!paths?.length) return
+    const target = startedTarget === undefined ? transferTarget(dest, targetTabId) : startedTarget
     const originalClip = getClip()
     const boundary = undoBoundary()
-    fileOperationsPending.current++
+    beginFileOperation()
     try {
       const results = await api.moveItems(paths, dest)
-      completeTransfer(results, dest, paths, 'move', originalClip, undefined, boundary)
+      completeTransfer(results, dest, paths, 'move', originalClip, undefined, boundary, target)
     } catch (e) {
       invalidateUndo(boundary)
       refreshDirectories([dest, ...paths.map(parentPath)])
       alert(`移动失败: ${e}`)
-    } finally { fileOperationsPending.current-- }
+    } finally { finishFileOperation() }
   }
 
   const pushUndo = (undo, directories = []) => {
     undoStackRef.current.push({ undo, directories })
     if (undoStackRef.current.length > 30) undoStackRef.current.shift()
+    setUndoRevision(revision => revision + 1)
   }
 
   const undoLast = async () => {
     const op = undoStackRef.current.at(-1)
     if (!op || fileOperationsPending.current || undoStackRef.current.some(item => item.busy)) return
     op.busy = true
-    fileOperationsPending.current++
+    beginFileOperation()
     try {
       await op.undo()
       const index = undoStackRef.current.indexOf(op)
@@ -969,7 +1118,7 @@ export default function App() {
     } finally {
       refreshDirectories(op.directories)
       op.busy = false
-      fileOperationsPending.current--
+      finishFileOperation()
     }
   }
 
@@ -977,7 +1126,7 @@ export default function App() {
     const list = paths?.length ? paths : selArr(tabId)
     if (!list.length) return
     const boundary = undoBoundary()
-    fileOperationsPending.current++
+    beginFileOperation()
     try {
       const result = await api.trash(list)
       const entries = result?.entries || []
@@ -993,33 +1142,98 @@ export default function App() {
       invalidateUndo(boundary)
       refreshDirectories(list.map(parentPath))
       alert(String(e))
-    } finally { fileOperationsPending.current-- }
+    } finally { finishFileOperation() }
   }
 
-  const doCopyCut = (tabId, mode) => {
-    const paths = selArr(tabId)
+  const doCopyCut = (tabId, mode, explicitPaths) => {
+    const paths = explicitPaths ?? selArr(tabId)
     const cut = mode === 'cut' || mode === 'move'
     if (!paths.length) {
       // ⌘C 没有选中项时取消剪切；已有拷贝则保持，避免把拷贝剪贴板清掉。
       if (!cut) clearCut()
       return
     }
-    setClip({ mode: cut ? 'cut' : 'copy', paths: [...paths] })
-    // 文件引用写进系统剪贴板：其他软件 ⌘V 可直接粘贴文件本体。剪切只留在应用内。
-    if (!cut) {
-      api
-        .copyFilesToClipboard(paths)
-        .catch((e) => trace(`clipboard FAILED ${e}`))
+    consumedCutClipboard.current = null
+    const next = { mode: cut ? 'cut' : 'copy', paths: [...paths],
+      clipboardPaths: [...paths] }
+    setClip(next)
+    // Both gestures publish file-copy references atomically. Only Bento moves
+    // a Cut whose native ownership token and exact file list are still current.
+    const fail = (error, changeCount = null) => {
+      next.clipboardError = error
+      if (getClip() === next) failedFileClipboard.current = { changeCount, error }
+      trace(`clipboard FAILED ${error}`)
     }
+    next.pending = api.copyFilesToClipboard(paths).then(result => {
+      if (!result?.ok || !Number.isSafeInteger(result.changeCount) || !result.ownerToken) {
+        fail(result?.error || '文件剪贴板写入未确认',
+          Number.isSafeInteger(result?.changeCount) ? result.changeCount : null)
+        return
+      }
+      next.changeCount = result.changeCount
+      next.ownerToken = result.ownerToken
+      if (getClip() === next) failedFileClipboard.current = null
+    }, error => fail(error))
   }
 
-  const doPaste = (tabId) => {
-    const current = getClip()
-    if (!current?.paths?.length) return
-    const dest = locateTab(tabId)?.path
+  const doPaste = async (tabId, directory) => {
+    const dest = directory || workingDirectory(tabId)
     if (!dest) return
-    if (current.mode === 'cut') moveInto(dest, current.paths)
-    else transferInto(dest, current.paths, 'copy', undefined, tabId)
+    const target = transferTarget(dest, tabId)
+    const current = getClip()
+    await current?.pending
+    if (current && getClip() !== current) return
+    try {
+      const snapshot = await api.readFileClipboard()
+      if (current && getClip() !== current) return
+      const consumed = consumedCutClipboard.current
+      if (consumed) {
+        if (consumed.changeCount === snapshot.changeCount
+          && consumed.ownerToken === snapshot.ownerToken
+          && consumed.paths?.length === snapshot.paths?.length
+          && consumed.paths.every((path, index) => path === snapshot.paths[index])) return
+        consumedCutClipboard.current = null
+      }
+      const failed = failedFileClipboard.current
+      if (failed) {
+        if (failed.changeCount === null || failed.changeCount === snapshot.changeCount) {
+          alert(`无法写入文件剪贴板: ${failed.error}`)
+          if (current && getClip() === current) setClip(null)
+          if (failed.changeCount === null) failedFileClipboard.current = null
+          return
+        }
+        failedFileClipboard.current = null
+      }
+      if (current?.mode === 'cut' && current.ownerToken
+        && current.ownerToken === snapshot.ownerToken
+        && current.changeCount === snapshot.changeCount
+        && current.clipboardPaths?.length === snapshot.paths?.length
+        && current.clipboardPaths.every((path, index) => path === snapshot.paths[index])) {
+        if (current.paths.length) await moveInto(dest, current.paths, tabId, target)
+      } else if (snapshot.paths?.length) {
+        await transferInto(dest, snapshot.paths, 'copy', undefined, tabId, target)
+      } else {
+        const boundary = undoBoundary()
+        beginFileOperation()
+        try {
+          const receipt = await api.pasteImageFromClipboard(dest, snapshot.changeCount)
+          if (!receipt) return // ordinary text clipboard
+          const item = { dest: receipt.path, identity: receipt.identity }
+          if (identified(item)) pushUndo(trashUndo([item]), [dest])
+          else invalidateUndo(boundary)
+          refreshDirectories([dest])
+          if (identified(item)) revealTransfer([item], target)
+        } catch (error) {
+          invalidateUndo(boundary)
+          refreshDirectories([dest])
+          alert(`粘贴图片失败: ${error}`)
+        } finally {
+          finishFileOperation()
+        }
+      }
+    } catch (error) {
+      alert(`无法读取文件剪贴板: ${error}`)
+    }
   }
 
   // 收藏常用目录（书签）：去重
@@ -1034,7 +1248,7 @@ export default function App() {
   // ---------- 压缩（QSpace 风格「创建归档」）----------
   const runZip = async (paths, dir, o) => {
     const boundary = undoBoundary()
-    fileOperationsPending.current++
+    beginFileOperation()
     try {
       const result = await api.zipPathsWithReceipt(paths, dir, {
         name: o.name, level: o.level, password: o.password || undefined, separate: o.separate,
@@ -1049,7 +1263,7 @@ export default function App() {
       alert(String(e))
     } finally {
       refreshDirectories([dir])
-      fileOperationsPending.current--
+      finishFileOperation()
     }
   }
   // 默认文件名：单个项目 = 该项目名.zip；多个项目 = 当前文件夹名.zip
@@ -1073,7 +1287,9 @@ export default function App() {
 
   const doDuplicate = (tabId, paths) => {
     const list = paths?.length ? paths : selArr(tabId)
-    const dest = locateTab(tabId)?.path
+    const sourceParent = list.length ? parentPath(list[0]) : null
+    const dest = sourceParent && list.every(path => parentPath(path) === sourceParent)
+      ? sourceParent : workingDirectory(tabId)
     if (list.length && dest) transferInto(dest, list, 'copy', undefined, tabId)
   }
 
@@ -1081,7 +1297,7 @@ export default function App() {
   // Completion identity is supplied by the same backend mutation, never inferred from a listing.
   const createItem = async (tabId, method, args, selectAll = false) => {
     const boundary = undoBoundary()
-    fileOperationsPending.current++
+    beginFileOperation()
     try {
       const receipt = await api[method](...args)
       const item = { dest: receipt?.path, identity: receipt?.identity }
@@ -1096,19 +1312,19 @@ export default function App() {
       alert(String(e))
     } finally {
       refreshDirectories([args[0]])
-      fileOperationsPending.current--
+      finishFileOperation()
     }
   }
-  const newFolder = tabId => {
-    const dest = locateTab(tabId)?.path
+  const newFolder = (tabId, directory) => {
+    const dest = directory || workingDirectory(tabId)
     if (dest) createItem(tabId, 'makeDirWithReceipt', [dest], true)
   }
-  const newFile = (tabId, kind) => {
-    const dest = locateTab(tabId)?.path
+  const newFile = (tabId, kind, directory) => {
+    const dest = directory || workingDirectory(tabId)
     if (dest) createItem(tabId, 'createFileWithReceipt', [dest, kind])
   }
-  const newFromTemplate = (tabId, template) => {
-    const dest = locateTab(tabId)?.path
+  const newFromTemplate = (tabId, template, directory) => {
+    const dest = directory || workingDirectory(tabId)
     if (dest && template?.path) createItem(tabId, 'copyTemplateWithReceipt', [dest, template.path])
   }
 
@@ -1133,7 +1349,7 @@ export default function App() {
 
   const renameItems = async items => {
     const boundary = undoBoundary(), completed = [], errors = []
-    fileOperationsPending.current++
+    beginFileOperation()
     try {
       for (const item of items) {
         if (item.newName === basename(item.path)) continue
@@ -1151,7 +1367,7 @@ export default function App() {
       return errors
     } finally {
       refreshDirectories(items.map(item => parentPath(item.path)))
-      fileOperationsPending.current--
+      finishFileOperation()
     }
   }
   const commitRename = () => {
@@ -1196,8 +1412,8 @@ export default function App() {
       { label: '打开', shortcut: '⌘↓', action: () => openEntry(tabId, entry) },
       ...paneOpenItems,
       paneOpenItems.length ? { sep: true } : null,
-      { label: '拷贝', shortcut: '⌘C', action: () => doCopyCut(tabId, 'copy') },
-      { label: '剪切', shortcut: '⌘X', action: () => doCopyCut(tabId, 'move') },
+      { label: '拷贝', shortcut: '⌘C', action: () => doCopyCut(tabId, 'copy', paths) },
+      { label: '剪切', shortcut: '⌘X', action: () => doCopyCut(tabId, 'move', paths) },
       { sep: true },
       {
         label: paths.length > 1 ? `重新命名 ${paths.length} 个项目…` : '重新命名',
@@ -1253,6 +1469,28 @@ export default function App() {
       return { ...c, viewSettings: store }
     })
   }
+  const setViewMode = mode => {
+    const tab = activeTabOf(focusIdx)
+    if (tab) {
+      const key = keyFor(tab.path)
+      if (viewForPath(cfg.viewSettings, key).mode !== mode) {
+        const affected = cfg.panes.flatMap(pane => pane.tabs).filter(item => keyFor(item.path) === key)
+        for (const item of affected) delete columnDirectories.current[item.id]
+        setSel(previous => {
+          let changed = false
+          const next = { ...previous }
+          for (const item of affected) {
+            const old = previous[item.id]
+            if (!old) continue
+            const visible = new Set([...old].filter(path => parentPath(path) === item.path))
+            if (visible.size !== old.size) { next[item.id] = visible; changed = true }
+          }
+          return changed ? next : previous
+        })
+      }
+      commitFolderView(tab.path, { mode })
+    }
+  }
   const folderOverridden = (path) => {
     const lex = canonicalPathKey(path)
     if (!lex || !cfg?.viewSettings) return false
@@ -1296,28 +1534,28 @@ export default function App() {
     })
   }
 
-  const newFileItems = (tabId, list) => {
+  const newFileItems = (tabId, list, directory) => {
     const items = [
-      { label: '文本文件', action: () => newFile(tabId, 'text') },
-      { label: 'Markdown', action: () => newFile(tabId, 'markdown') },
+      { label: '文本文件', action: () => newFile(tabId, 'text', directory) },
+      { label: 'Markdown', action: () => newFile(tabId, 'markdown', directory) },
     ]
     if (list?.length) {
       items.push({ sep: true })
-      for (const t of list) items.push({ label: t.name, action: () => newFromTemplate(tabId, t) })
+      for (const t of list) items.push({ label: t.name, action: () => newFromTemplate(tabId, t, directory) })
     }
     return items
   }
 
-  const blankItems = (tabId, list) => {
-    const path = locateTab(tabId)?.path
+  const blankItems = (tabId, list, directory) => {
+    const path = directory || workingDirectory(tabId)
     return [
-      { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId) },
-      { label: '新建', children: newFileItems(tabId, list) },
+      { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId, path) },
+      { label: '新建', children: newFileItems(tabId, list, path) },
       {
         label: '将当前文件夹添加到书签',
         action: () => addFavorite(path),
       },
-      { label: '粘贴项目', shortcut: '⌘V', disabled: !clip, action: () => doPaste(tabId) },
+      { label: '粘贴项目', shortcut: '⌘V', action: () => doPaste(tabId, path) },
       { sep: true },
       {
         label: cfg.showHidden ? '隐藏隐藏文件' : '显示隐藏文件',
@@ -1331,16 +1569,16 @@ export default function App() {
     ]
   }
 
-  const blankMenu = (tabId, x, y) => {
-    setMenu({ kind: 'blank', tabId, x, y, items: blankItems(tabId, templates) })
+  const blankMenu = (tabId, x, y, directory) => {
+    setMenu({ kind: 'blank', tabId, directory, x, y, items: blankItems(tabId, templates, directory) })
     api
       .listTemplates()
       .then((list) => {
         if (!Array.isArray(list)) return
         setTemplates(list)
         setMenu((m) => {
-          if (!m || m.kind !== 'blank' || m.tabId !== tabId) return m
-          return { ...m, items: blankItems(tabId, list) }
+          if (!m || m.kind !== 'blank' || m.tabId !== tabId || m.directory !== directory) return m
+          return { ...m, items: blankItems(tabId, list, directory) }
         })
       })
       .catch(() => {})
@@ -1396,14 +1634,94 @@ export default function App() {
 
   // ---------- 全局快捷键 ----------
   const keyRef = useRef(null)
+  const menuCommandRef = useRef(null)
   const textEditing = useRef(null)
   useEffect(() => {
-    if (!hasTauri) return
-    const registration = listen('bento-edit-undo', () => keyRef.current?.({
-      metaKey: true, key: 'z', preventDefault() {},
-    }))
-    return () => { registration.then(unlisten => unlisten()).catch(() => {}) }
+    const update = () => setMenuFocusRevision(revision => revision + 1)
+    window.addEventListener('focusin', update)
+    window.addEventListener('focusout', update)
+    return () => { window.removeEventListener('focusin', update); window.removeEventListener('focusout', update) }
   }, [])
+  useEffect(() => {
+    if (!hasTauri) return
+    const registrations = [
+      listen('bento-edit-undo', () => menuCommandRef.current?.('edit-undo')),
+      listen('bento-menu-command', event => menuCommandRef.current?.(event.payload)),
+    ]
+    return () => { registrations.forEach(registration => registration.then(unlisten => unlisten()).catch(() => {})) }
+  }, [])
+  menuCommandRef.current = id => {
+    if (!cfg || typeof id !== 'string') return
+    const blocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen || renaming
+    const editing = isTextEditingElement(document.activeElement)
+    const tab = activeTabOf(focusIdx)
+    if (id === 'app-settings') {
+      setMenu(null); setLayoutPickerOpen(false); setSettingsOpen(true)
+      return
+    }
+    if (!tab) return
+    const tid = tab.id
+    if (id.startsWith('edit-')) {
+      const kind = id.slice(5)
+      if (editing) {
+        const key = { undo: 'z', copy: 'c', cut: 'x', paste: 'v', 'select-all': 'a' }[kind]
+        if (key) textEditing.current?.handleKeyDown({ metaKey: true, key, preventDefault() {} })
+        return
+      }
+      if (blocked) return
+      if (kind === 'undo') undoLast()
+      else if (kind === 'copy') doCopyCut(tid, 'copy')
+      else if (kind === 'cut') doCopyCut(tid, 'move')
+      else if (kind === 'paste') doPaste(tid)
+      else if (kind === 'select-all') onSelect(tid, new Set((rowsCache.current[tid] || []).map(row => row.path)))
+      return
+    }
+    if (blocked) return
+    if (editing && (id.startsWith('file-') || id.startsWith('view-'))) return
+    switch (id) {
+      case 'file-new-tab': newTab(focusIdx); break
+      case 'file-close-tab': closeTabOf(tid); break
+      case 'file-new-folder': newFolder(tid); break
+      case 'file-rename': {
+        const paths = selArr(tid)
+        if (paths.length > 1) openBatchRename(tid, paths)
+        else if (paths.length === 1) startRename(tid, paths[0], basename(paths[0]))
+        break
+      }
+      case 'file-duplicate': doDuplicate(tid); break
+      case 'file-trash': doTrash(tid); break
+      case 'view-icons': setViewMode('icons'); break
+      case 'view-list': setViewMode('list'); break
+      case 'view-columns': setViewMode('columns'); break
+      case 'view-refresh': refreshTab(tid); break
+      case 'view-show-hidden': setCfg(c => ({ ...c, showHidden: !c.showHidden })); break
+      case 'view-layout-one': setLayout('1'); break
+      case 'view-layout-two': setLayout('2c'); break
+      case 'view-layout-four': setLayout('4'); break
+      case 'go-back': navBack(tid); break
+      case 'go-forward': navForward(tid); break
+      case 'go-parent': navParent(tid); break
+      case 'go-home': nav(tid, home); break
+      case 'go-downloads': nav(tid, `${home}/Downloads`); break
+      case 'go-address': setPathEditTick(t => t + 1); break
+      case 'help-project': api.openPath('https://github.com/banduoba/bento').catch(error => alert(String(error))); break
+      case 'help-downloads': api.openPath('https://github.com/banduoba/bento/releases').catch(error => alert(String(error))); break
+      default: break
+    }
+  }
+  useEffect(() => {
+    if (!hasTauri || !cfg) return
+    const tab = activeTabOf(focusIdx)
+    if (!tab) return
+    invoke('sync_menu_state', {
+      mode: viewForPath(cfg.viewSettings, keyFor(tab.path)).mode,
+      showHidden: !!cfg.showHidden,
+      hasSelection: !!sel[tab.id]?.size,
+      canBack: tab.hi > 0,
+      canForward: tab.hi < (tab.history?.length || 0) - 1,
+      canUndo: isTextEditingElement(document.activeElement) || (undoStackRef.current.length > 0 && !fileOperationsPending.current && !undoStackRef.current.some(item => item.busy)),
+    }).catch(() => {})
+  }, [cfg, focusIdx, sel, keyEpoch, undoRevision, menuFocusRevision])
   keyRef.current = (e) => {
     // ⌘,：输入框聚焦时也可打开设置
     if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key === ',') {
@@ -1489,11 +1807,12 @@ export default function App() {
       e.preventDefault()
       if (e.repeat || visibleCount < 2) return
       const destIdx = otherPaneIndex(focusIdx, visibleCount, focusTrail.current.other)
-      const dest = destIdx >= 0 ? activeTabOf(destIdx)?.path : null
+      const destTab = destIdx >= 0 ? activeTabOf(destIdx) : null
+      const dest = destTab ? workingDirectory(destTab.id) : null
       const moving = orderedPaths(tid)
       if (!dest || !moving.length) return
       triggerFlash(destIdx)
-      if (paneAction === 'moveToOther') moveInto(dest, moving)
+      if (paneAction === 'moveToOther') moveInto(dest, moving, destTab.id)
       else transferInto(dest, moving, 'copy', undefined, activeTabOf(destIdx)?.id)
       return
     }
@@ -1511,7 +1830,7 @@ export default function App() {
         return
       }
       if (listAction === 'parent') {
-        nav(tid, parentPath(tab.path))
+        navParent(tid)
         return
       }
       if (listAction === 'rename') {
@@ -1598,9 +1917,9 @@ export default function App() {
     }
     if (meta && e.key === '[') { e.preventDefault(); navBack(tid); return }
     if (meta && e.key === ']') { e.preventDefault(); navForward(tid); return }
-    if (meta && (e.key === '1' || e.key === '2' || e.key === '4')) {
+    if (meta && !listBlocked && !renaming && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === '1' || e.key === '2' || e.key === '3')) {
       e.preventDefault()
-      setLayout({ 1: '1', 2: '2c', 4: '4' }[e.key])
+      setViewMode({ 1: 'icons', 2: 'list', 3: 'columns' }[e.key])
       return
     }
     if (meta && e.key === 'o') {
@@ -1616,7 +1935,7 @@ export default function App() {
       switchTab(focusIdx, (pane.active + (e.shiftKey ? n - 1 : 1)) % n)
       return
     }
-    if (e.key === 'Backspace') { e.preventDefault(); nav(tid, parentPath(tab.path)); return }
+    if (e.key === 'Backspace') { e.preventDefault(); navParent(tid); return }
     if (e.key === 'Escape') {
       clearCut()
       onSelect(tid, new Set())
@@ -1765,6 +2084,7 @@ export default function App() {
               index={i}
               area={AREA_LETTERS[i]}
               pane={p}
+              viewMode={viewForPath(cfg.viewSettings, keyFor(p.tabs[p.active]?.path)).mode}
               home={home}
               cfg={cfg}
               focused={i === focusIdx}
@@ -1786,6 +2106,7 @@ export default function App() {
               flash={i === flashPane}
               reveal={revealReq && revealReq.tabId === p.tabs[p.active]?.id ? revealReq : null}
               onRevealDone={() => {
+                if (revealReqRef.current?.nonce !== revealReq?.nonce) return
                 // 虚拟行先由 Pane 挂载，再从原滚动位置按 nearest 对齐。
                 if (revealReq?.scrollTop != null) {
                   const scrollTop = revealReq.scrollTop
@@ -1798,12 +2119,14 @@ export default function App() {
                     }
                   })
                 }
-                setRevealReq(null)
+                setRevealReq(current => current?.nonce === revealReq?.nonce ? null : current)
               }}
               onFocus={setFocused}
               onNav={nav}
               onBack={navBack}
               onForward={navForward}
+              onParent={navParent}
+              columnNavigate={columnNavigate[p.tabs[p.active]?.id] || null}
               onOpen={openEntry}
               onSelect={onSelect}
               onMenu={fileMenu}
@@ -1813,7 +2136,10 @@ export default function App() {
               onCloseTab={closeTabOf}
               onSwitchTab={switchTab}
               onDropTransfer={(dest, paths, mode, onSuccess) => transferInto(dest, paths, mode, onSuccess, p.tabs[p.active]?.id)}
-              onFilter={(tid, v) => setFilters((f) => ({ ...f, [tid]: v }))}
+              onFilter={(tid, v) => {
+                setRevealReq(request => request?.tabId === tid && request.selectionPaths ? null : request)
+                setFilters((f) => ({ ...f, [tid]: v }))
+              }}
               onSort={(tid, key, dir) => {
                 const path = locateTab(tid)?.path
                 if (path) commitFolderView(path, { sort: { key, dir } })
@@ -1838,6 +2164,17 @@ export default function App() {
               }
               onRowsCache={(tid, rows) => {
                 rowsCache.current[tid] = rows
+              }}
+              onActiveDirectory={(tid, root, directory) => {
+                const current = cfgRef.current
+                const tab = current?.panes.flatMap(pane => pane.tabs).find(tab => tab.id === tid)
+                const before = workingDirectory(tid)
+                if (!directory) {
+                  if (columnDirectories.current[tid]?.root === root) delete columnDirectories.current[tid]
+                } else if (tab?.path === root && viewForPath(current.viewSettings, keyFor(root)).mode === 'columns') {
+                  columnDirectories.current[tid] = { root, directory }
+                }
+                if (workingDirectory(tid) !== before) locationChanged(tid)
               }}
               onRenameChange={(v) => setRenaming((r) => (r ? { ...r, value: v } : r))}
               onRenameCommit={commitRename}

@@ -49,6 +49,9 @@ export const api = hasTauri
       copyTemplateWithReceipt: (dir, template) => invoke('copy_template_with_receipt', { dir, template }),
       copyTemplate: async (dir, template) => (await invoke('copy_template_with_receipt', { dir, template })).path,
       copyFilesToClipboard: (paths) => invoke('copy_files_to_clipboard', { paths }),
+      readFileClipboard: () => invoke('read_file_clipboard'),
+      pasteImageFromClipboard: (dest, expectedChangeCount) =>
+        invoke('paste_image_from_clipboard', { dest, expectedChangeCount }),
       readTextPreview: (path, query, maxBytes) =>
         invoke('read_text_preview', { path, query, maxBytes: maxBytes || 262144 }),
       openPrivacySettings: () => invoke('open_privacy_settings'),
@@ -474,7 +477,9 @@ function mockApi() {
       }
       return Promise.resolve({ kind: 'text', text: lines.join('\n'), truncated: false, matchLines: [3, 10, 17, 24] })
     },
-    copyFilesToClipboard: () => Promise.resolve(),
+    copyFilesToClipboard: (paths) => Promise.resolve({ ok: true, changeCount: 1, ownerToken: 'demo', paths }),
+    readFileClipboard: () => Promise.resolve({ changeCount: 0, paths: [] }),
+    pasteImageFromClipboard: () => Promise.resolve(null),
     openPath: () => Promise.resolve(),
     reveal: () => Promise.resolve(),
     openTerminal: () => Promise.resolve(),

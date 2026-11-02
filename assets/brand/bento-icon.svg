@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Bento app icon</title>
+  <rect x="40" y="40" width="944" height="944" rx="214" fill="#F4F0E7"/>
+  <rect x="149" y="149" width="726" height="726" rx="144" fill="#292722"/>
+  <rect x="190" y="190" width="310" height="310" rx="52" fill="#D65D3B"/>
+  <rect x="524" y="190" width="310" height="310" rx="52" fill="#F0E8D9"/>
+  <rect x="190" y="524" width="310" height="310" rx="52" fill="#F0E8D9"/>
+  <rect x="524" y="524" width="310" height="310" rx="52" fill="#E7DDCC"/>
+</svg>

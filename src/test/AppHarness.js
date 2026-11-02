@@ -13,7 +13,7 @@ const bundle = await build({ entryPoints: [fileURLToPath(new URL('../App.jsx', i
   b.onResolve({filter:/(?:^|\/)components\/(Pane|Sidebar)$/},({path})=>({path:path.split('/').pop(),namespace:'test'}))
   b.onResolve({filter:/^@tauri-apps\//},({path})=>({path,namespace:'test'}))
   b.onLoad({filter:/.*/,namespace:'test'},({path})=>({loader:'js',contents:path==='api'
-    ? `export const hasTauri=true; export const fileSrc=x=>x; export const api=new Proxy({}, {get:(_,k)=>(...a)=>globalThis.${bridgeKey}.api[k](...a)})`
+    ? `export const hasTauri=true; export const fileSrc=x=>x; export const api=new Proxy({}, {get:(_,k)=>(...a)=>{const f=globalThis.${bridgeKey}.api[k];if(typeof f!=='function')throw Error('Missing test API: '+String(k));return f(...a)}})`
     : path==='Pane'||path==='Sidebar'
       ? `import React from 'react'; export default function ${path}(props){return React.createElement('${path.toLowerCase()}-boundary',props)}`
       : path.endsWith('/app') ? `export const getVersion=async()=>"0.2.1"`
@@ -41,11 +41,12 @@ export async function mountApp(t, overrides={}, textClipboard={}) {
   const dialogs=[],alerts=[]
   globalThis.alert=message=>alerts.push(message)
   let discard=false
-  const events=new Map(), writes={session:[],config:[],views:[]}, replies=[]
-  let closeHandler, closes=0, destroyed=0
-  const win={setAlwaysOnTop:async()=>{},setTitle:async()=>{},onDragDropEvent:async()=>()=>{},onMoved:async()=>()=>{},onResized:async()=>()=>{},onCloseRequested:async f=>{closeHandler=f;return()=>{closeHandler=null}},close:async()=>{closes++},destroy:async()=>{closes++;destroyed++}}
-  const api={fsearchStatus:async()=>({ready:true}),diskSpace:async()=>1000,homeDir:async()=>'/home',loadConfig:async()=>null,loadViewSettings:async()=>null,loadSession:async()=>null,listTemplates:async()=>[],resolvePath:async p=>p,saveConfig:async v=>writes.config.push(v),saveViewSettings:async v=>writes.views.push(v),saveSession:async v=>writes.session.push(v),sessionExitReply:async(id,allow)=>replies.push([id,allow]),...overrides}
-  globalThis[bridgeKey]={api,win,textClipboard:{readText:async()=>"",writeText:async()=>{},...textClipboard},listen:async(name,fn)=>{events.set(name,fn);return()=>events.delete(name)},invoke:async(cmd,args)=>{if(cmd==='session_exit_reply')replies.push([args.requestId,args.allowExit])},confirm:async(...args)=>{dialogs.push(args);return discard}}
+  const events=new Map(), writes={session:[],config:[],views:[]}, replies=[], invocations=[]
+  let fileClipboard={changeCount:0,paths:[],ownerToken:null}
+  let closeHandler, dropHandler, closes=0, destroyed=0
+  const win={setAlwaysOnTop:async()=>{},setTitle:async()=>{},onDragDropEvent:async f=>{dropHandler=f;return()=>{dropHandler=null}},onMoved:async()=>()=>{},onResized:async()=>()=>{},onCloseRequested:async f=>{closeHandler=f;return()=>{closeHandler=null}},close:async()=>{closes++},destroy:async()=>{closes++;destroyed++}}
+  const api={fsearchStatus:async()=>({ready:true}),diskSpace:async()=>1000,homeDir:async()=>'/home',loadConfig:async()=>null,loadViewSettings:async()=>null,loadSession:async()=>null,listTemplates:async()=>[],resolvePath:async p=>p,readFileClipboard:async()=>fileClipboard,copyFilesToClipboard:async paths=>{fileClipboard={changeCount:fileClipboard.changeCount+1,paths:[...paths],ownerToken:`test-${fileClipboard.changeCount+1}`};return{ok:true,...fileClipboard}},pasteImageFromClipboard:async()=>null,saveConfig:async v=>writes.config.push(v),saveViewSettings:async v=>writes.views.push(v),saveSession:async v=>writes.session.push(v),sessionExitReply:async(id,allow)=>replies.push([id,allow]),...overrides}
+  globalThis[bridgeKey]={api,win,textClipboard:{readText:async()=>"",writeText:async()=>{},...textClipboard},listen:async(name,fn)=>{events.set(name,fn);return()=>events.delete(name)},invoke:async(cmd,args)=>{invocations.push([cmd,args]);if(cmd==='session_exit_reply')replies.push([args.requestId,args.allowExit])},confirm:async(...args)=>{dialogs.push(args);return discard}}
   mod.exports.clipboard.setClip(null)
   let renderer
   const error=console.error
@@ -54,7 +55,7 @@ export async function mountApp(t, overrides={}, textClipboard={}) {
   let unmounted=false
   const unmount=async()=>{if(!unmounted){unmounted=true;await act(async()=>renderer.unmount())}}
   t.after(async()=>{await unmount();mod.exports.clipboard.setClip(null);if(storageDescriptor)Object.defineProperty(globalThis,'localStorage',storageDescriptor);else delete globalThis.localStorage;for(const [k,v]of Object.entries(previous)){if(v===undefined)delete globalThis[k];else globalThis[k]=v}})
-  return {unmount,clipboard:mod.exports.clipboard,alerts,writes,replies,events,api,dialogs,setDiscard(value){discard=value},get closes(){return closes},get destroyed(){return destroyed},get root(){return renderer.root},get panes(){return renderer.root.findAllByType('pane-boundary')},get sidebar(){return renderer.root.findByType('sidebar-boundary')},async run(fn){await act(async()=>{await fn()})},close(){let prevented=false;const pending=closeHandler?.({preventDefault(){prevented=true}});return{pending,prevented}},exit(id){return events.get('bento-session-exit-requested')?.({payload:{requestId:id}})}}
+  return {unmount,clipboard:mod.exports.clipboard,alerts,writes,replies,events,api,dialogs,invocations,setDiscard(value){discard=value},get closes(){return closes},get destroyed(){return destroyed},get root(){return renderer.root},get panes(){return renderer.root.findAllByType('pane-boundary')},get sidebar(){return renderer.root.findByType('sidebar-boundary')},async run(fn){await act(async()=>{await fn()})},drop(payload){return dropHandler?.({payload})},close(){let prevented=false;const pending=closeHandler?.({preventDefault(){prevented=true}});return{pending,prevented}},exit(id){return events.get('bento-session-exit-requested')?.({payload:{requestId:id}})}}
 }
 
 export async function key(h, key, extra={}) {

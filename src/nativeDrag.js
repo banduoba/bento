@@ -10,7 +10,14 @@ export const trace = (m) =>
     : Promise.resolve()
 
 // 本应用发起的原生拖拽进行中（drop 事件据此区分「内部移动」与「外部来源只复制」）
-export const dragState = { internal: false }
+export const dragState = { internal: false, paths: [], token: 0 }
+
+// The native end callback can precede our drop event. Match the actual files
+// during that grace period so a separate external drop is never treated as a move.
+export const isInternalDrag = (paths) => dragState.internal
+  && Array.isArray(paths)
+  && paths.length === dragState.paths.length
+  && paths.every((path) => dragState.paths.includes(path))
 
 const loadImage = (src) => {
   const img = new Image()
@@ -48,7 +55,9 @@ export const fallbackPreview = (isDir) => (isDir ? singleDragPreview : singleFil
  * 全程 trace：invoke → started → ended(result, cursor) / ERROR。
  */
 export async function runNativeDrag(paths, icon, onEnd) {
+  const token = ++dragState.token
   dragState.internal = true
+  dragState.paths = [...paths]
   let ended = false
   const end = () => {
     if (ended) return
@@ -56,7 +65,10 @@ export async function runNativeDrag(paths, icon, onEnd) {
     // 原生「会话结束」回调先于窗口自己的 drop 事件到达（实测 ended → drop 相差 <5ms），
     // 立即清除会让 drop 误判成外部来源；保留一小段宽限期
     setTimeout(() => {
-      dragState.internal = false
+      if (dragState.token === token) {
+        dragState.internal = false
+        dragState.paths = []
+      }
     }, 1500)
     onEnd?.()
   }

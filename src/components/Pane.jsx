@@ -13,6 +13,7 @@ import { COL_MIN, COL_MAX, DEFAULT_COLS, applyColVars, fitColumns, normalizeCols
 import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
 import FileIcon from './FileIcon'
 import InlineRename from './InlineRename'
+import { ColumnView, IconView } from './ViewSurfaces'
 
 const MIME = 'application/x-bento'
 
@@ -34,6 +35,7 @@ export default function Pane({
   index,
   area,
   pane,
+  viewMode = 'list',
   home,
   cfg,
   focused,
@@ -52,6 +54,8 @@ export default function Pane({
   onNav,
   onBack,
   onForward,
+  onParent,
+  columnNavigate,
   onOpen,
   onSelect,
   onMenu,
@@ -67,6 +71,7 @@ export default function Pane({
   onColMenu,
   onStats,
   onRowsCache,
+  onActiveDirectory,
   onRenameChange,
   onRenameCommit,
   onRenameCancel,
@@ -176,13 +181,19 @@ export default function Pane({
   }, [])
 
   const beginRowDrag = (e, entry) => {
-    if (rowDragRef.current?.started) return
+    // A physical press starts a new gesture even if an older native session
+    // has not delivered its ended callback yet.
+    rowSuppressRef.current = false
     const paths = selection?.has(entry.path) && selection.size > 1 ? [...selection] : [entry.path]
     const preview = makeDragPreview(paths.length, entry.is_dir).catch((err) => {
       trace(`makeDragPreview failed: ${err?.message || err}`)
       return fallbackPreview(entry.is_dir)
     })
     rowDragRef.current = { x: e.clientX, y: e.clientY, paths, preview, started: false }
+    if (!e.metaKey && !e.ctrlKey && !e.shiftKey && !selection?.has(entry.path)) {
+      setClickFocus(entry.path)
+      onSelect(tab.id, new Set([entry.path]))
+    }
   }
 
   // ---------- 列：宽度可拖动、可勾选显示、窗格太窄自动隐藏次要列（松手后按当前文件夹记住） ----------
@@ -508,6 +519,7 @@ export default function Pane({
   const rows = useMemo(() => {
     const base = entries || []
     const match = makeMatcher(filter)
+    if (viewMode !== 'list') return sortEntries(match ? base.filter(e => match(e.name)) : base, tab.sortKey, tab.sortDir)
     // 筛选时使用平铺列表
     if (match) return sortEntries(base.filter((e) => match(e.name)), tab.sortKey, tab.sortDir)
     // 树形展开：已展开文件夹的子条目就地插入
@@ -528,19 +540,22 @@ export default function Pane({
       return out
     }
     return build(base, 0)
-  }, [entries, filter, tab.sortKey, tab.sortDir, expandedDirs, kidsVersion, activity])
+  }, [entries, filter, tab.sortKey, tab.sortDir, expandedDirs, kidsVersion, activity, viewMode])
   rowsRef.current = rows
 
+  const [columnRows, setColumnRows] = useState([])
+  const [columnDirectory, setColumnDirectory] = useState(null)
+  const effectiveRows = viewMode === 'columns' ? columnRows : rows
   const entryMap = useMemo(() => {
     const m = {}
-    for (const r of rows) m[r.path] = r
+    for (const r of effectiveRows) m[r.path] = r
     return m
-  }, [rows])
+  }, [effectiveRows])
 
   // 注册当前行数据到 App（供 ⌘A 全选 / ⌘↓ 打开 / 回车按设置打开或重命名）
   useEffect(() => {
-    onRowsCache(tab.id, rows.filter((r) => !r.isPseudo))
-  }, [rows, tab.id])
+    if (viewMode !== 'columns') onRowsCache(tab.id, rows.filter((r) => !r.isPseudo))
+  }, [rows, tab.id, viewMode])
 
   // 目录活动时间：后台递归计算（限预算），完成后按活动时间重排。
   // 分批加载时 entries 会连着变，等这轮扫完再算，避免每一批都打一次 IPC。
@@ -574,16 +589,16 @@ export default function Pane({
 
   // 搜索定位：行就绪后选中目标并滚动到可见处
   useEffect(() => {
-    if (!reveal || entries === null) return
+    if (viewMode !== 'list' || !reveal || entries === null) return
     const idx = rows.findIndex((r) => r.path === reveal.path)
     if (idx === -1) return
-    onSelect(tab.id, new Set([reveal.path]))
+    if (!reveal.selectionPaths) onSelect(tab.id, new Set([reveal.path]))
     try {
       virt.scrollToIndex(idx, { align: 'center' })
     } catch {}
     onRevealDone()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reveal, rows])
+  }, [reveal, rows, viewMode])
 
   // 向上汇报统计
   useEffect(() => {
@@ -593,7 +608,7 @@ export default function Pane({
       if (e && !e.is_dir) selSize += e.size
     }
     onStats(tab.id, {
-      count: entries?.length ?? 0,
+      count: viewMode === 'columns' ? effectiveRows.length : entries?.length ?? 0,
       total: loadProgress?.total ?? null,
       listing: loadProgress != null,
       listingLive: !!loadProgress?.live,
@@ -601,12 +616,18 @@ export default function Pane({
       selCount: selection?.size || 0,
       selSize,
     })
-  }, [entryMap, selection, entries, loadProgress, error])
+  }, [entryMap, selection, entries, loadProgress, error, effectiveRows, viewMode])
 
 
 
   // 切换目录/标签或隐藏规则时作废子目录请求，避免旧响应写入新视图。
+  const previousVisibility = useRef({ tabId: tab.id, path: tab.path, showHidden: cfg.showHidden })
   useLayoutEffect(() => {
+    const before = previousVisibility.current
+    if (viewMode === 'columns' && before.tabId === tab.id && before.path === tab.path && before.showHidden !== cfg.showHidden) {
+      onSelect?.(tab.id, new Set())
+    }
+    previousVisibility.current = { tabId: tab.id, path: tab.path, showHidden: cfg.showHidden }
     setExpandedDirs(new Set())
     kidsRef.current = {}
     kidsLoadsRef.current = {}
@@ -635,6 +656,17 @@ export default function Pane({
         setKidsVersion((v) => v + 1)
       }
     })
+  }
+  const onColumnTrailChange = paths => {
+    const keep = new Set(paths)
+    for (const path of Object.keys(kidsRef.current)) {
+      if (!keep.has(path)) {
+        delete kidsRef.current[path]
+        delete kidsLoadsRef.current[path]
+      }
+    }
+    setExpandedDirs(current => current.size === keep.size && [...current].every(path => keep.has(path)) ? current : keep)
+    for (const path of paths) if (kidsRef.current[path] === undefined) loadKids(path)
   }
   const reloadKids = (only) => {
     const paths = Object.keys(kidsRef.current).filter((p) => {
@@ -1037,7 +1069,7 @@ export default function Pane({
 
   // 重命名输入框聚焦并选中主名（不含扩展名）。新建的文件可能排在视口外，先滚进虚拟列表再等输入框挂上。
   useEffect(() => {
-    if (!renaming?.path || renaming.tabId !== tab.id) return
+    if (viewMode !== 'list' || !renaming?.path || renaming.tabId !== tab.id) return
     const idx = rows.findIndex((r) => r.path === renaming.path)
     let cancelled = false
     let frames = 0
@@ -1072,7 +1104,7 @@ export default function Pane({
       cancelAnimationFrame(raf)
     }
     // entries 变化（新建后刷新）时再试一次；不要把 virt 放进依赖，避免输入过程中反复抢焦点
-  }, [renaming?.path, renaming?.tabId, renaming?.selectAll, entries])
+  }, [renaming?.path, renaming?.tabId, renaming?.selectAll, entries, viewMode])
 
   const rowClick = (e, entry, idx) => {
     if (entry.isPseudo) return
@@ -1160,6 +1192,23 @@ export default function Pane({
     ? clickFocus
     : rows.find((r) => !r.isPseudo && selection?.has(r.path))?.path
 
+  const surfaceProps = {
+    index, rows, tabId: tab.id, path: tab.path, showHidden: cfg.showHidden,
+    loading: entries === null, rootSettled: entries !== null && loadProgress == null, emptyText: filter ? '没有匹配的项目' : '文件夹为空',
+    scrollRef, innerRef, paneWidth: paneW, selection, cutSet, focused,
+    renaming: renamingHere, renameRef, onRenameChange, onRenameCommit, onRenameCancel,
+    onSelect, onFocus, onOpen, onMenu, onDropTransfer,
+    onDragStart: (event, entry) => { scrollRef.current?.focus?.({ preventScroll: true }); beginRowDrag(event, entry) },
+    onRowsCache: (tid, visibleRows) => { onRowsCache(tid, visibleRows); setColumnRows(visibleRows) },
+    onActiveDirectory: (tid, root, directory) => {
+      setColumnDirectory(current => current === directory ? current : directory)
+      onActiveDirectory?.(tid, root, directory)
+    },
+    onColumnTrailChange, columnNavigate, sortKey: tab.sortKey, sortDir: tab.sortDir,
+    childrenForPath: path => kidsRef.current[path], kidsVersion,
+    reveal, onRevealDone, sortEntries: list => sortEntries(list, tab.sortKey, tab.sortDir),
+  }
+
   return (
     <section
       ref={paneElRef}
@@ -1170,7 +1219,7 @@ export default function Pane({
       onMouseDown={() => onFocus(index)}
       onContextMenu={(e) => {
         e.preventDefault()
-        onBlankMenu(tab.id, e.clientX, e.clientY)
+        onBlankMenu(tab.id, e.clientX, e.clientY, e.target?.closest?.('[data-column-path]')?.dataset.columnPath)
       }}
       onDragOver={(e) => {
         if (internalDrag(e)) {
@@ -1178,7 +1227,7 @@ export default function Pane({
           e.dataTransfer.dropEffect = e.altKey ? 'copy' : 'move'
         }
       }}
-      onDrop={(e) => handleDrop(e, tab.path)}
+      onDrop={(e) => handleDrop(e, e.target?.closest?.('[data-column-path]')?.dataset.columnPath || tab.path)}
     >
       <div className="tabbar">
         {pane.tabs.map((t, k) => (
@@ -1231,7 +1280,7 @@ export default function Pane({
           <button title="前进 (⌘])" disabled={tab.hi >= tab.history.length - 1} onClick={() => onForward(tab.id)}>
             <IconChevronRight size={15} />
           </button>
-          <button title="上级目录 (⌘↑)" disabled={!parentPath(tab.path)} onClick={() => onNav(tab.id, parentPath(tab.path))}>
+          <button title="上级目录 (⌘↑)" disabled={!parentPath(viewMode === 'columns' ? columnDirectory || tab.path : tab.path)} onClick={() => onParent ? onParent(tab.id) : onNav(tab.id, parentPath(tab.path))}>
             <IconArrowUp size={15} />
           </button>
           <button title="刷新 (⌘R)" onClick={() => onNav(tab.id, tab.path, true)}>
@@ -1383,7 +1432,7 @@ export default function Pane({
         </div>
       </div>
 
-      <div className="cols" onContextMenu={(e) => {
+      {viewMode === 'list' && <div className="cols" onContextMenu={(e) => {
         // 右键表头：勾选要显示的列（不要冒泡成窗格空白菜单）
         e.preventDefault()
         e.stopPropagation()
@@ -1423,7 +1472,7 @@ export default function Pane({
               )
             })}
         </div>
-      </div>
+      </div>}
 
       {error && (
         <div className="error" role="alert">
@@ -1438,7 +1487,7 @@ export default function Pane({
           <button onClick={() => onNav(tab.id, tab.path, true)}>重试</button>
         </div>
       )}
-      <div
+      {viewMode === 'icons' ? <IconView key={`${tab.id}:${tab.path}`} {...surfaceProps} /> : viewMode === 'columns' ? <ColumnView key={`${tab.id}:${tab.path}`} {...surfaceProps} /> : <div
         className="rows"
         ref={scrollRef}
         tabIndex={0}
@@ -1569,7 +1618,7 @@ export default function Pane({
             })}
           </div>
         )}
-      </div>
+      </div>}
       {moreMenu && (
         <div
           className="crumb-more-menu"

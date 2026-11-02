@@ -23,10 +23,11 @@ test('App session wins over legacy, preserves hidden panes and active workspace 
   const h=await mountApp(t,{loadSession:async()=>session,loadConfig:async()=>({showHidden:true,autoRefresh:false,panes:[pane('/legacy')]})})
   assert.equal(h.panes.length,4);assert.equal(h.panes[2].props.pane.tabs[0].path,'/盘 ')
   await h.run(()=>{const e=new Event('keydown');Object.assign(e,{metaKey:true,key:'1'});window.dispatchEvent(e)})
-  assert.equal(h.panes.length,1)
+  assert.equal(h.panes.length,4)
+  assert.equal(h.panes[2].props.viewMode,'icons')
   const {pending,prevented}=h.close();assert.equal(prevented,true);await h.run(()=>pending)
   assert.equal(h.closes,1);assert.equal(h.destroyed,1);const disk=h.writes.session.at(-1)
-  assert.equal(disk.panes.length,4);assert.equal(disk.layout,'1');assert.equal(disk.workspaces[0].panes[0].tabs[0].path,'/A')
+  assert.equal(disk.panes.length,4);assert.equal(disk.layout,'4');assert.equal(disk.workspaces[0].panes[0].tabs[0].path,'/A')
   assert.equal(disk.activeWorkspace,'one');assert.equal(h.writes.config.at(-1).showHidden,true);assert.equal('panes'in h.writes.config.at(-1),false)
 })
 test('App waits for hydration and delayed writes on app quit, never writes startup defaults',async t=>{
@@ -110,14 +111,16 @@ test('App flush waits for ordered final preference and view snapshots as well as
   assert.equal(views.at(-1).overrides['/home'].sort.key,'size')
   assert.deepEqual(h.replies,[[12,true]])
 })
-test('App rehydrates a single layout session without losing the four hidden-pane histories',async t=>{
+test('App view shortcuts retain a single layout session and hidden-pane histories',async t=>{
   const disk={...session,layout:'1',focusedIdx:0,panes:session.panes.map((p,i)=>i===3?{...p,tabs:[{path:'/D2 ',history:['/D','/D2 '],hi:1}]}:p)}
   const h=await mountApp(t,{loadSession:async()=>disk})
   assert.equal(h.panes.length,1)
-  await h.run(()=>{const e=new Event('keydown');Object.assign(e,{metaKey:true,key:'4'});window.dispatchEvent(e)})
-  assert.equal(h.panes.length,4)
-  assert.deepEqual(h.panes[3].props.pane.tabs[0].history,['/D','/D2 '])
-  assert.equal(h.panes[3].props.pane.tabs[0].path,'/D2 ')
+  await h.run(()=>{const e=new Event('keydown');Object.assign(e,{metaKey:true,key:'3'});window.dispatchEvent(e)})
+  assert.equal(h.panes.length,1)
+  assert.equal(h.panes[0].props.viewMode,'columns')
+  const close=h.close();await h.run(()=>close.pending)
+  assert.deepEqual(h.writes.session.at(-1).panes[3].tabs[0].history,['/D','/D2 '])
+  assert.equal(h.writes.session.at(-1).panes[3].tabs[0].path,'/D2 ')
 })
 test('App save failure cancels native quit visibly, then retries the newest snapshot',async t=>{
   let fail=true;const saved=[]
