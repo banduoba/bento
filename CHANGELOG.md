@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Reduced file row height to 20px and refreshed the QSpace-style path bar.
+- Reduced file row height to 21px and refreshed the QSpace-style path bar.
 
 ## 0.3.1 — 2026-11-02
 

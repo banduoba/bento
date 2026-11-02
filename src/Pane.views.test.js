@@ -207,7 +207,7 @@ test('column arrows scroll the virtual row selected beyond the visible viewport'
   const view = h.root.findByProps({ 'data-view-mode': 'columns' })
   await act(async () => view.props.onKeyDown({ key: 'ArrowDown', preventDefault() {}, stopPropagation() {} }))
   assert.deepEqual([...selected], ['/d/A/file29'])
-  assert.ok(h.scrollCalls.some(call => call.size === 20 && call.index === 29))
+  assert.ok(h.scrollCalls.some(call => call.size === 21 && call.index === 29))
 })
 
 test('HTML blank drop into a child column uses that column directory', async t => {
@@ -252,7 +252,7 @@ test('initial long column rename measurement survives passive effects', async t 
   await h.batch(h.requests[0], [entry('long name')], true)
   const before = h.virtualEvents.length
   await h.update({ renaming: { tabId: 'a', path: '/d/long name', value: 'long name' } })
-  const events = h.virtualEvents.slice(before).filter(event => event.estimate === 20)
+  const events = h.virtualEvents.slice(before).filter(event => event.estimate === 21)
   assert.ok(events.some(event => event.type === 'resize' && event.size >= 180))
   assert.equal(events.at(-1)?.type, 'resize')
 })

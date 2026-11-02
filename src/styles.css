@@ -876,9 +876,9 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .column-scroll { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; }
 .column-status { padding: 10px 12px; color: var(--text-2); font-size: 12px; }
 .column-inner { position: relative; }
-.column-position { position: absolute; left: 0; right: 0; height: 20px; }
+.column-position { position: absolute; left: 0; right: 0; height: 21px; }
 .column-position:has(.rename-input) { z-index: 2; height: auto; min-height: 25px; }
-.column-item { height: 19px; margin: 0 4px; padding: 0 9px; border-radius: 6px; display: flex; align-items: center; gap: 7px; cursor: default; font-size: 12px; }
+.column-item { height: 20px; margin: 0 4px; padding: 0 9px; border-radius: 6px; display: flex; align-items: center; gap: 7px; cursor: default; font-size: 12px; }
 .column-item:has(.rename-input) { height: auto; min-height: 25px; background: var(--pane-bg); }
 .column-item:hover { background: var(--row-hover); }
 .column-item.selected { background: var(--row-sel-focus); }
@@ -892,7 +892,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   position: absolute;
   left: 0;
   right: 0;
-  height: var(--list-row-height, 20px);
+  height: var(--list-row-height, 21px);
   cursor: default;
   isolation: isolate;
   background: transparent;

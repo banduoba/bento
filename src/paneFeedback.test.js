@@ -2,12 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import * as feedback from './paneFeedback.js'
 
-test('marquee follows visible 20px rows at top, deep and scrolled coordinates and skips pseudo rows', () => {
+test('marquee follows visible 21px rows at top, deep and scrolled coordinates and skips pseudo rows', () => {
   const rows = Array.from({ length: 25 }, (_, i) => ({ path: `/f${i}`, isPseudo: i === 21 }))
-  assert.deepEqual(feedback.marqueePaths(rows, 0, 20), ['/f0'])
-  assert.deepEqual(feedback.marqueePaths(rows, 400, 423), ['/f20'])
-  assert.deepEqual(feedback.marqueePaths(rows, 423, 449), ['/f22'])
-  assert.deepEqual(feedback.marqueePaths(rows, 499, 540), ['/f24'])
+  assert.deepEqual(feedback.marqueePaths(rows, 0, 21), ['/f0'])
+  assert.deepEqual(feedback.marqueePaths(rows, 420, 441), ['/f20'])
+  assert.deepEqual(feedback.marqueePaths(rows, 441, 483), ['/f22'])
+  assert.deepEqual(feedback.marqueePaths(rows, 504, 546), ['/f24'])
 })
 
 test('directory invalidation updates same-directory panes and affected expanded nodes only', () => {

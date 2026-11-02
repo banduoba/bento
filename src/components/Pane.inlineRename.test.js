@@ -56,8 +56,8 @@ test('one wrapped editing row shifts its virtual neighbors and restores ordinary
   assert.equal(h.nodes.get('textarea').focusCount,1)
   assert.deepEqual(h.nodes.get('textarea').selection,[0,7])
   await h.update({renaming:null})
-  assert.equal(h.rows[0].props.style.height,20)
-  assert.equal(h.rows[1].props.style.transform,'translateY(20px)')
+  assert.equal(h.rows[0].props.style.height,21)
+  assert.equal(h.rows[1].props.style.transform,'translateY(21px)')
 })
 
 test('virtual scroll keeps the active editor mounted without focus/selection churn and cleanup releases measurements',async t=>{
@@ -95,7 +95,7 @@ test('active row height follows value and viewport changes, and tab switch drops
   assert.equal(h.rows[0].props.style.height,94);assert.equal(h.nodes.get('textarea').style.overflowY,'auto')
   await h.update({pane:{tabs:[{id:'other',path:'/other',history:['/other'],hi:0,sortKey:'name',sortDir:'asc'}],active:0}})
   assert.equal(h.root.findAllByType('textarea').length,0)
-  assert.ok(h.rows.every(row=>row.props.style.height===20))
+  assert.ok(h.rows.every(row=>row.props.style.height===21))
   assert.equal([...h.observers].filter(o=>[...o.nodes].some(n=>n===h.nodes.get('row-name'))).length,0)
 })
 
@@ -109,7 +109,7 @@ test('selectAll rename selects extension too and cancel restores virtual neighbo
   await h.run(()=>h.root.findByType('textarea').props.onKeyDown(event({key:'Escape'})))
   assert.deepEqual(h.actions,['cancel'])
   await h.update({renaming:null})
-  assert.equal(h.rows[1].props.style.transform,'translateY(20px)')
+  assert.equal(h.rows[1].props.style.transform,'translateY(21px)')
 })
 
 test('starting rename during a marquee releases fixed-row selection listeners without clearing selection',async t=>{

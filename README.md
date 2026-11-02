@@ -51,7 +51,7 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | **Create Archive** | A QSpace-style dialog: choose location and name, speed / size / custom compression level, optional password, one-click mode and per-item archives. |
 | **Batch rename** | Replace (including regex captures such as $1), add, format (with counters and dates) and change case, with a live before/after preview. |
 | **New file** | Right-click empty space in a pane and choose **新建**: Text (`未命名.txt`), Markdown (`未命名.md`), or any file you drop in `~/Library/Application Support/com.bento.app/templates/` (for example a `.docx`). The new item is renamed immediately. A clash becomes `未命名 2.txt` and never overwrites. |
-| **Compact rows** | File rows use a compact 20px height. |
+| **Compact rows** | File rows use a compact 21px height. |
 | **Flexible columns** | Name · Modified · Created · Size · Kind. Drag column borders to resize and right-click the header to choose columns. View settings have global defaults with per-folder overrides. The default name column is 260px; long names keep their extension visible and wider columns can scroll horizontally. |
 | **Live folders** | FSEvents updates panes and expanded sub-folders as files change. File operations refresh only affected directories, even with automatic refresh disabled. Interrupted reads retain available rows and offer Retry. |
 | **Keyboard-first** | Editable address bar (<kbd>⌘L</kbd>, <kbd>Tab</kbd> completes while editing), copy paths (<kbd>⌥⌘C</kbd>), <kbd>Tab</kbd> switches panes, <kbd>F5</kbd> / <kbd>F6</kbd> copy or move to the other pane, arrow-key navigation, inline folder expansion, Quick Look on <kbd>Space</kbd>, always-on-top pin (<kbd>⌥⌘T</kbd>). |
