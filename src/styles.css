@@ -693,7 +693,7 @@ input, textarea {
   font-size: 12.5px;
   color: var(--text);
   background: var(--control-bg);
-  border: 1.5px solid var(--accent);
+  border: 1px solid var(--accent);
   border-radius: 15px;
   outline: none;
   padding: 0 7px;

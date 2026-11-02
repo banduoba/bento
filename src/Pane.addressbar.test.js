@@ -172,9 +172,13 @@ test('Tab completes text and moves the caret without navigating; Escape cancels 
 test('clicking the menu trigger again closes it before an outside-click listener can reopen it', async t => {
   const h = await mountPane(t, nodes())
   await open(h)
-  let stopped = false
-  await act(async () => more(h).props.onMouseDown({ stopPropagation() { stopped = true } }))
-  assert.equal(stopped, true)
+  const down = new Event('mousedown', { bubbles: true, cancelable: true })
+  await act(async () => {
+    more(h).props.onMouseDown(down)
+    // A real mousedown reaches the menu's window listener unless the trigger
+    // stops propagation. Dispatch that boundary before the following click.
+    if (!down.cancelBubble) window.dispatchEvent(down)
+  })
   await open(h)
   assert.equal(h.root.findAllByProps({ role: 'menu' }).length, 0)
 })
