@@ -44,3 +44,16 @@ test('flush includes a snapshot queued while the previous writer promise settles
   gate.resolve();await pending
   assert.deepEqual(writes,[{n:1},{n:2}]);saver.dispose()
 })
+test('transactional commit follows queued writes, blocks flush, and failed imports are never retried', async () => {
+  const writes=[], old=deferred(), imported=deferred(); let rejectImport=false
+  const saver=createSerialSaver(async value=>{writes.push(value);if(value.n===1)await old.promise;if(value.n===2||value.n===3){await imported.promise;if(rejectImport)throw Error('disk full')}}, {delay:1000})
+  saver.update({n:1}); const first=saver.flush()
+  assert.equal(typeof saver.commit,'function')
+  const commit=saver.commit({n:2}); await turn(); assert.deepEqual(writes,[{n:1}])
+  old.resolve();await first;await turn();assert.deepEqual(writes,[{n:1},{n:2}])
+  let flushed=false;const flush=saver.flush().then(()=>{flushed=true});await turn();assert.equal(flushed,false)
+  imported.resolve();await commit;await flush;assert.equal(flushed,true)
+  rejectImport=true;await assert.rejects(saver.commit({n:3}),/disk full/)
+  await saver.flush();assert.equal(writes.length,3)
+  saver.update({n:4});await saver.flush();assert.deepEqual(writes,[{n:1},{n:2},{n:3},{n:4}]);saver.dispose()
+})

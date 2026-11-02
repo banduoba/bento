@@ -67,6 +67,8 @@ export const api = hasTauri
       sessionExitReply: (requestId, allowExit) => invoke('session_exit_reply', { requestId, allowExit }),
       loadConfig: () => invoke('load_config'),
       saveConfig: (config) => invoke('save_config', { config }),
+      readSettingsBackup: (path) => invoke('read_settings_backup', { path }),
+      exportSettingsBackup: (path, document) => invoke('export_settings_backup', { path, document }),
       loadViewSettings: () => invoke('load_view_settings'),
       saveViewSettings: (viewSettings) => invoke('save_view_settings', { viewSettings }),
     }

@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { confirm } from '@tauri-apps/plugin-dialog'
 import { blankTab, blankPane, freshId, navigateTab, restoreSession, sessionForDisk, preferencesForDisk } from './session'
 import { createSerialSaver } from './persistence'
+import { createSettingsBackup, parseSettingsBackup } from './settingsBackup'
 import { createSessionClose } from './sessionClose'
 import { createTextEditing, isTextEditingElement } from './textEditing'
 import { readText, writeText } from '@tauri-apps/plugin-clipboard-manager'
@@ -151,6 +152,7 @@ export default function App() {
   const [flashPane, setFlashPane] = useState(-1)
   const [wsRenaming, setWsRenaming] = useState(null) // { id, value }
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsImportApplied, setSettingsImportApplied] = useState(null)
   const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
   const revealReqRef = useRef(null)
   revealReqRef.current = revealReq
@@ -213,6 +215,7 @@ export default function App() {
     hydration.current = { promise, resolve, error: null }
   }
   const savers = useRef(null)
+  const settingsImport = useRef(null)
   if (!savers.current) {
     const onError = error => setSaveError(String(error))
     savers.current = {
@@ -228,12 +231,14 @@ export default function App() {
   const queuePersistence = c => {
     if (!c) return
     savers.current.session.update(sessionForDisk(c))
-    savers.current.config.update(preferencesForDisk(c))
+    if (!settingsImport.current) savers.current.config.update(preferencesForDisk(c))
     if (c.viewSettings) savers.current.views.update(c.viewSettings)
   }
   const flushPersistence = async () => {
     await hydration.current.promise
     if (hydration.current.error) throw hydration.current.error
+    // Native close must not exit while a manually imported configuration is writing.
+    if (settingsImport.current) await settingsImport.current.promise
     // Re-read the live ref after awaiting writes in case navigation happened during IO.
     let before
     do {
@@ -244,6 +249,32 @@ export default function App() {
       if (failed) throw failed.reason
     } while (before !== cfgRef.current)
     setSaveError(null)
+  }
+
+  const importSettings = async text => {
+    const preferences = parseSettingsBackup(text)
+    if (settingsImport.current) throw new Error('正在导入设置，请稍候。')
+    const operation = { preferences }
+    settingsImport.current = operation
+    operation.promise = (async () => {
+      try {
+        // Drain the existing writer before snapshotting unrelated live preferences.
+        await savers.current.config.flush()
+        await savers.current.config.commit({ ...preferencesForDisk(cfgRef.current), ...preferences })
+        const resumeAutoRefresh = preferences.autoRefresh && cfgRef.current.autoRefresh === false
+        // Functional merge preserves any tab, workspace or folder-view changes made during IO.
+        setCfg(current => ({ ...current, ...preferences }))
+        setSettingsImportApplied(operation)
+        if (resumeAutoRefresh) refresh()
+        setSaveError(null)
+      } catch (error) {
+        settingsImport.current = null
+        // commit() leaves its previous snapshot intact, so this cannot retry the failed import.
+        queuePersistence(cfgRef.current)
+        throw error
+      }
+    })()
+    return operation.promise
   }
 
   // ---------- 启动 ----------
@@ -296,7 +327,11 @@ export default function App() {
   }, [])
 
   // Compare document snapshots: stats, refresh and preference changes do not write session.json.
-  useEffect(() => { if (cfg) queuePersistence(cfg) }, [cfg])
+  useEffect(() => {
+    // Keep stale effects from overwriting the imported disk snapshot before React commits it.
+    if (settingsImport.current === settingsImportApplied) settingsImport.current = null
+    if (cfg) queuePersistence(cfg)
+  }, [cfg, settingsImportApplied])
   useEffect(() => () => { Object.values(savers.current).forEach(saver => saver.dispose()) }, [])
 
   useEffect(() => {
@@ -2219,6 +2254,8 @@ export default function App() {
       />
       <SettingsDialog
         open={settingsOpen}
+        onExportSettings={() => createSettingsBackup(cfgRef.current)}
+        onImportSettings={importSettings}
         searchPaths={cfg.searchPaths}
         onChange={(paths) => setCfg((c) => ({ ...c, searchPaths: paths }))}
         showHidden={cfg.showHidden}

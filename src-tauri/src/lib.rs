@@ -16,6 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 mod folder_tree;
 mod rename_preview;
 mod session_store;
+mod settings_backup;
 mod session_exit;
 mod list_stream;
 mod native_icons;
@@ -3030,12 +3031,9 @@ async fn load_config(app: AppHandle) -> Result<serde_json::Value, String> {
 #[tauri::command]
 async fn save_config(app: AppHandle, config: serde_json::Value) -> Result<(), String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    fs::write(
-        dir.join("config.json"),
-        serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || settings_backup::write_config(&dir, &config))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// 视图设置：`{ version, defaults, overrides }`。与工作区配置分开，键是规范化路径。
@@ -3207,6 +3205,8 @@ pub fn run() {
             session_exit::session_exit_reply,
             load_config,
             save_config,
+            settings_backup::read_settings_backup,
+            settings_backup::export_settings_backup,
             load_view_settings,
             save_view_settings,
             file_icons

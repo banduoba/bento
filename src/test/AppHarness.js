@@ -20,7 +20,7 @@ const bundle = await build({ entryPoints: [fileURLToPath(new URL('../App.jsx', i
       : path.endsWith('/window') ? `export const getCurrentWindow=()=>globalThis.${bridgeKey}.win`
       : path.endsWith('/event') ? `export const listen=(...a)=>globalThis.${bridgeKey}.listen(...a)`
       : path.endsWith('/core') ? `export const invoke=(...a)=>globalThis.${bridgeKey}.invoke(...a); export const convertFileSrc=x=>x; export class Channel{}`
-      : path.endsWith('plugin-dialog') ? `export const open=async()=>null; export const confirm=(...a)=>globalThis.${bridgeKey}.confirm(...a)`
+      : path.endsWith('plugin-dialog') ? `export const open=async()=>null; export const save=async()=>null; export const confirm=(...a)=>globalThis.${bridgeKey}.confirm(...a)`
       : `export const readText=(...a)=>globalThis.${bridgeKey}.textClipboard.readText(...a); export const writeText=(...a)=>globalThis.${bridgeKey}.textClipboard.writeText(...a)`
   }))
 }}] })
