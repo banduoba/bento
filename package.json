@@ -13,7 +13,9 @@
     "bench:fixture:10k": "node scripts/bench/generate-fixture.mjs --preset 10k",
     "bench:fixture:100k": "node scripts/bench/generate-fixture.mjs --preset 100k",
     "bench:measure": "node scripts/bench/measure.mjs",
-    "bench:self-check": "node scripts/bench/self-check.mjs"
+    "bench:self-check": "node scripts/bench/self-check.mjs",
+    "bench:compare": "node scripts/bench/compare.mjs",
+    "bench:test": "node --test scripts/bench/*.test.mjs"
   },
   "dependencies": {
     "@crabnebula/tauri-plugin-drag": "^2.1.0",
