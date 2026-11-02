@@ -67,6 +67,12 @@ function main() {
     assert(body.gui.new_tab_status === 'placeholder', '新标签状态')
     assert(existsSync(report.replace(/\.json$/, '.md')), '应同时写出 markdown')
 
+    const compared = run('compare.mjs', ['--baseline', report, '--candidate', report, '--json'])
+    assert(compared.status === 0, `生成报告应可比较:\n${compared.stderr}\n${compared.stdout}`)
+    const comparison = JSON.parse(compared.stdout)
+    assert(comparison.metrics.length === 3, '只比较 Node 扫描/JSON 和 rename 代理')
+    assert(comparison.gui.every((metric) => metric.status === 'unmeasured'), 'GUI 占位不能算通过')
+
     const plain = join(root, 'not-a-fixture')
     mkdirSync(plain)
     writeFileSync(join(plain, 'a.txt'), 'a')

@@ -146,3 +146,25 @@ JSON 是完整记录，Markdown 方便贴进 PR。两边都包含：
 - 手填的首屏、界面删除、新标签（没填就是「未测」/ 占位）
 
 比较两次时，对一下 `host`、`git.commit`，以及备注里的启动方式和有没有 `sudo purge`。
+
+## 手动运行回归比较
+
+保留改动前、后的两份 schema 1 JSON，再运行：
+
+```bash
+npm run bench:compare -- --baseline /tmp/before.json --candidate /tmp/after.json
+npm run bench:compare -- --baseline /tmp/before.json --candidate /tmp/after.json --threshold 0.20 --floor-ms 1 --json
+npm run bench:test
+```
+
+比较器只读取这两份报告，不运行基准、不修改报告，不接入应用、构建或后台任务。默认比较中位数；只有候选值增加量 **大于 `max(基线中位数 × 0.20, 1 ms)`** 才判回归。两条边界相等均放行。`--threshold` 是比例（`0.20` 表示 20%），`--floor-ms` 是绝对噪声下限，两者都必须是有限非负数；可设为 0。基线为 0 且候选值增加时，JSON 的相对变化为 `null`，仍按绝对下限判定。
+
+退出码：`0` 表示参与比较的无界面指标通过，`1` 表示至少一个回归，`2` 表示输入无效或不可比。`--json` 在失败时也输出结构化结果。通过仅覆盖列出的无界面指标，不能当作整个应用性能通过。
+
+严格校验包括 schema/tool、完整 host（平台、架构、OS release、CPU 型号/核数、内存、精确 Node 版本）、夹具 preset/文件数/单文件字节/逻辑体积、runs、预热、缓存尝试/成功/方法、Node 并发数，以及删除方法和三个文件名。扫描数必须等于夹具文件数；每个指标必须有恰好 runs 个有限非负样本，min/max/mean/median 必须与样本一致。路径、生成耗时、磁盘分配量、git 提交及备注不要求相同。失败的缓存清理与未尝试清理也不能混比。
+
+Node 扫描和 JSON 序列化、同卷 rename 代理是必需指标；Rust 必须两份都未跑（明确为 `null`）或两份都成功，并校验引擎、镜像标识、预热、隐藏文件协议和条目数。缺失、失败、计数不符的 Rust 结果不能被静默跳过。
+
+`gui` 的首屏、界面删除和新标签始终不进入回归判定。空值显示 `unmeasured`，手填值显示 `manual-excluded`，都不计为通过。Node 是文件系统/序列化代理；rename 代理不是原生废纸篓或 UI；Rust 是独立的一次性 `list_dir` 镜像，不测流式首屏。
+
+schema 1 没有记录卷/文件系统、系统负载、Rust 工具链或镜像是否与应用同步；比较器无法验证这些条件。不同目录的路径长度也会影响 JSON 打包量。应手动保持同一夹具路径、磁盘、运行环境和工具链，确认镜像仍匹配；自动通过不构成 UI 性能证据。
