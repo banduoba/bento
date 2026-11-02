@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { isTextEditingElement } from '../textEditing.js'
+import useDialogFocus, { isComposingKey } from './useDialogFocus'
 
 const MODES = [
   { id: 'replace', label: '替换文本' },
@@ -21,6 +22,7 @@ function modificationDate(mtimeMs) {
  * items: [{ path, name, is_dir, mtime_ms }]，newName 计算保留扩展名
  */
 export default function BatchRenameDialog({ items, onCancel, onApply }) {
+  const dialogRef = useDialogFocus()
   const [mode, setMode] = useState('replace')
   const [find, setFind] = useState('')
   const [replaceWith, setReplaceWith] = useState('')
@@ -110,6 +112,7 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
       if (isTextEditingElement(e.target) && e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey &&
           !e.isComposing && ['a', 'c', 'x', 'v'].includes(key)) return
       e.stopPropagation()
+      if (isComposingKey(e)) return
       if (e.key === 'Escape' && !busy) onCancel()
       if (e.key === 'Enter' && !e.target?.closest?.('button') && valid && !busy) apply()
     }
@@ -130,7 +133,7 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
 
   return (
     <div className="modal-backdrop" onMouseDown={() => !busy && onCancel()}>
-      <div className="modal batch-rename-dialog" role="dialog" aria-modal="true"
+      <div ref={dialogRef} tabIndex={-1} className="modal batch-rename-dialog" role="dialog" aria-modal="true"
         aria-labelledby="batch-rename-title" onMouseDown={(e) => e.stopPropagation()}>
         <header className="batch-rename-header">
           <h2 id="batch-rename-title" className="modal-title">重新命名 {items.length} 个项目</h2>
