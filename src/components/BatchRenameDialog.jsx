@@ -134,6 +134,7 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
   return (
     <div className="modal-backdrop" onMouseDown={() => !busy && onCancel()}>
       <div ref={dialogRef} tabIndex={-1} className="modal batch-rename-dialog" role="dialog" aria-modal="true"
+        aria-busy={busy || previewPending}
         aria-labelledby="batch-rename-title" onMouseDown={(e) => e.stopPropagation()}>
         <header className="batch-rename-header">
           <h2 id="batch-rename-title" className="modal-title">重新命名 {items.length} 个项目</h2>
@@ -270,7 +271,7 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
             {rest > 0 && <div className="preview-more">…以及另外 {rest} 个项目</div>}
           </div>
           <div className="batch-rename-validation" aria-live="polite">
-            {previewPending && <div>正在预览正则替换…</div>}
+            {previewPending && <div role="status">正在预览正则替换…</div>}
             {previewError && <div className="modal-error">{previewError}</div>}
             {anyInvalid && !anyEmpty && <div className="modal-error">名称不合法：不能包含 /、NUL 或使用 .、..</div>}
             {hasDup && <div className="modal-error">重命名后的名称有重复，请调整规则</div>}
@@ -285,7 +286,7 @@ export default function BatchRenameDialog({ items, onCancel, onApply }) {
           <button className="btn" onClick={onCancel} disabled={busy}>
             取消
           </button>
-          <button className="btn primary" onClick={apply} disabled={!valid || busy}>
+          <button className="btn primary" onClick={apply} disabled={!valid || busy} aria-busy={busy} aria-live="polite">
             {busy ? '重命名中…' : '重命名'}
           </button>
         </div>

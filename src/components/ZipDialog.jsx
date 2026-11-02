@@ -102,6 +102,7 @@ export default function ZipDialog({ count, dir, defaultName, prefs, onCancel, on
           value={separate ? '' : name}
           placeholder={separate ? '各个项目使用各自的名称' : '压缩包名称'}
           disabled={separate}
+          aria-label="压缩包名称"
           onChange={(e) => setName(e.target.value)}
         />
 
@@ -131,6 +132,7 @@ export default function ZipDialog({ count, dir, defaultName, prefs, onCancel, on
           <input
             className="zip-pwinput"
             type="password"
+            aria-label="密码"
             value={pw}
             disabled={!usePw}
             placeholder="密码"
