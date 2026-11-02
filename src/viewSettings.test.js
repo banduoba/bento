@@ -88,6 +88,18 @@ test('fresh settings are versioned defaults with sort, columns and iconSize', ()
   assert.equal(again.defaults.columns.widths.size, normalizeCols(null).size)
 })
 
+test('view mode persists per folder and legacy or unknown values safely use list', () => {
+  const initial = normalizeViewSettings({ version: 1, defaults: {}, overrides: {} })
+  assert.equal(viewForPath(initial, downloads).mode, 'list')
+  const icons = withFolderPatch(initial, downloads, { mode: 'icons' })
+  const columns = withFolderPatch(icons, documents, { mode: 'columns' })
+  const saved = normalizeViewSettings(JSON.parse(JSON.stringify(columns)))
+  assert.equal(viewForPath(saved, downloads).mode, 'icons')
+  assert.equal(viewForPath(saved, documents).mode, 'columns')
+  assert.equal(viewForPath(saved, '/other').mode, 'list')
+  assert.equal(viewForPath(withFolderPatch(saved, downloads, { mode: 'invalid' }), downloads).mode, 'list')
+})
+
 test('a saved default and a folder override both beat the builtin sort', () => {
   const store = normalizeViewSettings({
     version: 1,

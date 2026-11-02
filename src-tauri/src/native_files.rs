@@ -1,5 +1,5 @@
-//! Supported macOS file operations. Finder/AppKit own progress and conflict UI.
-//! No file-operation journal, staging directory, retry, or custom copy engine.
+//! Supported macOS file operations. Finder/AppKit own ordinary progress and conflicts.
+//! Hidden non-startup APFS volumes use Foundation's exact copy/move APIs.
 use super::{
     check_identity, file_identity, ExpectedIdentity, FileIdentity, RestoreMove, TransferItem,
     TrashEntry, TrashResult,
@@ -10,15 +10,22 @@ use objc2::{
 };
 use objc2_app_kit::NSWorkspace;
 use objc2_core_services::{
-    kAEAlwaysInteract, kAECanSwitchLayer, kAEWaitReply, kNoTimeOut, typeNull, AEDesc, AEDisposeDesc,
-    AESendMessage,
+    kAEAlwaysInteract, kAECanSwitchLayer, kAEWaitReply, kNoTimeOut, typeNull, AEDesc,
+    AEDisposeDesc, AESendMessage,
 };
 use objc2_foundation::{
-    NSAppleEventDescriptor as Descriptor, NSArray, NSDictionary, NSError, NSFileManager, NSString,
-    NSURL,
+    NSAppleEventDescriptor as Descriptor, NSArray, NSDictionary, NSError, NSFileManager, NSLocale,
+    NSString, NSURL,
 };
-use std::{path::Path, ptr::NonNull, sync::mpsc};
-use tauri::AppHandle;
+use std::{
+    ffi::CString,
+    os::unix::{ffi::OsStrExt, fs::MetadataExt},
+    path::{Path, PathBuf},
+    ptr::NonNull,
+    sync::mpsc,
+};
+use tauri::{AppHandle, Manager};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 
 const CORE: u32 = u32::from_be_bytes(*b"core");
 const DIRECT: u32 = u32::from_be_bytes(*b"----");
@@ -35,6 +42,7 @@ struct Completion {
     mappings: Vec<(String, String)>,
     error: Option<String>,
     cancelled: bool,
+    unchanged: bool,
 }
 
 fn file_url(path: &str) -> Retained<NSURL> {
@@ -67,9 +75,12 @@ fn transfer_event(source: &str, dest: &str, mode: &str) -> Retained<Descriptor> 
     } else {
         *b"clon"
     }));
-    let list = Descriptor::listDescriptor();
-    list.insertDescriptor_atIndex(&Descriptor::descriptorWithFileURL(&file_url(source)), 1);
-    event.setParamDescriptor_forKeyword(&list, DIRECT);
+    // This transfer loop sends one source per event. Finder's AppleScript
+    // `duplicate POSIX file … to POSIX file …` uses a scalar file URL here.
+    event.setParamDescriptor_forKeyword(
+        &Descriptor::descriptorWithFileURL(&file_url(source)),
+        DIRECT,
+    );
     event.setParamDescriptor_forKeyword(
         &Descriptor::descriptorWithFileURL(&file_url(dest)),
         INSERT_HERE,
@@ -134,6 +145,7 @@ fn transfer_result(
         ok,
         identity,
         cancelled: !ok && completion.cancelled,
+        unchanged: !ok && completion.unchanged,
         error: if ok || completion.cancelled {
             None
         } else {
@@ -346,9 +358,330 @@ fn same_parent(source: &str, dest: &str) -> Result<bool, String> {
     let parent = Path::new(source)
         .parent()
         .ok_or("文件操作需要完整文件路径")?;
-    let parent = parent.canonicalize().map_err(|e| e.to_string())?;
-    let dest = Path::new(dest).canonicalize().map_err(|e| e.to_string())?;
-    Ok(parent == dest)
+    let parent = std::fs::metadata(parent).map_err(|e| e.to_string())?;
+    let dest = std::fs::metadata(dest).map_err(|e| e.to_string())?;
+    Ok(parent.dev() == dest.dev() && parent.ino() == dest.ino())
+}
+
+fn directory_contains_destination(source: &Path, dest: &Path) -> Result<bool, String> {
+    let source_metadata = std::fs::symlink_metadata(source).map_err(|e| e.to_string())?;
+    if !source_metadata.is_dir() {
+        return Ok(false);
+    }
+    // canonicalize resolves symlinks to a deeper child; lexical ancestors
+    // preserve the APFS firmlink spelling. Check identities along both paths.
+    let canonical = dest.canonicalize().map_err(|e| e.to_string())?;
+    for path in [dest, canonical.as_path()] {
+        for ancestor in path.ancestors() {
+            let metadata = std::fs::metadata(ancestor).map_err(|e| e.to_string())?;
+            if metadata.dev() == source_metadata.dev() && metadata.ino() == source_metadata.ino() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MountFacts {
+    apfs: bool,
+    hidden: bool,
+    writable: bool,
+    device: u64,
+}
+
+// A hidden startup Data volume is ordinary Finder territory. A hidden APFS
+// volume on another device needs FileManager because Finder's AE transfer can
+// reject it even while Finder's own Paste succeeds.
+fn needs_native_transfer(mount: MountFacts, home_device: u64) -> bool {
+    mount.apfs && mount.hidden && mount.writable && mount.device != home_device
+}
+
+fn c_field(bytes: &[libc::c_char]) -> &[u8] {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len());
+    unsafe { std::slice::from_raw_parts(bytes.as_ptr().cast::<u8>(), end) }
+}
+
+fn facts_from_stat(stat: &libc::statfs, device: u64) -> MountFacts {
+    MountFacts {
+        apfs: c_field(&stat.f_fstypename) == b"apfs",
+        hidden: stat.f_flags & libc::MNT_DONTBROWSE as u32 != 0,
+        writable: stat.f_flags & libc::MNT_RDONLY as u32 == 0,
+        device,
+    }
+}
+
+fn physical_mount(device: u64) -> Option<MountFacts> {
+    const MAX_MOUNTS: usize = 4096;
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count <= 0 {
+        return None;
+    }
+    let mut capacity = (count as usize).checked_add(8)?;
+    for _ in 0..3 {
+        if capacity > MAX_MOUNTS {
+            return None;
+        }
+        // getfsstat fills this caller-owned buffer. No borrowed slice can be
+        // invalidated by another transfer querying the mount table.
+        let mut buffer = Vec::with_capacity(capacity);
+        buffer.resize_with(capacity, std::mem::MaybeUninit::<libc::statfs>::uninit);
+        let bytes = capacity.checked_mul(std::mem::size_of::<libc::statfs>())?;
+        let bytes: libc::c_int = bytes.try_into().ok()?;
+        let written = unsafe {
+            libc::getfsstat(
+                buffer.as_mut_ptr().cast::<libc::statfs>(),
+                bytes,
+                libc::MNT_NOWAIT,
+            )
+        };
+        if written < 0 {
+            return None;
+        }
+        if written as usize >= capacity {
+            capacity = capacity.checked_mul(2)?;
+            continue;
+        }
+        let entries = unsafe {
+            std::slice::from_raw_parts(buffer.as_ptr().cast::<libc::statfs>(), written as usize)
+        };
+        return entries.iter().find_map(|entry| {
+            // Only APFS mounts can satisfy the route. This avoids probing
+            // unrelated network mounts while looking for the actual device.
+            if c_field(&entry.f_fstypename) != b"apfs" {
+                return None;
+            }
+            let mountpoint = std::ffi::OsStr::from_bytes(c_field(&entry.f_mntonname));
+            let mounted_device = std::fs::metadata(Path::new(mountpoint)).ok()?.dev();
+            (mounted_device == device).then(|| facts_from_stat(entry, device))
+        });
+    }
+    None
+}
+
+fn mount_facts(path: &Path) -> Option<MountFacts> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    // statfs follows a symlink. Classify the link's directory instead, since
+    // FileManager copies the link itself and it belongs to that filesystem.
+    let stat_path = if metadata.file_type().is_symlink() {
+        path.parent()?
+    } else {
+        path
+    };
+    let c_path = CString::new(stat_path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    if unsafe { libc::statfs(c_path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    let mountpoint = std::ffi::OsStr::from_bytes(c_field(&stat.f_mntonname));
+    let reported_device = std::fs::metadata(Path::new(mountpoint)).ok()?.dev();
+    if reported_device != metadata.dev() {
+        // APFS firmlinks can make lexical statfs report the read-only System
+        // mount while the entry lives on a separate writable Data volume.
+        // Resolve by device against the actual mount table, not by path name.
+        physical_mount(metadata.dev())
+    } else {
+        Some(facts_from_stat(&stat, metadata.dev()))
+    }
+}
+
+fn route_native(source: &Path, dest: &Path) -> bool {
+    let Some(home) = std::env::home_dir() else {
+        return false;
+    };
+    let Some(home_device) = std::fs::metadata(home).ok().map(|m| m.dev()) else {
+        return false;
+    };
+    // A failed classification leaves the established Finder path in charge.
+    // Source symlinks are transferred as entries on their parent filesystem.
+    // Destination directory symlinks are followed by FileManager, so resolve
+    // that directory before classifying the mount that will receive bytes.
+    let Some(resolved_dest) = dest.canonicalize().ok() else {
+        return false;
+    };
+    let (Some(source_mount), Some(dest_mount)) = (mount_facts(source), mount_facts(&resolved_dest))
+    else {
+        return false;
+    };
+    needs_native_transfer(source_mount, home_device)
+        || needs_native_transfer(dest_mount, home_device)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CollisionChoice {
+    KeepBoth,
+    Cancel,
+}
+
+fn collision_choice(app: &AppHandle, path: &Path) -> CollisionChoice {
+    let language = NSLocale::preferredLanguages()
+        .firstObject()
+        .map(|value| value.to_string().to_ascii_lowercase())
+        .unwrap_or_default();
+    let (message, keep, cancel) = if language.starts_with("zh-hant")
+        || language.starts_with("zh-tw")
+        || language.starts_with("zh-hk")
+    {
+        (
+            format!(
+                "「{}」已存在。要保留兩個檔案嗎？",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            "保留兩者",
+            "取消",
+        )
+    } else if language.starts_with("zh") {
+        (
+            format!(
+                "“{}”已存在。要保留两个文件吗？",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            "保留两者",
+            "取消",
+        )
+    } else {
+        (
+            format!(
+                "“{}” already exists. Keep both items?",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            "Keep Both",
+            "Cancel",
+        )
+    };
+    let (sender, receiver) = mpsc::channel();
+    let app_for_dialog = app.clone();
+    if app
+        .run_on_main_thread(move || {
+            let Some(window) = app_for_dialog.get_webview_window("main") else {
+                let _ = sender.send(CollisionChoice::Cancel);
+                return;
+            };
+            app_for_dialog
+                .dialog()
+                .message(message)
+                .parent(&window)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    keep.into(),
+                    cancel.into(),
+                ))
+                .show(move |keep_both| {
+                    let _ = sender.send(if keep_both {
+                        CollisionChoice::KeepBoth
+                    } else {
+                        CollisionChoice::Cancel
+                    });
+                });
+        })
+        .is_err()
+    {
+        return CollisionChoice::Cancel;
+    }
+    receiver.recv().unwrap_or(CollisionChoice::Cancel)
+}
+
+fn free_copy_name(dest_dir: &Path, name: &str, directory: bool) -> Option<PathBuf> {
+    let (stem, ext) = if directory {
+        (name, "")
+    } else {
+        match name.rfind('.') {
+            Some(index) if index > 0 => (&name[..index], &name[index..]),
+            _ => (name, ""),
+        }
+    };
+    let base = if let Some(index) = stem.rfind(" copy") {
+        let rest = &stem[index + 5..];
+        if rest.is_empty()
+            || rest.strip_prefix(' ').is_some_and(|digits| {
+                !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+            })
+        {
+            &stem[..index]
+        } else {
+            stem
+        }
+    } else {
+        stem
+    };
+    for number in 0..10000 {
+        let suffix = if number == 0 {
+            String::new()
+        } else {
+            format!(" {number}")
+        };
+        let path = dest_dir.join(format!("{base} copy{suffix}{ext}"));
+        if super::entry_available(&path) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn native_transfer_with_choice(
+    source: &str,
+    dest_dir: &str,
+    mode: &str,
+    choose: impl FnOnce(&Path) -> CollisionChoice,
+) -> Completion {
+    let source_path = Path::new(source);
+    let name = match source_path.file_name().and_then(|name| name.to_str()) {
+        Some(name) => name,
+        None => {
+            return Completion {
+                error: Some("无法读取文件名".into()),
+                ..Default::default()
+            }
+        }
+    };
+    let mut target = Path::new(dest_dir).join(name);
+    match std::fs::symlink_metadata(&target) {
+        Ok(_) => {
+            if choose(&target) == CollisionChoice::Cancel {
+                return Completion {
+                    cancelled: true,
+                    unchanged: true,
+                    ..Default::default()
+                };
+            }
+            let directory = std::fs::symlink_metadata(source_path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            target = match free_copy_name(Path::new(dest_dir), name, directory) {
+                Some(path) => path,
+                None => {
+                    return Completion {
+                        error: Some("无法找到可用的副本名称".into()),
+                        ..Default::default()
+                    }
+                }
+            };
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Completion {
+                error: Some(error.to_string()),
+                ..Default::default()
+            }
+        }
+    }
+    let target_string = target.to_string_lossy().into_owned();
+    let manager = NSFileManager::new();
+    let result = if mode == "move" {
+        manager.moveItemAtURL_toURL_error(&file_url(source), &file_url(&target_string))
+    } else {
+        manager.copyItemAtURL_toURL_error(&file_url(source), &file_url(&target_string))
+    };
+    match result {
+        Ok(()) => Completion {
+            mappings: vec![(source.into(), target_string)],
+            ..Default::default()
+        },
+        Err(error) => ns_error(&error),
+    }
 }
 
 pub(super) fn transfer(
@@ -372,6 +705,7 @@ pub(super) fn transfer(
                 dest,
                 &Completion {
                     cancelled: true,
+                    unchanged: true,
                     ..Default::default()
                 },
                 false,
@@ -392,22 +726,18 @@ pub(super) fn transfer(
                     true,
                 ));
             }
-            if std::fs::symlink_metadata(source)
-                .map_err(|e| e.to_string())?
-                .is_dir()
-                && Path::new(dest)
-                    .canonicalize()
-                    .map_err(|e| e.to_string())?
-                    .starts_with(
-                        Path::new(source)
-                            .canonicalize()
-                            .map_err(|e| e.to_string())?,
-                    )
-            {
+            if directory_contains_destination(Path::new(source), Path::new(dest))? {
                 return Err("不能将文件夹复制或移动到其自身内部".into());
             }
             if same_parent {
                 let completion = workspace(app, std::slice::from_ref(source), false)?;
+                cancelled = completion.cancelled;
+                return Ok(transfer_result(source, dest, &completion, false));
+            }
+            if route_native(Path::new(source), Path::new(dest)) {
+                let completion = native_transfer_with_choice(source, dest, mode, |path| {
+                    collision_choice(app, path)
+                });
                 cancelled = completion.cancelled;
                 return Ok(transfer_result(source, dest, &completion, false));
             }
@@ -545,6 +875,447 @@ pub(super) fn restore(moves: &[RestoreMove]) -> Vec<TransferItem> {
 mod tests {
     use super::*;
 
+    struct TempFixture(PathBuf);
+    impl TempFixture {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "bento-{label}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for TempFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn hidden_apfs_policy_excludes_startup_readonly_and_other_filesystems() {
+        let base = MountFacts {
+            apfs: true,
+            hidden: true,
+            writable: true,
+            device: 42,
+        };
+        assert!(needs_native_transfer(base, 1));
+        assert!(!needs_native_transfer(base, 42));
+        assert!(!needs_native_transfer(
+            MountFacts {
+                hidden: false,
+                ..base
+            },
+            1
+        ));
+        assert!(!needs_native_transfer(
+            MountFacts {
+                writable: false,
+                ..base
+            },
+            1
+        ));
+        assert!(!needs_native_transfer(
+            MountFacts {
+                apfs: false,
+                ..base
+            },
+            1
+        ));
+        assert!(!route_native(
+            Path::new("/no/such/source"),
+            Path::new("/no/such/destination")
+        ));
+    }
+
+    #[test]
+    fn mounted_volume_probe_resolves_firmlink_to_actual_apfs_device() {
+        let Some(lexical) = std::env::var_os("BENTO_NATIVE_VOLUME_PROBE") else {
+            return;
+        };
+        let Some(alias) = std::env::var_os("BENTO_NATIVE_VOLUME_PROBE_ALIAS") else {
+            return;
+        };
+        let lexical = PathBuf::from(lexical);
+        let alias = PathBuf::from(alias);
+        let home = std::env::home_dir().unwrap();
+        let home_device = std::fs::metadata(&home).unwrap().dev();
+        let lexical_mount = mount_facts(&lexical).unwrap();
+        let alias_mount = mount_facts(&alias).unwrap();
+        assert_eq!(lexical_mount.device, alias_mount.device);
+        assert_eq!(
+            file_identity(&lexical).unwrap(),
+            file_identity(&alias).unwrap()
+        );
+        assert!(needs_native_transfer(lexical_mount, home_device));
+        assert!(needs_native_transfer(alias_mount, home_device));
+        assert!(route_native(&lexical, &home));
+        assert!(route_native(&alias, &home));
+        assert!(same_parent(
+            lexical.join("not-created").to_str().unwrap(),
+            alias.to_str().unwrap()
+        )
+        .unwrap());
+        assert!(directory_contains_destination(&lexical, &alias).unwrap());
+    }
+
+    #[test]
+    #[ignore = "requires BENTO_TEST_VOLUME_ROOT on a writable, non-startup hidden APFS volume"]
+    fn mounted_volume_native_transfer_and_undo() {
+        use std::os::unix::fs::symlink;
+        let volume_root =
+            PathBuf::from(std::env::var_os("BENTO_TEST_VOLUME_ROOT").expect(
+                "set BENTO_TEST_VOLUME_ROOT to a writable test folder on the mounted volume",
+            ));
+        assert!(volume_root.is_dir());
+        let local = TempFixture::new("native-live-source");
+        let output = local.0.join("output");
+        std::fs::create_dir(&output).unwrap();
+        let live = volume_root.join(format!(
+            "bento-native-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        // Create exactly one fresh child under the supplied parent. The guard
+        // owns only that child, never the parent or any pre-existing item.
+        std::fs::create_dir(&live).unwrap();
+        let _live_cleanup = TempFixture(live.clone());
+        let source = local.0.join("旧文件 ' 汉字.txt");
+        std::fs::write(&source, b"original payload").unwrap();
+        let old_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::open(&source)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        assert!(route_native(&source, &live));
+        let alias = local.0.join("destination-link");
+        symlink(&live, &alias).unwrap();
+        assert!(route_native(&source, &alias));
+
+        let copied = native_transfer_with_choice(
+            source.to_str().unwrap(),
+            live.to_str().unwrap(),
+            "copy",
+            |_| panic!("unexpected collision"),
+        );
+        let copy_item = transfer_result(
+            source.to_str().unwrap(),
+            live.to_str().unwrap(),
+            &copied,
+            false,
+        );
+        assert!(copy_item.ok, "{:?}", copy_item.error);
+        assert_eq!(
+            copy_item.dest,
+            live.join(source.file_name().unwrap()).to_str().unwrap()
+        );
+        assert_eq!(
+            copy_item.identity,
+            Some(file_identity(Path::new(&copy_item.dest)).unwrap())
+        );
+        assert_eq!(std::fs::read(&copy_item.dest).unwrap(), b"original payload");
+        assert_eq!(
+            std::fs::metadata(&copy_item.dest)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            old_time
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), b"original payload");
+
+        let original_identity = file_identity(Path::new(&copy_item.dest)).unwrap();
+        let kept = native_transfer_with_choice(
+            source.to_str().unwrap(),
+            live.to_str().unwrap(),
+            "copy",
+            |_| CollisionChoice::KeepBoth,
+        );
+        let keep_item = transfer_result(
+            source.to_str().unwrap(),
+            live.to_str().unwrap(),
+            &kept,
+            false,
+        );
+        assert!(keep_item.ok, "{:?}", keep_item.error);
+        assert_eq!(
+            keep_item.dest,
+            live.join("旧文件 ' 汉字 copy.txt").to_str().unwrap()
+        );
+        assert_eq!(
+            file_identity(Path::new(&copy_item.dest)).unwrap(),
+            original_identity
+        );
+        assert_eq!(std::fs::read(&copy_item.dest).unwrap(), b"original payload");
+        let cancelled = native_transfer_with_choice(
+            source.to_str().unwrap(),
+            live.to_str().unwrap(),
+            "copy",
+            |_| CollisionChoice::Cancel,
+        );
+        assert!(cancelled.cancelled && cancelled.mappings.is_empty());
+        assert_eq!(
+            file_identity(Path::new(&copy_item.dest)).unwrap(),
+            original_identity
+        );
+
+        let to_move = local.0.join("move.txt");
+        std::fs::write(&to_move, b"move payload").unwrap();
+        let moved = native_transfer_with_choice(
+            to_move.to_str().unwrap(),
+            live.to_str().unwrap(),
+            "move",
+            |_| panic!("unexpected collision"),
+        );
+        let move_item = transfer_result(
+            to_move.to_str().unwrap(),
+            live.to_str().unwrap(),
+            &moved,
+            false,
+        );
+        assert!(move_item.ok, "{:?}", move_item.error);
+        assert!(move_item.identity.is_some() && !to_move.exists());
+        assert_eq!(std::fs::read(&move_item.dest).unwrap(), b"move payload");
+        let undone = restore(&[RestoreMove {
+            source: move_item.dest.clone(),
+            dest: to_move.to_str().unwrap().into(),
+            identity: move_item.identity.clone(),
+        }]);
+        assert!(undone[0].ok, "{:?}", undone[0].error);
+        assert_eq!(std::fs::read(&to_move).unwrap(), b"move payload");
+        assert!(!Path::new(&move_item.dest).exists());
+
+        assert!(route_native(Path::new(&copy_item.dest), &output));
+        let copied_out =
+            native_transfer_with_choice(&copy_item.dest, output.to_str().unwrap(), "copy", |_| {
+                panic!("unexpected collision")
+            });
+        let out_item = transfer_result(
+            &copy_item.dest,
+            output.to_str().unwrap(),
+            &copied_out,
+            false,
+        );
+        assert!(out_item.ok, "{:?}", out_item.error);
+        assert_eq!(
+            out_item.identity,
+            Some(file_identity(Path::new(&out_item.dest)).unwrap())
+        );
+        assert_eq!(std::fs::read(&out_item.dest).unwrap(), b"original payload");
+
+        let tree = local.0.join("folder.with.dot");
+        std::fs::create_dir(&tree).unwrap();
+        std::fs::write(tree.join("child"), b"child payload").unwrap();
+        symlink("child", tree.join("link")).unwrap();
+        let tree_copy = native_transfer_with_choice(
+            tree.to_str().unwrap(),
+            live.to_str().unwrap(),
+            "copy",
+            |_| panic!("unexpected collision"),
+        );
+        assert!(tree_copy.error.is_none());
+        assert_eq!(
+            std::fs::read(live.join("folder.with.dot/child")).unwrap(),
+            b"child payload"
+        );
+        assert_eq!(
+            std::fs::read_link(live.join("folder.with.dot/link")).unwrap(),
+            Path::new("child")
+        );
+    }
+
+    #[test]
+    fn native_copy_move_and_receipt_use_exact_destination_and_identity() {
+        let fixture = TempFixture::new("native-transfer");
+        let source_dir = fixture.0.join("source");
+        let dest_dir = fixture.0.join("target");
+        std::fs::create_dir(&source_dir).unwrap();
+        std::fs::create_dir(&dest_dir).unwrap();
+        let source = source_dir.join("汉字 ' file.txt");
+        std::fs::write(&source, b"original").unwrap();
+        let source_string = source.to_str().unwrap();
+        let dest_string = dest_dir.to_str().unwrap();
+        let copied = native_transfer_with_choice(source_string, dest_string, "copy", |_| {
+            panic!("no collision")
+        });
+        let copy_item = transfer_result(source_string, dest_string, &copied, false);
+        assert!(copy_item.ok);
+        assert_eq!(
+            copy_item.dest,
+            dest_dir.join("汉字 ' file.txt").to_str().unwrap()
+        );
+        assert_eq!(
+            copy_item.identity,
+            Some(file_identity(Path::new(&copy_item.dest)).unwrap())
+        );
+        assert_eq!(
+            copy_item.affected_directories,
+            vec![source_dir.to_str().unwrap(), dest_string]
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        let moved_dir = fixture.0.join("moved");
+        std::fs::create_dir(&moved_dir).unwrap();
+        let moved =
+            native_transfer_with_choice(source_string, moved_dir.to_str().unwrap(), "move", |_| {
+                panic!("no collision")
+            });
+        let move_item = transfer_result(source_string, moved_dir.to_str().unwrap(), &moved, false);
+        assert!(move_item.ok);
+        assert_eq!(
+            move_item.identity,
+            Some(file_identity(Path::new(&move_item.dest)).unwrap())
+        );
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&move_item.dest).unwrap(), b"original");
+        // Undo's exact move uses this identity and destination path.
+        assert!(check_identity(Path::new(&move_item.dest), move_item.identity.as_ref()).is_ok());
+    }
+
+    #[test]
+    fn native_copy_preserves_directory_tree_and_symlink() {
+        use std::os::unix::fs::symlink;
+        let fixture = TempFixture::new("native-tree");
+        let source_dir = fixture.0.join("source");
+        let dest_dir = fixture.0.join("target");
+        let tree = source_dir.join("folder.with.dot");
+        std::fs::create_dir_all(tree.join("子目录")).unwrap();
+        std::fs::create_dir(&dest_dir).unwrap();
+        std::fs::write(tree.join("子目录/file"), b"data").unwrap();
+        symlink("子目录/file", tree.join("link")).unwrap();
+        let result = native_transfer_with_choice(
+            tree.to_str().unwrap(),
+            dest_dir.to_str().unwrap(),
+            "copy",
+            |_| panic!("no collision"),
+        );
+        assert!(result.error.is_none());
+        let copied = dest_dir.join("folder.with.dot");
+        assert_eq!(std::fs::read(copied.join("子目录/file")).unwrap(), b"data");
+        assert_eq!(
+            std::fs::read_link(copied.join("link")).unwrap(),
+            Path::new("子目录/file")
+        );
+    }
+
+    #[test]
+    fn directory_guard_uses_resolved_ancestor_identity() {
+        use std::os::unix::fs::symlink;
+        let fixture = TempFixture::new("native-ancestor");
+        let source = fixture.0.join("source");
+        let child = source.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let alias = fixture.0.join("alias");
+        symlink(&source, &alias).unwrap();
+        assert!(directory_contains_destination(&source, &alias.join("child")).unwrap());
+        let direct_child_alias = fixture.0.join("direct-child");
+        symlink(&child, &direct_child_alias).unwrap();
+        assert!(directory_contains_destination(&source, &direct_child_alias).unwrap());
+        assert!(directory_contains_destination(&source, &source).unwrap());
+        assert!(!directory_contains_destination(&child, &fixture.0).unwrap());
+        assert!(same_parent(
+            source.join("item").to_str().unwrap(),
+            alias.to_str().unwrap()
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn collision_and_cancel_preserve_existing_entry_and_source() {
+        let fixture = TempFixture::new("native-collision");
+        let source_dir = fixture.0.join("source");
+        let dest_dir = fixture.0.join("target");
+        std::fs::create_dir(&source_dir).unwrap();
+        std::fs::create_dir(&dest_dir).unwrap();
+        let source = source_dir.join("file.txt");
+        let existing = dest_dir.join("file.txt");
+        std::fs::write(&source, b"source").unwrap();
+        std::fs::write(&existing, b"existing").unwrap();
+        let before = file_identity(&existing).unwrap();
+        let source_before = file_identity(&source).unwrap();
+        let cancelled = native_transfer_with_choice(
+            source.to_str().unwrap(),
+            dest_dir.to_str().unwrap(),
+            "move",
+            |_| CollisionChoice::Cancel,
+        );
+        assert!(cancelled.cancelled);
+        assert!(cancelled.unchanged);
+        assert!(cancelled.mappings.is_empty());
+        assert_eq!(file_identity(&existing).unwrap(), before);
+        assert_eq!(file_identity(&source).unwrap(), source_before);
+        assert_eq!(std::fs::read(&source).unwrap(), b"source");
+        assert_eq!(std::fs::read(&existing).unwrap(), b"existing");
+        let item = transfer_result(
+            source.to_str().unwrap(),
+            dest_dir.to_str().unwrap(),
+            &cancelled,
+            false,
+        );
+        assert!(!item.ok && item.cancelled && item.unchanged);
+        assert_eq!(serde_json::to_value(&item).unwrap()["unchanged"], true);
+        let kept = native_transfer_with_choice(
+            source.to_str().unwrap(),
+            dest_dir.to_str().unwrap(),
+            "copy",
+            |_| CollisionChoice::KeepBoth,
+        );
+        assert!(kept.error.is_none());
+        assert_eq!(
+            kept.mappings[0].1,
+            dest_dir.join("file copy.txt").to_str().unwrap()
+        );
+        assert_eq!(file_identity(&existing).unwrap(), before);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"existing");
+        assert_eq!(
+            std::fs::read(dest_dir.join("file copy.txt")).unwrap(),
+            b"source"
+        );
+    }
+
+    #[test]
+    fn file_manager_refuses_existing_destination_including_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+        let fixture = TempFixture::new("native-no-overwrite");
+        let source = fixture.0.join("source");
+        let target = fixture.0.join("target");
+        std::fs::write(&source, b"source").unwrap();
+        symlink("missing", &target).unwrap();
+        let before = file_identity(&target).unwrap();
+        let result = NSFileManager::new().copyItemAtURL_toURL_error(
+            &file_url(source.to_str().unwrap()),
+            &file_url(target.to_str().unwrap()),
+        );
+        assert!(result.is_err());
+        assert_eq!(file_identity(&target).unwrap(), before);
+        assert_eq!(std::fs::read_link(&target).unwrap(), Path::new("missing"));
+        assert_eq!(std::fs::read(&source).unwrap(), b"source");
+    }
+
+    #[test]
+    fn keep_both_names_extension_and_dotted_directory_without_overwrite() {
+        let fixture = TempFixture::new("native-names");
+        std::fs::write(fixture.0.join("report copy.txt"), b"unchanged").unwrap();
+        assert_eq!(
+            free_copy_name(&fixture.0, "report.txt", false).unwrap(),
+            fixture.0.join("report copy 1.txt")
+        );
+        assert_eq!(
+            free_copy_name(&fixture.0, "folder.with.dot", true).unwrap(),
+            fixture.0.join("folder.with.dot copy")
+        );
+        assert_eq!(
+            free_copy_name(&fixture.0, ".hidden", false).unwrap(),
+            fixture.0.join(".hidden copy")
+        );
+    }
+
     #[test]
     fn finder_send_allows_foreground_interaction_and_waits_for_completion() {
         use objc2_core_services::{kAECanInteract, kAENeverInteract};
@@ -552,7 +1323,10 @@ mod tests {
         // Interaction is an enum field, not independent flags. Request appropriate
         // interaction as well as permission to bring Finder forward for it.
         let interaction_mask = (kAENeverInteract | kAECanInteract) as i32;
-        assert_eq!(FINDER_SEND_MODE & interaction_mask, kAEAlwaysInteract as i32);
+        assert_eq!(
+            FINDER_SEND_MODE & interaction_mask,
+            kAEAlwaysInteract as i32
+        );
         assert_ne!(FINDER_SEND_MODE & kAECanSwitchLayer as i32, 0);
         // A queued/no-reply send would lose exact completion and Undo receipts.
         assert_eq!(FINDER_SEND_MODE & 0x3, kAEWaitReply as i32);
@@ -731,16 +1505,9 @@ mod tests {
         let direct = event
             .paramDescriptorForKeyword(u32::from_be_bytes(*b"----"))
             .unwrap();
-        assert_eq!(direct.numberOfItems(), 1);
+        assert_eq!(direct.descriptorType(), FILE_URL);
         assert_eq!(
-            direct
-                .descriptorAtIndex(1)
-                .unwrap()
-                .fileURLValue()
-                .unwrap()
-                .path()
-                .unwrap()
-                .to_string(),
+            direct.fileURLValue().unwrap().path().unwrap().to_string(),
             "/tmp/汉字 ' $;\nfile.txt"
         );
         let dest = event
@@ -763,6 +1530,7 @@ mod tests {
         ] {
             let status = error_status(domain, code, "cancel".into());
             assert!(status.cancelled);
+            assert!(!status.unchanged);
             assert!(status.error.is_none());
         }
         let denied = error_status("NSOSStatusErrorDomain", -1743, "denied".into());
@@ -777,6 +1545,7 @@ mod tests {
             mappings: vec![("/source/a".into(), "/actual-trash/a 2".into())],
             error: Some("volume unavailable".into()),
             cancelled: false,
+            unchanged: false,
         });
         assert_eq!(result.entries.len(), 1);
         assert_eq!(result.entries[0].original, "/source/a");
@@ -789,14 +1558,17 @@ mod tests {
         let completion = Completion {
             mappings: vec![("/src/a".into(), "/dst/a renamed".into())],
             cancelled: true,
+            unchanged: true,
             error: None,
         };
         let done = transfer_result("/src/a", "/dst", &completion, false);
         assert!(done.ok);
+        assert!(!done.unchanged);
         assert_eq!(done.dest, "/dst/a renamed");
         let cancelled = transfer_result("/src/b", "/dst", &completion, false);
         assert!(!cancelled.ok);
         assert!(cancelled.cancelled);
+        assert!(cancelled.unchanged);
         assert!(cancelled.dest.is_empty());
         assert!(cancelled.error.is_none());
         let unknown = transfer_result("/src/c", "/dst", &Completion::default(), true);
@@ -804,5 +1576,6 @@ mod tests {
         assert!(unknown.dest.is_empty());
         assert!(unknown.identity.is_none());
         assert_eq!(unknown.affected_directories, vec!["/src", "/dst"]);
+        assert!(!unknown.unchanged);
     }
 }

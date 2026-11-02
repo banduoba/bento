@@ -34,7 +34,7 @@ const bundle = await build({
           : path === 'watch'
             ? `export const setWatch = () => {}; export const clearWatch = () => {}; export const onFsChange = (fn) => globalThis.${bridgeKey}.subscribe(fn)`
             : path === 'viewport'
-              ? 'export { defaultRangeExtractor } from "@tanstack/virtual-core"; export const useVirtualizer = (opts) => ({ measure: () => {}, resizeItem: () => {}, getTotalSize: () => opts.count * opts.estimateSize(), getVirtualItems: () => Array.from({ length: opts.count }, (_, index) => ({ index, key: opts.getItemKey(index), start: index * opts.estimateSize(), size: opts.estimateSize() })), scrollToIndex: () => {} })'
+              ? `export { defaultRangeExtractor } from "@tanstack/virtual-core"; export const useVirtualizer = (opts) => ({ measure: () => globalThis.${bridgeKey}.virtualEvents.push({ type: 'measure', estimate: opts.estimateSize() }), resizeItem: (index, size) => { globalThis.${bridgeKey}.resizeCalls.push({ index, size }); globalThis.${bridgeKey}.virtualEvents.push({ type: 'resize', index, size, estimate: opts.estimateSize() }) }, getTotalSize: () => opts.count * opts.estimateSize(), getVirtualItems: () => Array.from({ length: Math.min(opts.count, globalThis.${bridgeKey}.virtualLimit ?? opts.count) }, (_, index) => ({ index, key: opts.getItemKey(index), start: index * opts.estimateSize(), size: opts.estimateSize() })), scrollToIndex: (index) => globalThis.${bridgeKey}.scrollCalls.push({ size: opts.estimateSize(), index }) })`
               : path === 'icon'
                 ? 'export default function FileIcon() { return null }'
             : path === 'channel'
@@ -64,6 +64,9 @@ export async function mountPane(t, rendererOptions, apiOverrides = {}) {
   const requests = []
   const childRequests = []
   const cancelled = []
+  const scrollCalls = []
+  const resizeCalls = []
+  const virtualEvents = []
   const subscribers = new Set()
   let rows = []
   let stats
@@ -76,6 +79,10 @@ export async function mountPane(t, rendererOptions, apiOverrides = {}) {
     onNav: (...args) => navigations.push(args), onFocus: () => {},
   }
   globalThis[bridgeKey] = {
+    scrollCalls,
+    resizeCalls,
+    virtualEvents,
+    virtualLimit: null,
     api: {
       listDirStream(path, showHidden, id, sortKey, sortDir, channel) {
         return new Promise((resolve, reject) => requests.push({ path, showHidden, id, sortKey, sortDir, channel, resolve, reject }))
@@ -111,7 +118,8 @@ export async function mountPane(t, rendererOptions, apiOverrides = {}) {
     }
   })
   return {
-    requests, childRequests, cancelled, frames, navigations, unmount,
+    requests, childRequests, cancelled, scrollCalls, resizeCalls, virtualEvents, frames, navigations, unmount,
+    setVirtualLimit(value) { globalThis[bridgeKey].virtualLimit = value },
     get rows() { return rows }, get stats() { return stats },
     get root() { return renderer.root },
     async batch(request, entries, done = false, total = 1000) {

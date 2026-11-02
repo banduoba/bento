@@ -19,6 +19,27 @@ test('copy Undo trashes only identified actual destinations using guarded expect
   assert.deepEqual(trash,[[['/dst/a 2'],[{path:'/dst/a 2',...identity}]]]);assert.deepEqual(h.alerts,[])
 })
 
+for (const mode of ['copy', 'move']) test(`${mode} Undo refreshes the requested volume alias without unrelated Copy source refresh`, async t => {
+  const requested = '/Volumes/System/Users/test/target'
+  const actual = '/Volumes/Data/Users/test/target/a'
+  const h = await mountApp(t, {
+    loadConfig: async () => ({ autoRefresh: false }),
+    transfer: async () => [moved('/source/a', actual, { affectedDirectories: ['/source', requested] })],
+    trash: async paths => ({ entries: paths.map(original => ({ original })), error: null }),
+    restoreMoves: async moves => moves.map(item => ({ ...item, ok: true })),
+  })
+  for (const [i, path] of ['/source', requested].entries()) {
+    await h.run(() => h.panes[i].props.onNav(h.panes[i].props.pane.tabs[0].id, path))
+  }
+  await h.run(() => h.panes[1].props.onDropTransfer(requested, ['/source/a'], mode))
+  const beforeUndo = h.panes.map(pane => pane.props.tick)
+  await key(h, 'z', { metaKey: true })
+  assert.notEqual(h.panes[1].props.tick, beforeUndo[1], 'the visible requested alias must refresh after Undo')
+  if (mode === 'copy') assert.equal(h.panes[0].props.tick, beforeUndo[0], 'Copy Undo leaves the unmodified source pane alone')
+  else assert.notEqual(h.panes[0].props.tick, beforeUndo[0], 'Move Undo refreshes the restored source')
+  assert.deepEqual(h.alerts, [])
+})
+
 for(const unknown of ['missing-destination','missing-identity','error','rejected']) {
   test(`unknown native effects (${unknown}) block older unrelated file Undo`,async t=>{
     let calls=0;const restores=[],h=await mountApp(t,{transfer:async()=>{

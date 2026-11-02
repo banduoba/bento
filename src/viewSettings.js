@@ -9,6 +9,7 @@ export const VIEW_SETTINGS_VERSION = 1
 const SORT_KEYS = ['name', 'size', 'kind', 'mtime', 'btime']
 const WIDTH_KEYS = ['name', 'size', 'kind', 'mtime', 'btime']
 const VIS_KEYS = ['mtime', 'btime', 'size', 'kind']
+export const VIEW_MODES = ['icons', 'list', 'columns']
 
 // 全局默认：修改日期，新的在前。desc 表示时间戳从大到小；列头点击仍在 asc / desc 之间切换。
 export const DEFAULT_SORT = { key: 'mtime', dir: 'desc' }
@@ -33,6 +34,7 @@ function builtinView() {
     sort: { ...DEFAULT_SORT },
     columns: { widths: normalizeCols(null), visible: normalizeVis(null) },
     iconSize: null,
+    mode: 'list',
   }
 }
 
@@ -41,6 +43,10 @@ export function normalizeIconSize(value) {
   const n = Number(value)
   if (!Number.isFinite(n)) return null
   return Math.min(64, Math.max(12, Math.round(n)))
+}
+
+export function normalizeViewMode(value) {
+  return VIEW_MODES.includes(value) ? value : 'list'
 }
 
 export function normalizeSort(raw, fallback) {
@@ -80,6 +86,9 @@ export function normalizeView(raw, fallback) {
     iconSize: src && Object.prototype.hasOwnProperty.call(src, 'iconSize')
       ? normalizeIconSize(src.iconSize)
       : normalizeIconSize(base.iconSize),
+    mode: src && Object.prototype.hasOwnProperty.call(src, 'mode')
+      ? normalizeViewMode(src.mode)
+      : normalizeViewMode(base.mode),
   }
 }
 
@@ -87,6 +96,7 @@ export function viewsEqual(a, b) {
   if (!a || !b) return false
   if (a.sort?.key !== b.sort?.key || a.sort?.dir !== b.sort?.dir) return false
   if ((a.iconSize ?? null) !== (b.iconSize ?? null)) return false
+  if (normalizeViewMode(a.mode) !== normalizeViewMode(b.mode)) return false
   for (const k of WIDTH_KEYS) {
     if ((a.columns?.widths?.[k] ?? null) !== (b.columns?.widths?.[k] ?? null)) return false
   }
@@ -142,6 +152,7 @@ export function seedViewSettings(panes, focusedIdx = 0) {
         sort: { key: tab?.sortKey, dir: tab?.sortDir },
         columns: { widths: pane.colWidths, visible: pane.colVisible },
         iconSize: null,
+        mode: 'list',
       },
       store.defaults,
     ),
@@ -180,6 +191,7 @@ export function withFolderPatch(store, pathOrKey, patch) {
       sort: src.sort ?? current.sort,
       columns: src.columns ?? current.columns,
       iconSize: Object.prototype.hasOwnProperty.call(src, 'iconSize') ? src.iconSize : current.iconSize,
+      mode: Object.prototype.hasOwnProperty.call(src, 'mode') ? src.mode : current.mode,
     },
     current,
   )

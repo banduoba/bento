@@ -7,6 +7,38 @@ async function paths(h,left='/source',right='/right') {
   for(const [i,path] of [left,right].entries())await h.run(()=>h.panes[i].props.onNav(h.panes[i].props.pane.tabs[0].id,path))
 }
 const feedback=h=>h.root.findAll(n=>typeof n.props.className==='string' && /(?:undo-toast|row-toast|^prog$)/.test(n.props.className))
+const menuClick=(h,label)=>h.run(()=>h.root.findByProps({'data-label':label}).props.onClick({preventDefault(){},stopPropagation(){}}))
+
+for(const [label,expectedMode,previous] of [['拷贝','copy',[]],['剪切','cut',['/source/old']]]) {
+  test(`context menu ${label} uses the row selected by the same right-click event`,async t=>{
+    const systemCopies=[]
+    const h=await mountApp(t,{copyFilesToClipboard:async paths=>{systemCopies.push(paths);return{ok:true,changeCount:1,ownerToken:'menu-token'}}})
+    await paths(h)
+    const pane=h.panes[0].props,id=pane.pane.tabs[0].id
+    if(previous.length)await h.run(()=>pane.onSelect(id,new Set(previous)))
+    const target={path:'/source/target',name:'target',is_dir:false}
+    await h.run(()=>{h.panes[0].props.onSelect(id,new Set([target.path]));h.panes[0].props.onMenu(id,target,0,0)})
+    await menuClick(h,label)
+    const {mode,paths:selectedPaths}=h.clipboard.getClip()
+    assert.deepEqual({mode,paths:selectedPaths},{mode:expectedMode,paths:[target.path]})
+    assert.deepEqual(systemCopies,[[target.path]])
+    await h.run(()=>h.panes[1].props.onBlankMenu(h.panes[1].props.pane.tabs[0].id,0,0))
+    assert.notEqual(h.root.findByProps({'data-label':'粘贴项目'}).props.disabled,true)
+  })
+}
+
+test('context menu Copy retains the whole existing multi-selection',async t=>{
+  const systemCopies=[],h=await mountApp(t,{copyFilesToClipboard:async paths=>{systemCopies.push(paths);return{ok:true,changeCount:1,ownerToken:'menu-token'}}})
+  await paths(h)
+  const pane=h.panes[0].props,id=pane.pane.tabs[0].id
+  const selected=['/source/a','/source/b']
+  await h.run(()=>pane.onSelect(id,new Set(selected)))
+  await h.run(()=>h.panes[0].props.onMenu(id,{path:selected[1],name:'b',is_dir:false},0,0))
+  await menuClick(h,'拷贝')
+  const {mode,paths:selectedPaths}=h.clipboard.getClip()
+  assert.deepEqual({mode,paths:selectedPaths},{mode:'copy',paths:selected})
+  assert.deepEqual(systemCopies,[selected])
+})
 
 test('native completion without a decoded path calls the drop callback once, refreshes destination, and offers no unsafe Undo',async t=>{
   const gate=deferred(),trash=[]

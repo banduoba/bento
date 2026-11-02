@@ -23,7 +23,7 @@ async function mount(t, renameIndex=0) {
   const geometry={glyphs:200,available:85,viewport:180}
   const listeners=new Map()
   const target=()=>({addEventListener(type,fn){if(!listeners.has(this))listeners.set(this,new Map());const map=listeners.get(this);if(!map.has(type))map.set(type,new Set());map.get(type).add(fn)},removeEventListener(type,fn){listeners.get(this)?.get(type)?.delete(fn)}})
-  const win={...target(),innerHeight:800,requestAnimationFrame:fn=>{frames.set(++frameId,fn);return frameId},cancelAnimationFrame:id=>frames.delete(id),setTimeout,clearTimeout,getComputedStyle:()=>({paddingLeft:'6px',paddingRight:'6px',paddingTop:'1px',paddingBottom:'1px',borderLeftWidth:'1.5px',borderRightWidth:'1.5px',borderTopWidth:'1.5px',borderBottomWidth:'1.5px',lineHeight:'22px'})}
+  const win={...target(),innerHeight:800,requestAnimationFrame:fn=>{frames.set(++frameId,fn);return frameId},cancelAnimationFrame:id=>frames.delete(id),setTimeout,clearTimeout,getComputedStyle:()=>({paddingLeft:'6px',paddingRight:'6px',paddingTop:'1px',paddingBottom:'1px',borderLeftWidth:'1.5px',borderRightWidth:'1.5px',borderTopWidth:'1.5px',borderBottomWidth:'1.5px',lineHeight:'18px'})}
   const doc={defaultView:win,activeElement:null,body:{classList:{add(){},remove(){}}}}
   const entries=Array.from({length:100},(_,n)=>({name:`file${String(n).padStart(3,'0')}.txt`,path:`/fixture/file${String(n).padStart(3,'0')}.txt`,is_dir:false,size:3,mtime_ms:0}))
   globalThis.__renamePane={entries,drags:[]};globalThis.window=win;globalThis.document=doc;globalThis.IS_REACT_ACT_ENVIRONMENT=true
@@ -35,7 +35,7 @@ async function mount(t, renameIndex=0) {
     const name=el.type==='textarea'?'textarea':el.props.className
     if(nodes.has(name))return nodes.get(name)
     const node={...target(),tagName:el.type.toUpperCase(),value:el.props.value||'',style:{setProperty(){}},ownerDocument:doc,scrollTop:0,scrollLeft:0,clientLeft:0,scrollWidth:600,clientWidth:600,scrollHeight:3000,isConnected:true,get clientHeight(){return geometry.viewport},getBoundingClientRect:()=>({left:100,right:100+geometry.available,top:0,width:name==='rename-measure'?geometry.glyphs:600,height:180}),focus(){doc.activeElement=this;this.focusCount=(this.focusCount||0)+1},setSelectionRange(a,b){this.selection=[a,b]},scrollTo({top}){this.scrollTop=top}}
-    if(name==='textarea'){node.parentElement=nodeFor({type:'div',props:{className:'row-name'}});Object.defineProperty(node,'scrollHeight',{get:()=>Math.ceil(geometry.glyphs/Math.max(1,parseFloat(node.style.width)-15))*22+2})}
+    if(name==='textarea'){node.parentElement=nodeFor({type:'div',props:{className:'row-name'}});Object.defineProperty(node,'scrollHeight',{get:()=>Math.ceil(geometry.glyphs/Math.max(1,parseFloat(node.style.width)-15))*18+2})}
     nodes.set(name,node);return node
   }
   let renderer,mounted=true
@@ -51,13 +51,13 @@ const event=patch=>({button:0,clientX:100,clientY:20,preventDefault(){this.preve
 test('one wrapped editing row shifts its virtual neighbors and restores ordinary height on finish',async t=>{
   const h=await mount(t)
   assert.ok(h.rows.length>2,'real virtualizer renders a viewport')
-  assert.equal(h.rows[0].props.style.height,95)
-  assert.equal(h.rows[1].props.style.transform,'translateY(95px)')
+  assert.equal(h.rows[0].props.style.height,79)
+  assert.equal(h.rows[1].props.style.transform,'translateY(79px)')
   assert.equal(h.nodes.get('textarea').focusCount,1)
   assert.deepEqual(h.nodes.get('textarea').selection,[0,7])
   await h.update({renaming:null})
-  assert.equal(h.rows[0].props.style.height,30)
-  assert.equal(h.rows[1].props.style.transform,'translateY(30px)')
+  assert.equal(h.rows[0].props.style.height,24)
+  assert.equal(h.rows[1].props.style.transform,'translateY(24px)')
 })
 
 test('virtual scroll keeps the active editor mounted without focus/selection churn and cleanup releases measurements',async t=>{
@@ -90,12 +90,12 @@ test('editor gestures do not reach row drag/open/selection and blank marquee is 
 test('active row height follows value and viewport changes, and tab switch drops editor measurements',async t=>{
   const h=await mount(t)
   h.geometry.glyphs=20;await h.update({renaming:{...h.props.renaming,value:'x.txt'}})
-  assert.equal(h.rows[0].props.style.height,30);assert.equal(h.rows[1].props.style.transform,'translateY(30px)')
+  assert.equal(h.rows[0].props.style.height,25);assert.equal(h.rows[1].props.style.transform,'translateY(25px)')
   h.geometry.glyphs=600;h.geometry.viewport=100;await h.resize()
   assert.equal(h.rows[0].props.style.height,94);assert.equal(h.nodes.get('textarea').style.overflowY,'auto')
   await h.update({pane:{tabs:[{id:'other',path:'/other',history:['/other'],hi:0,sortKey:'name',sortDir:'asc'}],active:0}})
   assert.equal(h.root.findAllByType('textarea').length,0)
-  assert.ok(h.rows.every(row=>row.props.style.height===30))
+  assert.ok(h.rows.every(row=>row.props.style.height===24))
   assert.equal([...h.observers].filter(o=>[...o.nodes].some(n=>n===h.nodes.get('row-name'))).length,0)
 })
 
@@ -109,7 +109,7 @@ test('selectAll rename selects extension too and cancel restores virtual neighbo
   await h.run(()=>h.root.findByType('textarea').props.onKeyDown(event({key:'Escape'})))
   assert.deepEqual(h.actions,['cancel'])
   await h.update({renaming:null})
-  assert.equal(h.rows[1].props.style.transform,'translateY(30px)')
+  assert.equal(h.rows[1].props.style.transform,'translateY(24px)')
 })
 
 test('starting rename during a marquee releases fixed-row selection listeners without clearing selection',async t=>{

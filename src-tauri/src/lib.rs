@@ -11,7 +11,6 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager};
 
 mod folder_tree;
@@ -20,6 +19,7 @@ mod session_store;
 mod session_exit;
 mod list_stream;
 mod native_icons;
+mod native_menu;
 mod search_results;
 use native_icons::file_icons;
 
@@ -588,6 +588,8 @@ struct TransferItem {
     affected_directories: Vec<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     cancelled: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    unchanged: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     identity: Option<FileIdentity>,
 }
@@ -2709,47 +2711,266 @@ mod zip_tests {
     }
 }
 
-/// 在主线程把文件 URL 写进系统剪贴板（NSURL → NSPasteboard.writeObjects，
-/// 与 Finder ⌘C 同构：每个文件一个 pasteboard item，含 public.file-url 及系统自动补的兼容类型）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileClipboardWrite {
+    ok: bool,
+    change_count: i64,
+    owner_token: Option<String>,
+    error: Option<String>,
+}
+
+/// File URLs and the private ownership token are committed in one pasteboard
+/// write. Other apps see file copy references; Bento alone applies cut/move.
 #[cfg(target_os = "macos")]
-fn write_file_urls_to_pasteboard(paths: &[String]) -> Result<usize, String> {
+fn write_file_urls_to_pasteboard(pb: &objc2_app_kit::NSPasteboard, paths: &[String]) -> FileClipboardWrite {
     use objc2::rc::Retained;
     use objc2::runtime::ProtocolObject;
-    use objc2_app_kit::{NSPasteboard, NSPasteboardWriting};
-    use objc2_foundation::{NSArray, NSString, NSURL};
-    let urls: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = paths
-        .iter()
-        .map(|p| ProtocolObject::from_retained(NSURL::fileURLWithPath(&NSString::from_str(p))))
-        .collect();
-    let arr = NSArray::from_retained_slice(&urls);
-    let pb = NSPasteboard::generalPasteboard();
+    use objc2_app_kit::{NSPasteboardItem, NSPasteboardTypeFileURL, NSPasteboardWriting};
+    use objc2_foundation::{NSArray, NSString, NSURL, NSUUID};
+    let token = NSUUID::UUID().UUIDString();
+    let token_type = NSString::from_str("com.bento.file-clipboard-owner");
+    let mut items: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = Vec::new();
+    for (index, path) in paths.iter().enumerate() {
+        if !path.starts_with('/') {
+            return FileClipboardWrite { ok: false, change_count: pb.changeCount() as i64,
+                owner_token: None, error: Some("文件路径不是绝对路径".into()) };
+        }
+        let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+        let Some(url_string) = url.absoluteString() else {
+            return FileClipboardWrite { ok: false, change_count: pb.changeCount() as i64,
+                owner_token: None, error: Some("无法编码文件 URL".into()) };
+        };
+        let item = NSPasteboardItem::new();
+        if !item.setString_forType(&url_string, unsafe { NSPasteboardTypeFileURL })
+            || (index == 0 && !item.setString_forType(&token, &token_type)) {
+            return FileClipboardWrite { ok: false, change_count: pb.changeCount() as i64,
+                owner_token: None, error: Some("无法创建文件剪贴板项目".into()) };
+        }
+        items.push(ProtocolObject::from_retained(item));
+    }
+    let arr = NSArray::from_retained_slice(&items);
     pb.clearContents();
     if !pb.writeObjects(&arr) {
-        return Err("NSPasteboard.writeObjects 返回 false".into());
+        return FileClipboardWrite { ok: false, change_count: pb.changeCount() as i64,
+            owner_token: None, error: Some("NSPasteboard.writeObjects 返回 false".into()) };
     }
-    Ok(urls.len())
+    FileClipboardWrite { ok: true, change_count: pb.changeCount() as i64,
+        owner_token: Some(token.to_string()), error: None }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileClipboardSnapshot {
+    change_count: i64,
+    paths: Vec<String>,
+    owner_token: Option<String>,
+}
+
+/// Read file objects, never text that happens to resemble a path or URL.
+#[cfg(target_os = "macos")]
+fn read_file_urls_from_pasteboard(pb: &objc2_app_kit::NSPasteboard) -> Result<FileClipboardSnapshot, String> {
+    use std::ffi::CStr;
+    use objc2::ClassType;
+    #[allow(deprecated)]
+    use objc2_app_kit::NSFilenamesPboardType;
+    use objc2_foundation::{NSArray, NSString, NSURL};
+
+    let before = pb.changeCount();
+    let mut paths = Vec::new();
+    let classes = NSArray::from_slice(&[NSURL::class()]);
+    if let Some(items) = unsafe { pb.readObjectsForClasses_options(&classes, None) } {
+        for item in items.iter() {
+            if let Some(url) = item.downcast_ref::<NSURL>() {
+                if !url.isFileURL() { continue; }
+                if let Some(path) = url.filePathURL().and_then(|url| url.path()) {
+                    let path = unsafe { CStr::from_ptr(path.UTF8String()) }.to_string_lossy().into_owned();
+                    if path.starts_with('/') && !paths.contains(&path) { paths.push(path); }
+                }
+            }
+        }
+    }
+    if paths.is_empty() {
+        #[allow(deprecated)]
+        if let Some(items) = pb.propertyListForType(unsafe { NSFilenamesPboardType }) {
+            if let Ok(items) = items.downcast::<NSArray>() {
+                for item in items {
+                    if let Ok(path) = item.downcast::<NSString>() {
+                        let path = unsafe { CStr::from_ptr(path.UTF8String()) }.to_string_lossy().into_owned();
+                        if path.starts_with('/') && !paths.contains(&path) { paths.push(path); }
+                    }
+                }
+            }
+        }
+    }
+    let after = pb.changeCount();
+    if before != after { return Err("剪贴板在读取期间发生变化，请重试粘贴".into()); }
+    let token_type = NSString::from_str("com.bento.file-clipboard-owner");
+    let owner_token = pb.stringForType(&token_type).map(|value| value.to_string());
+    if pb.changeCount() != after { return Err("剪贴板在读取期间发生变化，请重试粘贴".into()); }
+    Ok(FileClipboardSnapshot { change_count: after as i64, paths, owner_token })
+}
+
+#[tauri::command]
+async fn read_file_clipboard(app: AppHandle) -> Result<FileClipboardSnapshot, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
+        let _ = tx.send(read_file_urls_from_pasteboard(&pb));
+    }).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(|e| e.to_string())?)
+        .await.map_err(|e| e.to_string())?
+}
+
+#[cfg(target_os = "macos")]
+enum ClipboardImage {
+    Png(Vec<u8>),
+    Tiff(Vec<u8>),
+}
+
+/// Only typed image data is accepted. The expected count ties this read to
+/// the file-URL snapshot taken when the paste gesture began.
+#[cfg(target_os = "macos")]
+fn read_clipboard_image(expected_change_count: i64) -> Result<Option<ClipboardImage>, String> {
+    use objc2_app_kit::{NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeTIFF};
+    let pb = NSPasteboard::generalPasteboard();
+    if pb.changeCount() as i64 != expected_change_count {
+        return Err("剪贴板在粘贴期间发生变化，请重试".into());
+    }
+    let image = if let Some(data) = pb.dataForType(unsafe { NSPasteboardTypePNG }) {
+        Some(ClipboardImage::Png(data.to_vec()))
+    } else {
+        pb.dataForType(unsafe { NSPasteboardTypeTIFF })
+            .map(|data| ClipboardImage::Tiff(data.to_vec()))
+    };
+    if pb.changeCount() as i64 != expected_change_count {
+        return Err("剪贴板在读取图片期间发生变化，请重试".into());
+    }
+    Ok(image)
+}
+
+#[cfg(target_os = "macos")]
+fn clipboard_image_as_png(image: ClipboardImage) -> Result<Vec<u8>, String> {
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep};
+    use objc2_foundation::{NSData, NSDictionary};
+    let (bytes, is_png) = match image {
+        ClipboardImage::Png(bytes) => (bytes, true),
+        ClipboardImage::Tiff(bytes) => (bytes, false),
+    };
+    if bytes.is_empty() { return Err("剪贴板图片为空".into()); }
+    let data = NSData::with_bytes(&bytes);
+    let rep = NSBitmapImageRep::imageRepWithData(&data)
+        .ok_or("无法解码剪贴板图片")?;
+    if is_png { return Ok(bytes); }
+    let properties = NSDictionary::dictionary();
+    let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &properties) }
+        .ok_or("无法将剪贴板图片转换为 PNG")?;
+    Ok(png.to_vec())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod clipboard_image_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_file_items_remain_readable_as_urls_with_owner_token() {
+        let pb = objc2_app_kit::NSPasteboard::pasteboardWithUniqueName();
+        let paths = vec!["/tmp/Bento one.txt".to_string(), "/tmp/Bento 二.txt".to_string()];
+        let written = write_file_urls_to_pasteboard(&pb, &paths);
+        assert!(written.ok, "{:?}", written.error);
+        let snapshot = read_file_urls_from_pasteboard(&pb).unwrap();
+        assert_eq!(snapshot.paths, paths);
+        assert_eq!(snapshot.change_count, written.change_count);
+        assert_eq!(snapshot.owner_token, written.owner_token);
+    }
+
+    #[test]
+    fn tiff_image_becomes_png_and_existing_destination_is_preserved() {
+        // A real 1x1 RGB TIFF, rather than a filename or text URL.
+        let tiff: [u8; 143] = [
+            73,73,42,0,8,0,0,0,10,0,0,1,4,0,1,0,0,0,1,0,0,0,1,1,4,0,1,0,0,0,1,0,0,0,
+            2,1,3,0,3,0,0,0,134,0,0,0,3,1,3,0,1,0,0,0,1,0,0,0,6,1,3,0,1,0,0,0,2,0,0,0,
+            17,1,4,0,1,0,0,0,140,0,0,0,21,1,3,0,1,0,0,0,3,0,0,0,22,1,4,0,1,0,0,0,1,0,0,0,
+            23,1,4,0,1,0,0,0,3,0,0,0,28,1,3,0,1,0,0,0,1,0,0,0,0,0,0,0,8,0,8,0,8,0,123,45,67,
+        ];
+        let png = clipboard_image_as_png(ClipboardImage::Tiff(tiff.to_vec())).unwrap();
+        assert!(png.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]));
+        let dir = std::env::temp_dir().join(format!("bento-image-paste-{}-{}",
+            std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&dir).unwrap();
+        let first = dir.join("粘贴的图片.png");
+        fs::write(&first, b"existing user file").unwrap();
+        let path = place_new_file(&dir, "粘贴的图片.png", |path| write_clipboard_png(path, &png), "粘贴图片失败").unwrap();
+        assert_eq!(path.file_name().unwrap(), "粘贴的图片 2.png");
+        assert_eq!(fs::read(first).unwrap(), b"existing user file");
+        assert_eq!(fs::read(&path).unwrap(), png);
+        assert!(completion_receipt(path).identity.is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+/// Create a new destination file without replacing any existing name. If a
+/// write fails, remove only the inode opened by this operation.
+fn write_clipboard_png(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    let opened_identity = file.metadata().ok().map(|metadata| {
+        use std::os::unix::fs::MetadataExt;
+        FileIdentity { dev: metadata.dev().to_string(), ino: metadata.ino().to_string() }
+    });
+    let result = file.write_all(bytes).and_then(|_| file.sync_all());
+    drop(file);
+    if let Err(error) = result {
+        if opened_identity.is_some() && opened_identity.as_ref() == file_identity(path).ok().as_ref() {
+            let _ = fs::remove_file(path);
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Materialize a copied image in the active directory without transferring
+/// image bytes through JavaScript. A text-only clipboard returns null.
+#[tauri::command]
+async fn paste_image_from_clipboard(
+    dest: String,
+    expected_change_count: i64,
+    app: AppHandle,
+) -> Result<Option<WriteReceipt>, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.run_on_main_thread(move || {
+        let _ = tx.send(read_clipboard_image(expected_change_count));
+    }).map_err(|e| e.to_string())?;
+    let image = tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(|e| e.to_string())?)
+        .await.map_err(|e| e.to_string())??;
+    let Some(image) = image else { return Ok(None); };
+    tauri::async_runtime::spawn_blocking(move || {
+        let png = clipboard_image_as_png(image)?;
+        let path = place_new_file(Path::new(&dest), "粘贴的图片.png",
+            |path| write_clipboard_png(path, &png), "粘贴图片失败")?;
+        Ok(Some(completion_receipt(path)))
+    }).await.map_err(|e| e.to_string())?
 }
 
 /// 把文件引用写进系统剪贴板（public.file-url，Finder/微信/邮件粘贴文件本体）
 #[tauri::command]
-async fn copy_files_to_clipboard(paths: Vec<String>, app: AppHandle) -> Result<(), String> {
+async fn copy_files_to_clipboard(paths: Vec<String>, app: AppHandle) -> Result<FileClipboardWrite, String> {
     if paths.is_empty() {
-        return Ok(());
+        return Ok(FileClipboardWrite { ok: false, change_count: -1,
+            owner_token: None, error: Some("没有可复制的文件".into()) });
     }
     eprintln!("[clipboard] writing {} paths: {:?}", paths.len(), paths);
     let (tx, rx) = std::sync::mpsc::channel();
     app.run_on_main_thread(move || {
-        let _ = tx.send(write_file_urls_to_pasteboard(&paths));
+        let pb = objc2_app_kit::NSPasteboard::generalPasteboard();
+        let _ = tx.send(write_file_urls_to_pasteboard(&pb, &paths));
     })
     .map_err(|e| e.to_string())?;
-    let r = tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(|e| e.to_string())?)
+    let r = tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(|e| e.to_string()))
         .await
-        .map_err(|e| e.to_string())?;
-    match &r {
-        Ok(n) => eprintln!("[clipboard] NSPasteboard wrote {} file urls", n),
-        Err(e) => eprintln!("[clipboard] failed: {}", e),
-    }
-    r.map(|_| ())
+        .map_err(|e| e.to_string())??;
+    eprintln!("[clipboard] NSPasteboard changeCount {} ok={}", r.change_count, r.ok);
+    Ok(r)
 }
 
 /// 打开系统的「完全磁盘访问权限」设置页
@@ -2909,44 +3130,7 @@ pub fn run() {
                 })
                 .expect("fs watcher"),
             );
-            // 自定义菜单：不带任何会与前端冲突的标准快捷键
-            // （默认菜单的 ⌘W 关窗 / ⌘R 刷新 / ⌘C 拷贝 会抢先拦截按键事件）
-            // 「关于」面板全英文：内容在此显式给出，面板自带标签（Version 等）的语言由 src-tauri/Info.plist 的
-            // CFBundleLocalizations=en 决定（否则会跟随系统语言变成中文）
-            let about_meta = AboutMetadataBuilder::new()
-                .name(Some("Bento"))
-                .version(Some(env!("CARGO_PKG_VERSION")))
-                .copyright(Some("Copyright © 2026 banduoba. Released under the MIT License."))
-                .comments(Some("A lightweight multi-pane file manager for macOS."))
-                .website(Some("https://github.com/banduoba/bento"))
-                .build();
-            let about = PredefinedMenuItem::about(app, Some("About Bento"), Some(about_meta))?;
-            let quit = PredefinedMenuItem::quit(app, None)?;
-            let app_menu = SubmenuBuilder::new(app, "Bento")
-                .item(&about)
-                .separator()
-                .item(&quit)
-                .build()?;
-
-            let close_item = MenuItemBuilder::with_id("close-win", "Close Window").build(app)?;
-            let file_menu = SubmenuBuilder::new(app, "File").item(&close_item).build()?;
-
-            // The custom Undo accelerator has one frontend route for files and text.
-            // Keep clipboard accelerators in the webview's existing handlers.
-            let undo = MenuItemBuilder::with_id("edit-undo", "Undo").accelerator("CmdOrCtrl+Z").build(app)?;
-            let edit_menu = SubmenuBuilder::new(app, "Edit").item(&undo).build()?;
-
-            let minimize = PredefinedMenuItem::minimize(app, None)?;
-            let maximize = PredefinedMenuItem::maximize(app, None)?;
-            let window_menu = SubmenuBuilder::new(app, "Window")
-                .item(&minimize)
-                .item(&maximize)
-                .build()?;
-
-            let menu = MenuBuilder::new(app)
-                .items(&[&app_menu, &file_menu, &edit_menu, &window_menu])
-                .build()?;
-            app.set_menu(menu)?;
+            native_menu::install(app)?;
 
             // 启动即预热 fsearch 引擎（后台加载/构建索引），避免首次搜索时慢
             {
@@ -2968,16 +3152,10 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            if event.id().0 == "edit-undo" {
-                if let Some(w) = app.get_webview_window("main") { let _ = w.emit("bento-edit-undo", ()); }
-            }
-            if event.id().0 == "close-win" {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.close();
-                }
-            }
+            native_menu::dispatch(app, &event.id().0);
         })
         .invoke_handler(tauri::generate_handler![
+            native_menu::sync_menu_state,
             list_dir,
             list_subdirectories,
             list_stream::list_dir_stream,
@@ -3011,6 +3189,8 @@ pub fn run() {
             read_text_preview,
             dir_activity,
             copy_files_to_clipboard,
+            read_file_clipboard,
+            paste_image_from_clipboard,
             set_watched,
             open_privacy_settings,
             disk_space,

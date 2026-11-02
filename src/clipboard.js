@@ -1,4 +1,4 @@
-// 应用内文件剪贴板：路径 + 模式。与系统粘贴板分开，剪切只在 Bento 里生效。
+// 应用内文件剪贴板：路径 + 模式。系统粘贴板提供文件复制引用；剪切移动只在 Bento 里生效。
 
 /** @typedef {{ mode: 'copy' | 'cut', paths: string[] }} FileClip */
 
@@ -30,5 +30,5 @@ export function clearCut() {
 export function retainCut(paths) {
   if (clip?.mode !== 'cut') return
   if (!paths.length) setClip(null)
-  else setClip({ mode: 'cut', paths: [...paths] })
+  else setClip({ ...clip, paths: [...paths] })
 }

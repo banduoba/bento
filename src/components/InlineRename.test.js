@@ -23,13 +23,13 @@ async function mount(t, value = 'Report.txt') {
   const listeners = new Set(), observers = [], heights = [], actions = [], changes = []
   const geometry = { available: 300, viewport: 180, glyphs: 70, viewportLeft: 0, viewportWidth: 1000, clientLeft: 0, paddingLeft: 0, paddingRight: 0, scrollLeft: 0 }
   const scrollListeners = new Set()
-  const win = { addEventListener(type, fn) {if(type === 'resize') listeners.add(fn)}, removeEventListener(type, fn) {if(type === 'resize') listeners.delete(fn)}, getComputedStyle(node) {if(node === viewport) return {paddingLeft: String(geometry.paddingLeft), paddingRight: String(geometry.paddingRight)};return {paddingLeft:'6px',paddingRight:'6px',paddingTop:'1px',paddingBottom:'1px',borderLeftWidth:'1.5px',borderRightWidth:'1.5px',borderTopWidth:'1.5px',borderBottomWidth:'1.5px',lineHeight:'22px'}} }
+  const win = { addEventListener(type, fn) {if(type === 'resize') listeners.add(fn)}, removeEventListener(type, fn) {if(type === 'resize') listeners.delete(fn)}, getComputedStyle(node) {if(node === viewport) return {paddingLeft: String(geometry.paddingLeft), paddingRight: String(geometry.paddingRight)};return {paddingLeft:'6px',paddingRight:'6px',paddingTop:'1px',paddingBottom:'1px',borderLeftWidth:'1.5px',borderRightWidth:'1.5px',borderTopWidth:'1.5px',borderBottomWidth:'1.5px',lineHeight:'18px'}} }
   globalThis.window = win
   globalThis.document = {activeElement: null}
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
   globalThis.ResizeObserver = class { constructor(cb) {this.cb=cb; this.nodes=new Set(); observers.push(this)} observe(n) {this.nodes.add(n)} disconnect() {this.nodes.clear()} }
   const container = {getBoundingClientRect: () => ({right:100+geometry.available-geometry.scrollLeft}), ownerDocument:{defaultView:win}}
-  const input = {style:{}, parentElement:container, ownerDocument:{defaultView:win}, getBoundingClientRect:()=>({left:100-geometry.scrollLeft+(parseFloat(input.style.marginLeft)||0)}), get scrollHeight() {return Math.max(1, Math.ceil(geometry.glyphs / Math.max(1, parseFloat(this.style.width)-15))) * 22 + 2} }
+  const input = {style:{}, parentElement:container, ownerDocument:{defaultView:win}, getBoundingClientRect:()=>({left:100-geometry.scrollLeft+(parseFloat(input.style.marginLeft)||0)}), get scrollHeight() {return Math.max(1, Math.ceil(geometry.glyphs / Math.max(1, parseFloat(this.style.width)-15))) * 18 + 2} }
   const mirror = {getBoundingClientRect:()=>({width:geometry.glyphs})}
   const viewport = {get scrollLeft() {return geometry.scrollLeft}, get clientHeight() {return geometry.viewport}, get clientWidth() {return geometry.viewportWidth}, get clientLeft() {return geometry.clientLeft}, getBoundingClientRect:()=>({left:geometry.viewportLeft}), addEventListener(type,fn) {if(type==='scroll')scrollListeners.add(fn)}, removeEventListener(type,fn) {if(type==='scroll')scrollListeners.delete(fn)}}
   const props = {renameRef:{current:null},scrollRef:{current:viewport},renamingHere:{value},onRenameHeight:n=>heights.push(n),onRenameChange:v=>changes.push(v),onRenameCommit:()=>actions.push('commit'),onRenameCancel:()=>actions.push('cancel')}
@@ -48,8 +48,8 @@ test('Pane renders a native soft wrapping rename textarea fitted to actual glyph
   assert.equal(h.editor.type,'textarea')
   assert.equal(h.editor.props.wrap,'soft')
   assert.equal(h.input.style.width,'87px')
-  assert.equal(h.input.style.height,'27px')
-  assert.deepEqual(h.heights,[30])
+  assert.equal(h.input.style.height,'23px')
+  assert.deepEqual(h.heights,[25])
   h.geometry.glyphs=140; await h.update('中文文件名.txt')
   assert.equal(h.input.style.width,'157px')
   h.geometry.glyphs=10; await h.update('x')
@@ -60,14 +60,14 @@ test('long names wrap after fixed row controls; width/value shrink restores one 
   const h=await mount(t,'long name.txt')
   h.geometry.available=85; h.geometry.glyphs=350; await h.resize()
   assert.equal(h.input.style.width,'79px')
-  assert.equal(h.input.style.height,'137px')
-  assert.equal(h.heights.at(-1),139)
+  assert.equal(h.input.style.height,'113px')
+  assert.equal(h.heights.at(-1),115)
   h.geometry.available=35; await h.resize()
   assert.equal(h.input.style.width,'29px','available width overrides minimum')
   assert.equal(h.input.style.height,'172px')
   assert.equal(h.input.style.overflowY,'auto')
   h.geometry.available=400; h.geometry.glyphs=20; await h.update('a b.txt')
-  assert.equal(h.input.style.width,'48px'); assert.equal(h.input.style.height,'27px'); assert.equal(h.heights.at(-1),30)
+  assert.equal(h.input.style.width,'48px'); assert.equal(h.input.style.height,'23px'); assert.equal(h.heights.at(-1),25)
   const count=h.heights.length; await h.resize(); assert.equal(h.heights.length,count,'unchanged dimensions do not publish another row size')
   assert.equal(h.observers.length,1); assert.equal(h.observers[0].nodes.size,2); assert.equal(h.listeners.size,1)
   await h.unmount(); assert.equal(h.observers[0].nodes.size,0); assert.equal(h.listeners.size,0)
@@ -121,12 +121,12 @@ test('saved wide name column wraps within the visible viewport client box and fo
   await h.resize()
   // Client box [22,232], usable content [26,226], editor starts at 100.
   assert.equal(h.input.style.width,'126px')
-  assert.equal(h.input.style.height,'137px')
+  assert.equal(h.input.style.height,'113px')
   assert.equal(h.scrollListeners.size,1)
   h.geometry.scrollLeft=140;await h.scroll()
   assert.equal(h.input.style.marginLeft,'66px','scrolled-off editor start is brought into the visible intersection')
   assert.equal(h.input.style.width,'200px')
-  assert.equal(h.input.style.height,'93px')
+  assert.equal(h.input.style.height,'77px')
   h.geometry.scrollLeft=0;await h.scroll()
   assert.equal(h.input.style.marginLeft,'0px');assert.equal(h.input.style.width,'126px')
   h.geometry.viewportWidth=350;await h.resize()
