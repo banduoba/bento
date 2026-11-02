@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { open } from '@tauri-apps/plugin-dialog'
+import { useEffect, useRef, useState } from 'react'
+import { open, save } from '@tauri-apps/plugin-dialog'
 import { api, hasTauri } from '../api'
 import AboutSection from './AboutSection'
 
@@ -8,11 +8,14 @@ import AboutSection from './AboutSection'
  * cfg.searchPaths 为空 = 搜索全部已索引位置；非空 = 结果限定在这些目录（及其子目录）内
  */
 export default function SettingsDialog({
-  open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, enterAction, onEnterActionChange, onClose,
+  open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, enterAction, onEnterActionChange, onExportSettings, onImportSettings, onClose,
 }) {
   const [busy, setBusy] = useState(false)
   const [fda, setFda] = useState(null) // null=查询中
   const [section, setSection] = useState('search')
+  const [backupBusy, setBackupBusy] = useState(false)
+  const backupRunning = useRef(false)
+  const [backupNotice, setBackupNotice] = useState(null)
 
   useEffect(() => {
     if (!visible) return
@@ -47,6 +50,31 @@ export default function SettingsDialog({
     setBusy(false)
   }
 
+  const backup = async importing => {
+    if (!hasTauri || backupRunning.current) return
+    backupRunning.current = true
+    setBackupBusy(true)
+    setBackupNotice(null)
+    try {
+      const filters = [{ name: 'JSON', extensions: ['json'] }]
+      if (importing) {
+        const selected = await open({ title: '导入 Bento 设置', multiple: false, directory: false, filters })
+        if (typeof selected !== 'string') return
+        await onImportSettings(await api.readSettingsBackup(selected))
+      } else {
+        const selected = await save({ title: '导出 Bento 设置', defaultPath: 'Bento-settings.json', filters })
+        if (typeof selected !== 'string') return
+        await api.exportSettingsBackup(selected, onExportSettings())
+      }
+      setBackupNotice({ error: false, text: importing ? '设置已导入。' : '设置已导出。' })
+    } catch (error) {
+      setBackupNotice({ error: true, text: `${importing ? '导入失败' : '导出失败'}：${error}` })
+    } finally {
+      backupRunning.current = false
+      setBackupBusy(false)
+    }
+  }
+
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="modal settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"
@@ -54,7 +82,7 @@ export default function SettingsDialog({
         <div className="modal-title" id="settings-title">设置</div>
         <div className="settings-body">
           <nav className="settings-nav" aria-label="设置分组">
-            {[['search', '搜索'], ['general', '通用'], ['permission', '权限'], ['about', '关于']].map(([id, label]) => (
+            {[['search', '搜索'], ['general', '通用'], ['backup', '备份'], ['permission', '权限'], ['about', '关于']].map(([id, label]) => (
               <button key={id} className={`settings-nav-item${section === id ? ' on' : ''}`}
                 aria-current={section === id ? 'page' : undefined} aria-controls={`settings-${id}`}
                 onClick={() => setSection(id)}>
@@ -64,6 +92,29 @@ export default function SettingsDialog({
           </nav>
           <div className="settings-content">
             {section === 'about' && <AboutSection />}
+            {section === 'backup' && <section id="settings-backup" className="settings-group" aria-labelledby="settings-backup-title" aria-busy={backupBusy}>
+              <h2 id="settings-backup-title">设置备份</h2>
+              <div className="settings-card">
+                <div className="settings-option">
+                  <div className="settings-label">
+                    <div className="settings-option-title">导出偏好设置</div>
+                    <p>保存通用偏好、侧栏设置、搜索偏好与范围、收藏夹（含目录路径）到 JSON 文件。</p>
+                  </div>
+                  <button className="btn small" onClick={() => backup(false)} disabled={!hasTauri || backupBusy}>导出设置…</button>
+                </div>
+                <div className="settings-option">
+                  <div className="settings-label">
+                    <div className="settings-option-title">导入偏好设置</div>
+                    <p>从 Bento 设置备份替换上述偏好，保存成功后立即应用。</p>
+                  </div>
+                  <button className="btn small" onClick={() => backup(true)} disabled={!hasTauri || backupBusy}>导入设置…</button>
+                </div>
+              </div>
+              <p className="settings-hint">不包含压缩设置与密码、标签页、导航历史、工作区、布局或文件夹视图。</p>
+              {!hasTauri && <p className="settings-hint">请在 Bento 桌面应用中导入或导出设置。</p>}
+              {backupBusy && <p role="status" className="settings-hint">正在处理设置备份…</p>}
+              {backupNotice && <p role={backupNotice.error ? 'alert' : 'status'} className="settings-hint">{backupNotice.text}</p>}
+            </section>}
             {section === 'search' && <section id="settings-search" className="settings-group" aria-labelledby="settings-search-title">
               <h2 id="settings-search-title">搜索</h2>
               <div className="settings-card">

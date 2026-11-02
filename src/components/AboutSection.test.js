@@ -20,7 +20,7 @@ const bundle = await build({
     builder.onLoad({ filter: /.*/, namespace: 'test' }, ({ path }) => ({ contents: path === 'api'
       ? 'export const hasTauri = globalThis.__aboutTest.native; export const api = { fsearchStatus: async () => ({}), openPath: url => globalThis.__aboutTest.openPath(url) }'
       : path === 'version' ? 'export const getVersion = () => globalThis.__aboutTest.getVersion()'
-        : 'export const open = async () => null', loader: 'js' }))
+        : 'export const open = async () => null; export const save = async () => null', loader: 'js' }))
   } }],
 })
 function loadDialog() {
