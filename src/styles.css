@@ -879,7 +879,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .column-inner { position: relative; }
 .column-position { position: absolute; left: 0; right: 0; height: 21px; }
 .column-position:has(.rename-input) { z-index: 2; height: auto; min-height: 25px; }
-.column-item { height: 20px; margin: 0 4px; padding: 0 9px; border-radius: 3px; display: flex; align-items: center; gap: 7px; cursor: default; font-size: 12px; }
+.column-item { height: 20px; margin: 0 4px; padding: 0 9px; border-radius: 4px; display: flex; align-items: center; gap: 7px; cursor: default; font-size: 12px; }
 .column-item:has(.rename-input) { height: auto; min-height: 25px; background: var(--pane-bg); }
 .column-item:hover { background: var(--row-hover); }
 .column-item.selected { background: var(--row-sel-focus); }
@@ -907,7 +907,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   right: 4px;
   top: 1px;
   bottom: 1px;
-  border-radius: 3px;
+  border-radius: 4px;
   pointer-events: none;
 }
 .row > * { position: relative; z-index: 1; }
@@ -1002,7 +1002,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
     background: var(--row-sel-focus);
   }
 }
-.row.drop-target::before { border-radius: 3px; }
+.row.drop-target::before { border-radius: 4px; }
 
 .row-name {
   display: flex;
