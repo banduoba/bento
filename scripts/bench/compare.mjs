@@ -70,9 +70,13 @@ export function compareReports(baseline, candidate, { threshold = 0.2, floorMs =
   const metrics = []
   const add = (name, before, after, kind) => {
     const delta = after.median - before.median
+    const limit = Math.max(before.median * threshold, floorMs)
+    // Absorb subtraction/multiplication roundoff at an exact boundary, never
+    // the report's 0.001 ms resolution. The cap also bounds very large inputs.
+    const roundoff = Math.min(0.0000001, Number.EPSILON * 4 * Math.max(1, before.median, after.median, limit))
     metrics.push({ name, kind, baseline_ms: before.median, candidate_ms: after.median, delta_ms: delta,
       relative_change: before.median === 0 ? (delta === 0 ? 0 : null) : delta / before.median,
-      status: delta > Math.max(before.median * threshold, floorMs) ? 'regression' : 'pass' })
+      status: delta - limit > roundoff ? 'regression' : 'pass' })
   }
   for (const name of ['scan_node', 'scan_rust']) {
     if (!a[name]) continue

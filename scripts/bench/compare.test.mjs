@@ -40,6 +40,25 @@ test('requires both relative threshold and absolute floor to be exceeded', () =>
   assert.equal(compareReports(baseline, candidate, { threshold: 0, floorMs: 0 }).metrics.filter(m => m.status === 'regression').length, 2)
 })
 
+test('fractional relative equality passes but 0.001 ms above it regresses', () => {
+  const baseline = report(), candidate = report()
+  baseline.headless.scan_node.scan_ms = stats(5.005)
+  candidate.headless.scan_node.scan_ms = stats(6.006)
+  assert.equal(compareReports(baseline, candidate).status, 'pass')
+  candidate.headless.scan_node.scan_ms = stats(6.007)
+  assert.equal(compareReports(baseline, candidate).status, 'regression')
+})
+
+test('fractional absolute equality passes but 0.001 ms above it regresses', () => {
+  const baseline = report(), candidate = report()
+  baseline.headless.scan_node.scan_ms = stats(5.005)
+  candidate.headless.scan_node.scan_ms = stats(6.006)
+  const options = { threshold: 0, floorMs: 1.001 }
+  assert.equal(compareReports(baseline, candidate, options).status, 'pass')
+  candidate.headless.scan_node.scan_ms = stats(6.007)
+  assert.equal(compareReports(baseline, candidate, options).status, 'regression')
+})
+
 test('supports zero baselines without nonfinite JSON ratios', () => {
   const baseline = report(), candidate = report()
   baseline.headless.scan_node.json_ms = stats(0)
