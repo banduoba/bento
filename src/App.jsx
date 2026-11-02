@@ -231,7 +231,12 @@ export default function App() {
   const queuePersistence = c => {
     if (!c) return
     savers.current.session.update(sessionForDisk(c))
-    if (!settingsImport.current) savers.current.config.update(preferencesForDisk(c))
+    const importing = settingsImport.current
+    if (!importing || importing.persisted) {
+      // Before React applies the import, project its successfully saved preferences
+      // over the latest live config. Close can then flush newer unrelated settings.
+      savers.current.config.update({ ...preferencesForDisk(c), ...(importing?.preferences || {}) })
+    }
     if (c.viewSettings) savers.current.views.update(c.viewSettings)
   }
   const flushPersistence = async () => {
@@ -261,6 +266,7 @@ export default function App() {
         // Drain the existing writer before snapshotting unrelated live preferences.
         await savers.current.config.flush()
         await savers.current.config.commit({ ...preferencesForDisk(cfgRef.current), ...preferences })
+        operation.persisted = true
         const resumeAutoRefresh = preferences.autoRefresh && cfgRef.current.autoRefresh === false
         // Functional merge preserves any tab, workspace or folder-view changes made during IO.
         setCfg(current => ({ ...current, ...preferences }))

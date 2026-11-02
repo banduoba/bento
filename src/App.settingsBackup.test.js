@@ -72,3 +72,28 @@ test('importing auto refresh from disabled to enabled reconciles visible directo
   await h.run(() => settings(h).onImportSettings(enabled))
   assert.deepEqual(h.panes.map(p => p.props.tick), after)
 })
+test('close saves unrelated archive preferences changed during import before native destruction', async t => {
+  const gate = deferred(), writes = []
+  const h = await mountApp(t, {
+    saveConfig: async value => { writes.push(value); if (value.searchPaths.includes('/Imported')) await gate.promise },
+    zipPathsWithReceipt: async () => ({ entries: [] }),
+  })
+  const component = name => h.root.findAll(n => typeof n.type === 'function' && n.type.name === name)[0]
+  let imported
+  await h.run(() => { imported = settings(h).onImportSettings(text) })
+  await h.run(() => h.panes[0].props.onMenu(h.panes[0].props.pane.tabs[0].id, { path: '/home/file', name: 'file', is_dir: false }, 1, 1))
+  await h.run(() => component('ContextMenu').props.menu.items.find(item => item?.label?.startsWith('压缩')).action())
+  const zipPrefs = { mode: 'fast', level: 6, oneClick: true, separate: false, keepPassword: true, password: 'new-secret' }
+  await h.run(() => component('ZipDialog').props.onSubmit({ dir: '/home', name: 'a.zip' }, zipPrefs))
+  const win = globalThis.__bentoAppTestBridge.win
+  const destroy = win.destroy
+  let atDestroy
+  win.destroy = async () => { atDestroy = structuredClone(writes.at(-1)); await destroy() }
+  await h.run(async () => {
+    const close = h.close()
+    gate.resolve(); await imported; await close.pending
+    assert.equal(h.destroyed, 1)
+    assert.deepEqual(atDestroy.zipPrefs, zipPrefs)
+    assert.deepEqual(atDestroy.searchPaths, ['/Imported'])
+  })
+})
