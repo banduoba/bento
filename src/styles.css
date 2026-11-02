@@ -586,12 +586,12 @@ input, textarea {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 9px;
+  padding: 3px 9px;
   border-bottom: 1px solid var(--border);
   box-shadow: inset 0 1px 0 var(--chrome-highlight);
   background: var(--pane-head-bg);
 }
-.pane.focused .pane-head { background: var(--pane-head-focus-bg); }
+.pane.focused .pane-head { background: color-mix(in srgb, var(--accent-soft) 35%, var(--pane-head-focus-bg)); }
 .navbtns { display: flex; gap: 2px; }
 .navbtns button, .iconbtn {
   border: none;
@@ -616,10 +616,10 @@ input, textarea {
   overflow-x: auto;
   scrollbar-width: none;
   min-width: 0;
-  padding: 2px 4px;
-  border-radius: 8px;
-  background: var(--soft-bg);
-  box-shadow: inset 0 0 0 1px var(--inset-border);
+  padding: 2px 3px;
+  border-radius: 15px;
+  background: var(--control-bg);
+  box-shadow: inset 0 0 0 1px var(--accent-line), inset 0 1px 2px var(--inset-border);
   height: 28px;
 }
 .crumbs::-webkit-scrollbar { display: none; }
@@ -693,9 +693,9 @@ input, textarea {
   color: var(--text);
   background: var(--control-bg);
   border: 1.5px solid var(--accent);
-  border-radius: 8px;
+  border-radius: 15px;
   outline: none;
-  padding: 0 8px;
+  padding: 0 7px;
   box-shadow: var(--focus-ring);
 }
 .path-edit.invalid .path-input {
@@ -763,7 +763,7 @@ input, textarea {
 .crumb {
   border: none;
   background: transparent;
-  padding: 2px 6px;
+  padding: 2px 4px;
   border-radius: 6px;
   cursor: pointer;
   font-size: 12.5px;
@@ -772,7 +772,8 @@ input, textarea {
   flex: none;
 }
 .crumb:hover { background: var(--hover-bg); }
-.crumb-sep { color: var(--disabled-text); font-size: 11px; flex: none; }
+.crumb-sep { position: relative; width: 7px; height: 8px; flex: none; font-size: 0; color: transparent; }
+.crumb-sep::before { content: ''; position: absolute; left: 1px; top: 1px; border-top: 3px solid transparent; border-bottom: 3px solid transparent; border-left: 4px solid var(--text-2); }
 .crumb.current { color: var(--text); font-weight: 600; }
 
 .filterbox {
@@ -781,8 +782,8 @@ input, textarea {
   gap: 5px;
   background: var(--filter-bg);
   box-shadow: inset 0 0 0 1px var(--inset-border);
-  border-radius: 8px;
-  padding: 0 8px;
+  border-radius: 15px;
+  padding: 0 7px;
   height: 28px;
   flex: none;
   color: var(--text-2);
@@ -874,10 +875,10 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .column-scroll { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overflow-x: hidden; }
 .column-status { padding: 10px 12px; color: var(--text-2); font-size: 12px; }
 .column-inner { position: relative; }
-.column-position { position: absolute; left: 0; right: 0; height: 24px; }
-.column-position:has(.rename-input) { z-index: 2; height: auto; min-height: 24px; }
-.column-item { height: 23px; margin: 0 4px; padding: 0 9px; border-radius: 6px; display: flex; align-items: center; gap: 7px; cursor: default; font-size: 12px; }
-.column-item:has(.rename-input) { height: auto; min-height: 23px; background: var(--pane-bg); }
+.column-position { position: absolute; left: 0; right: 0; height: 20px; }
+.column-position:has(.rename-input) { z-index: 2; height: auto; min-height: 25px; }
+.column-item { height: 19px; margin: 0 4px; padding: 0 9px; border-radius: 6px; display: flex; align-items: center; gap: 7px; cursor: default; font-size: 12px; }
+.column-item:has(.rename-input) { height: auto; min-height: 25px; background: var(--pane-bg); }
 .column-item:hover { background: var(--row-hover); }
 .column-item.selected { background: var(--row-sel-focus); }
 .column-item.trail-open { background: var(--row-hover); box-shadow: inset -2px 0 var(--accent-line); }
@@ -890,7 +891,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   position: absolute;
   left: 0;
   right: 0;
-  height: var(--list-row-height, 24px);
+  height: var(--list-row-height, 20px);
   cursor: default;
   isolation: isolate;
   background: transparent;
@@ -1156,7 +1157,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   width: 48px;
   min-width: 0;
   max-width: 100%;
-  height: 27px;
+  height: 23px;
   flex: none;
   resize: none;
   overflow: hidden;
