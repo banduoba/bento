@@ -332,7 +332,7 @@ pub fn dispatch(app: &AppHandle, id: &str) {
 }
 
 #[tauri::command]
-pub fn sync_menu_state(app: AppHandle, mode: String, show_hidden: bool, has_selection: bool, can_back: bool, can_forward: bool, can_undo: bool) {
+pub fn sync_menu_state(app: AppHandle, mode: String, show_hidden: bool, has_selection: bool, can_back: bool, can_forward: bool, can_undo: bool, view_shortcuts: Option<std::collections::HashMap<String, Option<String>>>) {
     let Some(menu) = app.menu() else { return };
     if let Some(view) = menu.get("menu-view").and_then(|item| item.as_submenu().cloned()) {
         for (id, checked) in [
@@ -343,6 +343,11 @@ pub fn sync_menu_state(app: AppHandle, mode: String, show_hidden: bool, has_sele
         ] {
             if let Some(item) = view.get(id).and_then(|item| item.as_check_menuitem().cloned()) {
                 let _ = item.set_checked(checked);
+                if let Some(shortcuts) = &view_shortcuts {
+                    if let Some(accelerator) = shortcuts.get(id) {
+                        let _ = item.set_accelerator(accelerator.as_deref());
+                    }
+                }
             }
         }
     }

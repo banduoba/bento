@@ -1,3 +1,4 @@
+import { shortcutLabel } from '../keyBindings'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Channel } from '@tauri-apps/api/core'
@@ -1346,7 +1347,7 @@ export default function Pane({
             <span className="tab-label">{labelOf(t.path, home)}</span>
             <button
               className="tab-close"
-              title="关闭标签 (⌘W)"
+              title={`关闭标签 (${shortcutLabel(cfg.shortcuts, 'file-close-tab')})`}
               onMouseDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation()
@@ -1357,7 +1358,7 @@ export default function Pane({
             </button>
           </div>
         ))}
-        <button className="tab-new" title="新建标签 (⌘T)" onClick={() => onNewTab(index)}>
+        <button className="tab-new" title={`新建标签 (${shortcutLabel(cfg.shortcuts, 'file-new-tab')})`} onClick={() => onNewTab(index)}>
           +
         </button>
         <div className="tab-rest" onDoubleClick={() => onNewTab(index)} />
@@ -1365,10 +1366,10 @@ export default function Pane({
 
       <div className="pane-head">
         <div className="navbtns">
-          <button title="后退 (⌘[)" disabled={tab.hi <= 0} onClick={() => onBack(tab.id)}>
+          <button title={`后退 (${shortcutLabel(cfg.shortcuts, 'go-back')})`} disabled={tab.hi <= 0} onClick={() => onBack(tab.id)}>
             <IconChevronLeft size={15} />
           </button>
-          <button title="前进 (⌘])" disabled={tab.hi >= tab.history.length - 1} onClick={() => onForward(tab.id)}>
+          <button title={`前进 (${shortcutLabel(cfg.shortcuts, 'go-forward')})`} disabled={tab.hi >= tab.history.length - 1} onClick={() => onForward(tab.id)}>
             <IconChevronRight size={15} />
           </button>
         </div>
@@ -1452,7 +1453,7 @@ export default function Pane({
           <div
             className="crumbs"
             ref={crumbsRef}
-            title="点击空白处编辑路径 (⌘L)"
+            title={`点击空白处编辑路径 (${shortcutLabel(cfg.shortcuts, 'go-address')})`}
             onMouseDown={(e) => {
               if (e.target === crumbsRef.current) {
                 e.preventDefault()
@@ -1490,7 +1491,7 @@ export default function Pane({
             {/* 常驻编辑入口：路径溢出铺满时也能点进来 */}
             <span
               className="crumbs-tail"
-              title="点击编辑路径 (⌘L)"
+              title={`点击编辑路径 (${shortcutLabel(cfg.shortcuts, 'go-address')})`}
               onMouseDown={(e) => {
                 e.preventDefault()
                 beginPathEdit()
@@ -1519,9 +1520,9 @@ export default function Pane({
         {pathMenu && createPortal(<ContextMenu
           keyboard
           menu={{ ...pathMenu, items: [
-            { label: '上级目录', shortcut: '⌘↑', disabled: !parentPath(viewMode === 'columns' ? columnDirectory || tab.path : tab.path), action: () => onParent ? onParent(tab.id) : onNav(tab.id, parentPath(tab.path)) },
-            { label: '刷新', shortcut: '⌘R', action: () => onNav(tab.id, tab.path, true) },
-            { label: '编辑路径', shortcut: '⌘L', action: beginPathEdit },
+            { label: '上级目录', shortcut: shortcutLabel(cfg.shortcuts, 'go-parent'), disabled: !parentPath(viewMode === 'columns' ? columnDirectory || tab.path : tab.path), action: () => onParent ? onParent(tab.id) : onNav(tab.id, parentPath(tab.path)) },
+            { label: '刷新', shortcut: shortcutLabel(cfg.shortcuts, 'view-refresh'), action: () => onNav(tab.id, tab.path, true) },
+            { label: '编辑路径', shortcut: shortcutLabel(cfg.shortcuts, 'go-address'), action: beginPathEdit },
           ] }}
           onClose={(event) => {
             setPathMenu(null)

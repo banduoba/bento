@@ -17,6 +17,7 @@ import { clearCut, getClip, retainCut, setClip, subscribeClip } from './clipboar
 import { basename, parentPath, labelOf, copyText, folderTitle, makeMatcher } from './format'
 import { dragState, isInternalDrag } from './nativeDrag'
 import { createSpringLoader } from './springFolders'
+import { normalizeBindings, validateBindings, resolveShortcut, shortcutLabel, viewAccelerators } from './keyBindings'
 import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
 import {
   applyToAllFolders,
@@ -104,6 +105,7 @@ function sanitizeConfig(saved, home) {
     autoRefresh: saved.autoRefresh !== false,
     alwaysOnTop: saved.alwaysOnTop === true,
     enterAction: normalizeEnterAction(saved.enterAction),
+    shortcuts: normalizeBindings(saved.shortcuts),
     zipPrefs: normalizeZipPrefs(saved.zipPrefs),
     searchPrefs: {
       scope: ['pane', 'home', 'global'].includes(saved.searchPrefs?.scope) ? saved.searchPrefs.scope : 'global',
@@ -1519,12 +1521,12 @@ export default function App() {
           })
       : []
     const buildItems = (discovered, list, appsError) => [
-      { label: '打开', shortcut: '⌘↓', action: () => paths.length === 1 ? openEntry(tabId, entry)
+      { label: '打开', shortcut: shortcutLabel(cfg.shortcuts, 'file-open'), action: () => paths.length === 1 ? openEntry(tabId, entry)
         : nativeMenuAction(() => Promise.all(paths.map(path => api.openPath(path)))) },
       filesOnly ? { label: '打开方式', children: openWithItems(paths, discovered, appsError) } : null,
       paneOpenItems.length ? { label: '在其他窗格打开', children: paneOpenItems } : null,
       canExtract ? { label: '解压缩', action: () => nativeMenuAction(() => api.extractArchive(paths)) } : null,
-      previewPath ? { label: '快速查看', shortcut: '空格', action: () => previewNavigation.current.open(tabId, previewDir, previewPath, paths) } : null,
+      previewPath ? { label: '快速查看', shortcut: shortcutLabel(cfg.shortcuts, 'quick-look'), action: () => previewNavigation.current.open(tabId, previewDir, previewPath, paths) } : null,
       { label: '显示简介', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
       { sep: true },
       { label: '拷贝', shortcut: '⌘C', action: () => doCopyCut(tabId, 'copy', paths) },
@@ -1532,20 +1534,20 @@ export default function App() {
       { label: '粘贴项目', shortcut: '⌘V', action: () => doPaste(tabId, parentDir) },
       { sep: true },
       { label: paths.length > 1 ? `重新命名 ${paths.length} 个项目…` : '重新命名',
-        shortcut: normalizeEnterAction(cfg?.enterAction) === 'open' ? 'F2' : '↩',
+        shortcut: normalizeEnterAction(cfg?.enterAction) === 'open' ? shortcutLabel(cfg.shortcuts, 'file-rename') : '↩ / ' + shortcutLabel(cfg.shortcuts, 'file-rename'),
         action: () => paths.length > 1 ? openBatchRename(tabId, paths) : startRename(tabId, entry.path, entry.name) },
-      { label: '拷贝副本', shortcut: '⌘D', action: () => doDuplicate(tabId, paths) },
+      { label: '拷贝副本', shortcut: shortcutLabel(cfg.shortcuts, 'file-duplicate'), action: () => doDuplicate(tabId, paths) },
       ...zipMenuItems(paths, parentDir, entry, tabId),
-      { label: '移到废纸篓', danger: true, shortcut: '⌘⌫', action: () => doTrash(tabId, paths) },
+      { label: '移到废纸篓', danger: true, shortcut: shortcutLabel(cfg.shortcuts, 'file-trash'), action: () => doTrash(tabId, paths) },
       { sep: true },
-      { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId, parentDir) },
+      { label: '新建文件夹', shortcut: shortcutLabel(cfg.shortcuts, 'file-new-folder'), action: () => newFolder(tabId, parentDir) },
       { label: '新建', children: newFileItems(tabId, list, parentDir) },
       ...folderDisplayItems(parentDir),
       { sep: true },
       { label: entry.is_dir ? '添加到书签' : '将所在文件夹添加到书签', action: () => addFavorite(entry.is_dir ? entry.path : parentDir) },
       { label: '在终端打开', action: () => nativeMenuAction(() => api.openTerminal(termDir)) },
-      { label: '复制名称', shortcut: '⇧⌘C', action: () => copyPlainNames(tabId, paths) },
-      { label: '拷贝路径', shortcut: '⌥⌘C', action: () => copyPlainPaths(tabId, paths) },
+      { label: '复制名称', shortcut: shortcutLabel(cfg.shortcuts, 'edit-copy-names'), action: () => copyPlainNames(tabId, paths) },
+      { label: '拷贝路径', shortcut: shortcutLabel(cfg.shortcuts, 'edit-copy-paths'), action: () => copyPlainPaths(tabId, paths) },
       { label: '在访达中显示', action: () => nativeMenuAction(() => Promise.all(paths.map(path => api.reveal(path)))) },
     ].filter(Boolean)
     const request = Symbol('file-menu')
@@ -1683,7 +1685,7 @@ export default function App() {
   const blankItems = (tabId, list, directory) => {
     const path = directory || workingDirectory(tabId)
     return [
-      { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId, path) },
+      { label: '新建文件夹', shortcut: shortcutLabel(cfg.shortcuts, 'file-new-folder'), action: () => newFolder(tabId, path) },
       { label: '新建', children: newFileItems(tabId, list, path) },
       {
         label: '将当前文件夹添加到书签',
@@ -1693,10 +1695,10 @@ export default function App() {
       { sep: true },
       {
         label: cfg.showHidden ? '隐藏隐藏文件' : '显示隐藏文件',
-        shortcut: '⇧⌘.',
+        shortcut: shortcutLabel(cfg.shortcuts, 'view-show-hidden'),
         action: () => setCfg((c) => ({ ...c, showHidden: !c.showHidden })),
       },
-      { label: '刷新', shortcut: '⌘R', action: () => refreshTab(tabId) },
+      { label: '刷新', shortcut: shortcutLabel(cfg.shortcuts, 'view-refresh'), action: () => refreshTab(tabId) },
       { sep: true },
       ...folderDisplayItems(path),
       ...folderViewMenu(path),
@@ -1725,8 +1727,8 @@ export default function App() {
       x,
       y,
       items: [
-        { label: '新建标签', shortcut: '⌘T', action: () => newTab(paneIndexOf(tabId)) },
-        { label: '关闭标签', shortcut: '⌘W', action: () => closeTabOf(tabId) },
+        { label: '新建标签', shortcut: shortcutLabel(cfg.shortcuts, 'file-new-tab'), action: () => newTab(paneIndexOf(tabId)) },
+        { label: '关闭标签', shortcut: shortcutLabel(cfg.shortcuts, 'file-close-tab'), action: () => closeTabOf(tabId) },
         { label: '关闭其他标签', action: () => closeOtherTabs(tabId) },
       ],
     })
@@ -1854,12 +1856,14 @@ export default function App() {
       mode: viewForPath(cfg.viewSettings, keyFor(tab.path)).mode,
       showHidden: !!cfg.showHidden,
       hasSelection: !!sel[tab.id]?.size,
+      viewShortcuts: settingsOpen ? { 'view-icons': null, 'view-list': null, 'view-columns': null } : viewAccelerators(cfg.shortcuts),
       canBack: tab.hi > 0,
       canForward: tab.hi < (tab.history?.length || 0) - 1,
       canUndo: isTextEditingElement(document.activeElement) || (undoStackRef.current.length > 0 && !fileOperationsPending.current && !undoStackRef.current.some(item => item.busy)),
     }).catch(() => {})
-  }, [cfg, focusIdx, sel, keyEpoch, undoRevision, menuFocusRevision])
+  }, [cfg, focusIdx, sel, keyEpoch, undoRevision, menuFocusRevision, settingsOpen])
   keyRef.current = (e) => {
+    if (e.isComposing || e.keyCode === 229 || ['Dead', 'Process'].includes(e.key)) return
     // ⌘,：输入框聚焦时也可打开设置
     if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key === ',') {
       e.preventDefault()
@@ -1875,40 +1879,42 @@ export default function App() {
       else if (!e.shiftKey) { e.preventDefault(); undoLast() }
       return
     }
-    // ⌘K：打开/聚焦搜索面板（浏览器习惯）
-    if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'k' || e.key === 'K')) {
-      e.preventDefault()
-      setSearchOpen(true)
-      return
-    }
-    // ⌘L / ⌘⇧G：即使焦点在输入框里也能跳到地址栏编辑（浏览器习惯）。
-    // Esc 退出编辑由地址栏输入框自己处理并 stopPropagation，避免落到下面的「取消选择」。
-    if (e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === 'l' || e.key === 'L')) {
-      e.preventDefault()
-      setPathEditTick((t) => t + 1)
-      return
-    }
-    if (e.metaKey && !e.altKey && !e.ctrlKey && e.shiftKey && (e.key === 'g' || e.key === 'G')) {
-      e.preventDefault()
-      setPathEditTick((t) => t + 1)
-      return
-    }
-    // ⌥⌘C：复制当前选择的完整路径，多选一行一个。macOS 上 ⌥ 会改写 key（ç），所以认 code。
-    // 放在输入框提前返回之前，地址栏聚焦时也能复制文件路径，而不是地址栏里选中的文字。
-    if (e.metaKey && e.altKey && !e.ctrlKey && !e.shiftKey && e.code === 'KeyC') {
-      e.preventDefault()
-      if (e.repeat) return
+    const action = resolveShortcut(e, cfg?.shortcuts)
+    const blocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen || renaming
+    const editing = isTextEditingElement(document.activeElement)
+    if (action) {
+      if (blocked || (editing && !['search-open', 'go-address', 'edit-copy-paths', 'view-refresh'].includes(action))) return
       const tab = activeTabOf(focusIdx)
       if (!tab) return
-      copyPlainPaths(tab.id, orderedPaths(tab.id))
-      return
-    }
-    if (e.metaKey && !e.altKey && !e.shiftKey && !e.ctrlKey && (e.key === 'r' || e.key === 'R')) {
       e.preventDefault()
-      const tab = activeTabOf(focusIdx)
-      if (tab) refreshTab(tab.id)
+      if (e.repeat) return
+      const tid = tab.id, paths = selArr(tid), rows = rowsCache.current[tid] || []
+      switch (action) {
+        case 'search-open': setSearchOpen(true); break
+        case 'filter-focus': document.querySelector(`.panes .pane:nth-child(${focusIdx + 1}) .filterbox input`)?.focus(); break
+        case 'go-address': setPathEditTick(t => t + 1); break
+        case 'edit-copy-paths': copyPlainPaths(tid, orderedPaths(tid)); break
+        case 'view-refresh': refreshTab(tid); break
+        case 'view-sidebar': setCfg(c => ({ ...c, showSidebar: !c.showSidebar })); break
+        case 'window-pin': setCfg(c => ({ ...c, alwaysOnTop: !c.alwaysOnTop })); break
+        case 'file-open': {
+          const entry = rows.find(row => row.path === paths[0])
+          if (entry && !entry.isPseudo) openEntry(tid, entry)
+          break
+        }
+        case 'quick-look': {
+          const first = rows.find(row => row.path === paths[0])
+          const primary = first && !first.is_dir && !first.isPseudo ? first.path
+            : rows.find(row => paths.includes(row.path) && !row.is_dir && !row.isPseudo)?.path
+          if (primary) previewNavigation.current.open(tid, tab.path, primary, paths)
+          break
+        }
+        default: menuCommandRef.current(action); break
+      }
       return
     }
+    // A replaced or disabled default must not fall through to legacy navigation.
+    if (resolveShortcut(e, {})) { if (!editing && !blocked) e.preventDefault(); return }
     if (isTextEditingElement(document.activeElement)) {
       textEditing.current?.handleKeyDown(e)
       return
@@ -1922,11 +1928,6 @@ export default function App() {
     const firstEntry = () => paneRows.find((x) => x.path === paths[0])
 
     const listBlocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen
-    if (meta && e.shiftKey && !e.altKey && !e.ctrlKey && (e.code === 'KeyC' || e.key.toLowerCase() === 'c') && !listBlocked && !renaming) {
-      e.preventDefault()
-      if (!e.repeat) copyPlainNames(tid)
-      return
-    }
     if (meta && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'i' && !listBlocked && !renaming && paths.length) {
       e.preventDefault()
       nativeMenuAction(() => api.showGetInfo(orderedPaths(tid, paths)))
@@ -2016,65 +2017,6 @@ export default function App() {
       onSelect(tid, new Set(paneRows.map((r) => r.path)))
       return
     }
-    if (meta && !e.shiftKey && e.key === 'd') { e.preventDefault(); doDuplicate(tid); return }
-    if (meta && e.key === 'Backspace') { e.preventDefault(); doTrash(tid); return }
-    if (meta && !e.shiftKey && e.key === 't') { e.preventDefault(); newTab(focusIdx); return }
-    if (meta && !e.shiftKey && e.key === 'w') { e.preventDefault(); closeTabOf(tid); return }
-    if (meta && e.shiftKey && (e.key === 'N' || e.key === 'n')) { e.preventDefault(); newFolder(tid); return }
-    if (meta && e.shiftKey && e.key === '.') {
-      e.preventDefault()
-      setCfg((c) => ({ ...c, showHidden: !c.showHidden }))
-      return
-    }
-    if (meta && e.altKey && e.code === 'KeyT') {
-      // ⌥⌘T：窗口置顶（macOS 上 ⌥T 的 key 是 †，所以用 code）
-      e.preventDefault()
-      setCfg((c) => ({ ...c, alwaysOnTop: !c.alwaysOnTop }))
-      return
-    }
-    if (meta && (e.key === 'f' || e.key === 'F') && e.altKey) {
-      e.preventDefault()
-      setSearchOpen(true)
-      return
-    }
-    if (meta && (e.key === 'f' || e.key === 'F')) {
-      e.preventDefault()
-      document.querySelector(`.panes .pane:nth-child(${focusIdx + 1}) .filterbox input`)?.focus()
-      return
-    }
-    if (meta && e.shiftKey && (e.key === 'G' || e.key === 'g')) {
-      e.preventDefault()
-      setPathEditTick((t) => t + 1)
-      return
-    }
-    if (meta && e.altKey && (e.key === 's' || e.key === 'S')) {
-      e.preventDefault()
-      setCfg((c) => ({ ...c, showSidebar: !c.showSidebar }))
-      return
-    }
-    if (e.key === ' ' && paths.length >= 1) {
-      e.preventDefault()
-      // 按住空格会连发 keydown；只响应第一次，避免面板刚打开就被关掉
-      if (e.repeat) return
-      const entry = firstEntry()
-      const primary = entry && !entry.is_dir && !entry.isPseudo ? entry.path
-        : paneRows.find(r => paths.includes(r.path) && !r.is_dir && !r.isPseudo)?.path
-      if (primary) previewNavigation.current.open(tid, tab.path, primary, paths)
-      return
-    }
-    if (meta && e.key === '[') { e.preventDefault(); navBack(tid); return }
-    if (meta && e.key === ']') { e.preventDefault(); navForward(tid); return }
-    if (meta && !listBlocked && !renaming && !e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === '1' || e.key === '2' || e.key === '3')) {
-      e.preventDefault()
-      setViewMode({ 1: 'icons', 2: 'list', 3: 'columns' }[e.key])
-      return
-    }
-    if (meta && e.key === 'o') {
-      e.preventDefault()
-      const entry = firstEntry()
-      if (entry) openEntry(tid, entry)
-      return
-    }
     if (e.ctrlKey && e.key === 'Tab') {
       e.preventDefault()
       const pane = cfg.panes[focusIdx]
@@ -2139,7 +2081,7 @@ export default function App() {
         <div className="tb-right">
           <button
             className={`iconbtn${cfg.alwaysOnTop ? ' on' : ''}`}
-            title={cfg.alwaysOnTop ? '取消窗口置顶 (⌥⌘T)' : '窗口置顶 (⌥⌘T)'}
+            title={`${cfg.alwaysOnTop ? '取消窗口置顶' : '窗口置顶'} (${shortcutLabel(cfg.shortcuts, 'window-pin')})`}
             aria-pressed={!!cfg.alwaysOnTop}
             onClick={() => setCfg((c) => ({ ...c, alwaysOnTop: !c.alwaysOnTop }))}
           >
@@ -2147,14 +2089,14 @@ export default function App() {
           </button>
           <button
             className="iconbtn"
-            title="聚焦搜索 (⌥⌘F)"
+            title={`聚焦搜索 (${shortcutLabel(cfg.shortcuts, 'search-open')})`}
             onClick={() => setSearchOpen(true)}
           >
             <IconSearch size={20} />
           </button>
           <button
             className="iconbtn"
-            title={cfg.showHidden ? '隐藏隐藏文件 (⇧⌘.)' : '显示隐藏文件 (⇧⌘.)'}
+            title={`${cfg.showHidden ? '隐藏隐藏文件' : '显示隐藏文件'} (${shortcutLabel(cfg.shortcuts, 'view-show-hidden')})`}
             onClick={() => setCfg((c) => ({ ...c, showHidden: !c.showHidden }))}
           >
             {cfg.showHidden ? <IconEye size={20} /> : <IconEyeOff size={20} />}
@@ -2373,6 +2315,8 @@ export default function App() {
         onAnalyticsEnabledChange={onAnalyticsEnabledChange}
         onExportSettings={() => createSettingsBackup(cfgRef.current)}
         onImportSettings={importSettings}
+        shortcuts={cfg.shortcuts}
+        onShortcutsChange={value => { const shortcuts = validateBindings(value); setCfg(c => ({ ...c, shortcuts })) }}
         searchPaths={cfg.searchPaths}
         onChange={(paths) => setCfg((c) => ({ ...c, searchPaths: paths }))}
         showHidden={cfg.showHidden}

@@ -2,6 +2,7 @@ import { build, transformSync } from 'esbuild'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
+import { resolveShortcut } from '../keyBindings.js'
 import { basename } from '../format.js'
 import { isTextEditingElement } from '../textEditing.js'
 import { resolveListKey, resolvePaneKey } from '../shortcuts.js'
@@ -73,7 +74,7 @@ export function createAppShortcutBoundary() {
   const actions = [], selected = { path: '/pane/selected.txt', name: 'selected.txt', is_dir: false }
   const doc = { activeElement: { tagName: 'BUTTON' } }
   const state = {
-    document: doc, isTextEditingElement, resolveListKey, resolvePaneKey, basename,
+    document: doc, isTextEditingElement, resolveListKey, resolvePaneKey, resolveShortcut, basename,
     activeTabOf: () => ({ id: 'pane-tab', path: '/pane' }), focusIdx: 0,
     selArr: () => [selected.path], rowsCache: { current: { 'pane-tab': [selected] } },
     searchOpen: false, settingsOpen: false, batchRename: false, menu: null, zipDlg: null, layoutPickerOpen: false,

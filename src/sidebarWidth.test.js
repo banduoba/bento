@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { preferencesForDisk } from './session.js'
+import { normalizeBindings } from './keyBindings.js'
 import { normalizeEnterAction } from './shortcuts.js'
 import { normalizeSidebarWidth } from './sidebarWidth.js'
 
@@ -12,7 +13,7 @@ const zip = await readFile(new URL('./components/ZipDialog.jsx', import.meta.url
 const zipCode = zip.slice(zip.indexOf('export const DEFAULT_ZIP_PREFS'), zip.indexOf('export const levelOf')).replaceAll('export ', '')
 const normalizeZipPrefs = new Function(`${zipCode}; return normalizeZipPrefs`)()
 const configCode = app.slice(app.indexOf('const defaultFavorites ='), app.indexOf('\nfunction MiniGrid('))
-const sanitizeConfig = new Function('normalizeSidebarWidth', 'normalizeEnterAction', 'normalizeZipPrefs', `${configCode}; return sanitizeConfig`)(normalizeSidebarWidth, normalizeEnterAction, normalizeZipPrefs)
+const sanitizeConfig = new Function('normalizeBindings', 'normalizeSidebarWidth', 'normalizeEnterAction', 'normalizeZipPrefs', `${configCode}; return sanitizeConfig`)(normalizeBindings, normalizeSidebarWidth, normalizeEnterAction, normalizeZipPrefs)
 
 test('App config supplies a usable default and rejects malformed persisted widths', () => {
   for (const input of [undefined, null, NaN, Infinity, -Infinity, '300', {}, [], true]) {

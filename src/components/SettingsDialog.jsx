@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { api, hasTauri } from '../api'
 import AboutSection from './AboutSection'
+import ShortcutSettings from './ShortcutSettings'
+import { shortcutLabel } from '../keyBindings'
 import useDialogFocus, { isComposingKey } from './useDialogFocus'
 
 /**
@@ -9,7 +11,7 @@ import useDialogFocus, { isComposingKey } from './useDialogFocus'
  * cfg.searchPaths 为空 = 搜索全部已索引位置；非空 = 结果限定在这些目录（及其子目录）内
  */
 export default function SettingsDialog({
-  analyticsEnabled, onAnalyticsEnabledChange, analyticsPersistenceError,
+  analyticsEnabled, onAnalyticsEnabledChange, analyticsPersistenceError, shortcuts = {}, onShortcutsChange,
   open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, enterAction, onEnterActionChange, onExportSettings, onImportSettings, onClose,
 }) {
   const [busy, setBusy] = useState(false)
@@ -28,7 +30,7 @@ export default function SettingsDialog({
   useEffect(() => {
     if (!visible) return
     const onKey = (e) => {
-      if (e.key === 'Escape' && !isComposingKey(e)) {
+      if (e.key === 'Escape' && !isComposingKey(e) && !e.target?.closest?.('[data-shortcut-recording]')) {
         e.stopPropagation()
         e.preventDefault()
         onClose()
@@ -85,7 +87,7 @@ export default function SettingsDialog({
         <div className="modal-title" id="settings-title">设置</div>
         <div className="settings-body">
           <nav className="settings-nav" aria-label="设置分组">
-            {[['search', '搜索'], ['general', '通用'], ['backup', '备份'], ['permission', '权限'], ['about', '关于']].map(([id, label]) => (
+            {[['search', '搜索'], ['general', '通用'], ['shortcuts', '快捷键'], ['backup', '备份'], ['permission', '权限'], ['about', '关于']].map(([id, label]) => (
               <button key={id} className={`settings-nav-item${section === id ? ' on' : ''}`}
                 aria-current={section === id ? 'page' : undefined} aria-controls={`settings-${id}`}
                 onClick={() => setSection(id)}>
@@ -94,6 +96,7 @@ export default function SettingsDialog({
             ))}
           </nav>
           <div className="settings-content">
+            {section === 'shortcuts' && <ShortcutSettings value={shortcuts} onChange={onShortcutsChange} />}
             {section === 'about' && <AboutSection analyticsPersistenceError={analyticsPersistenceError} analyticsEnabled={analyticsEnabled} onAnalyticsEnabledChange={onAnalyticsEnabledChange} />}
             {section === 'backup' && <section id="settings-backup" className="settings-group" aria-labelledby="settings-backup-title" aria-busy={backupBusy}>
               <h2 id="settings-backup-title">设置备份</h2>
@@ -113,7 +116,7 @@ export default function SettingsDialog({
                   <button className="btn small" onClick={() => backup(true)} disabled={!hasTauri || backupBusy}>导入设置…</button>
                 </div>
               </div>
-              <p className="settings-hint">不包含压缩设置与密码、标签页、导航历史、工作区、布局或文件夹视图。</p>
+              <p className="settings-hint">不包含快捷键方案、压缩设置与密码、标签页、导航历史、工作区、布局或文件夹视图；快捷键可在“快捷键”中单独导入导出。</p>
               {!hasTauri && <p className="settings-hint">请在 Bento 桌面应用中导入或导出设置。</p>}
               {backupBusy && <p role="status" className="settings-hint">正在处理设置备份…</p>}
               {backupNotice && <p role={backupNotice.error ? 'alert' : 'status'} className="settings-hint">{backupNotice.text}</p>}
@@ -165,7 +168,7 @@ export default function SettingsDialog({
                 <div className="settings-option">
                   <div className="settings-label">
                     <div className="settings-option-title" id="settings-autorefresh-title">自动刷新目录</div>
-                    <p id="settings-autorefresh-description">文件在外部新增、修改、删除时，窗格即时更新（只监听当前可见的目录）。关闭后仅在手动刷新（⌘R）或导航时更新。</p>
+                    <p id="settings-autorefresh-description">文件在外部新增、修改、删除时，窗格即时更新（只监听当前可见的目录）。关闭后仅在手动刷新（{shortcutLabel(shortcuts, 'view-refresh')}）或导航时更新。</p>
                   </div>
                   <button className="settings-toggle" role="switch" aria-checked={autoRefresh}
                     aria-labelledby="settings-autorefresh-title" aria-describedby="settings-autorefresh-description"
@@ -177,7 +180,7 @@ export default function SettingsDialog({
                   <div className="settings-label">
                     <div className="settings-option-title" id="settings-enter-title">回车键</div>
                     <p id="settings-enter-description">
-                      打开：回车打开所选项目，F2 重命名。重命名：回车开始重命名。⌘↓ 与双击始终打开。
+                      打开：回车打开所选项目。重命名：回车开始重命名。其他按键在“快捷键”中设置；双击始终打开。
                     </p>
                   </div>
                   <div className="settings-segments" role="group" aria-labelledby="settings-enter-title" aria-describedby="settings-enter-description">
