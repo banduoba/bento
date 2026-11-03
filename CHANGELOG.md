@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added tracked ZIP creation with generated-size feedback, cancellation, atomic collision-safe output publication and preserved guarded Undo; extraction now automatically selects successful output folders in the originating tab.
+
 - Added tracked background archive extraction with cancellation, elapsed time, per-archive results, output-folder location, collision-safe new folders and marked partial output; preserves download quarantine and keeps Archive Utility available for password/unsupported archives.
 
 - Redesigned preferences with a native-style icon sidebar, section headers, grouped controls, aligned shortcut keycaps, and responsive light/dark layouts.

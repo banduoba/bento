@@ -45,3 +45,22 @@ test('a delayed cancellation reply cannot replace the next job after terminal st
  await h.task.ready;const pending=h.task.cancel();await h.next();await h.task.start(['/b.zip']);cancel.resolve({...running,state:'cancelled'});await pending
  assert.equal(h.task.snapshot.job.id,'job-2');assert.equal(h.task.snapshot.job.state,'running');h.task.dispose()
 })
+test('compression waits for actual completion and exposes output identities without resolving on start',async()=>{
+ const timers=[],terminal=[],started=[],identity={dev:'1',ino:'2'};let reads=0,complete=false
+ const job={...running,id:'zip-1',operation:'compress',outputBytes:128};const finished={...done,id:'zip-1',operation:'compress',results:[{source:'/a',output:'/archive.zip',state:'completed',error:null,identity}]}
+ const task=createExtractionTask({api:{extractionStatus:async()=>++reads===1?null:finished,startCompression:async(paths,dir,options)=>{assert.deepEqual([paths,dir,options],[['/a'],'/out',{level:9}]);return job}},onChange(){},onTerminal:j=>terminal.push(j),onStarted:(j,context)=>started.push([j.id,context]),schedule:cb=>(timers.push(cb),cb),unschedule(){}})
+ await task.ready;const pending=task.compress(['/a'],'/out',{level:9},{tabId:'origin'}).then(r=>{complete=true;return r});await Promise.resolve();await Promise.resolve()
+ assert.equal(complete,false);assert.equal(task.snapshot.operation,'compress');assert.deepEqual(started,[['zip-1',{tabId:'origin'}]])
+ await timers.shift()();const result=await pending;assert.deepEqual(result.entries,[{path:'/archive.zip',identity}]);assert.equal(result.error,null);assert.equal(terminal.length,1);task.dispose()
+})
+test('cancelled separate compression preserves completed receipts and cancellation error for Undo',async()=>{
+ const timers=[];let reads=0;const identity={dev:'1',ino:'2'},doneJob={...running,id:'zip-1',operation:'compress',state:'cancelled',total:2,processed:1,results:[{source:'/a',output:'/a.zip',state:'completed',error:null,identity}]}
+ const task=createExtractionTask({api:{extractionStatus:async()=>++reads===1?null:doneJob,startCompression:async()=>({...doneJob,state:'running',processed:0,results:[]})},onChange(){},onTerminal(){},schedule:cb=>(timers.push(cb),cb),unschedule(){}})
+ await task.ready;const pending=task.compress(['/a','/b'],'/out',{separate:true});await Promise.resolve();await Promise.resolve();await timers.shift()();const result=await pending;assert.equal(result.entries[0].path,'/a.zip');assert.ok(result.error);assert.equal(result.cancelled,true);task.dispose()
+})
+test('disposal during compression launch never registers a late completion waiter or callback',async()=>{
+ const gate=deferred(),started=[];let settled=false,result='pending'
+ const task=createExtractionTask({api:{extractionStatus:async()=>null,startCompression:()=>gate.promise},onChange(){},onTerminal(){},onStarted:(...a)=>started.push(a),schedule:()=>{throw Error('poll after dispose')},unschedule(){}})
+ await task.ready;const pending=task.compress(['/a'],'/out',{}).then(value=>{settled=true;result=value})
+ await Promise.resolve();await Promise.resolve();task.dispose();gate.resolve({...running,operation:'compress'});await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,true);assert.equal(result,null);assert.deepEqual(started,[]);await pending
+})

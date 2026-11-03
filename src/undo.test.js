@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mountApp, key, deferred } from './test/AppHarness.js'
+const compression = batch => batch && ({id:'zip-result',operation:'compress',state:batch.error?'partial':'completed',total:1,processed:1,elapsedMs:0,error:batch.error,results:batch.entries.map(e=>({source:'/home/note.txt',output:e.path,state:'completed',identity:e.identity,error:null}))})
 const identity={dev:'12',ino:'9876543210987654321'}
 const moved=(source,dest,extra={})=>({source,dest,ok:true,error:null,identity,...extra})
 const drop=(h,resultsMode='move')=>h.run(()=>h.panes[1].props.onDropTransfer('/dst',['/src/a'],resultsMode))
@@ -130,7 +131,7 @@ for(const kind of ['rename','makeDir','createFile','copyTemplate','zipPaths']) {
       restoreMoves:async m=>{restores.push(m);return m.map(x=>({...x,ok:true,error:null}))},
       loadConfig:async()=>({zipPrefs:{oneClick:true}}),
       listTemplates:async()=>[{name:'fixture.template',path:'/templates/fixture.template'}],
-      [kind+'WithReceipt']:(...args)=>{mutations.push(args);return gate.promise},
+      [kind==='zipPaths'?'startCompression':kind+'WithReceipt']:(...args)=>{mutations.push(args);return gate.promise},
     })
     await drop(h);await launchBareMutation(h,kind);assert.equal(mutations.length,1)
     document.execCommand=(...args)=>{commands.push(args);return true}
@@ -139,7 +140,7 @@ for(const kind of ['rename','makeDir','createFile','copyTemplate','zipPaths']) {
     document.activeElement=null;await key(h,'z',{metaKey:true});assert.deepEqual(restores,[])
     await h.run(()=>gate.reject(Error('reply failed after possible mutation')))
     await key(h,'z',{metaKey:true});assert.deepEqual(restores,[])
-    assert.equal(h.alerts.length,1);assert.match(h.alerts[0],/reply failed after possible mutation/)
+    assert.equal(kind==='zipPaths'?h.root.findAll(n=>n.props.role==='alert').length:h.alerts.length,1);assert.match(kind==='zipPaths'?h.root.findAll(n=>n.props.role==='alert').map(n=>n.children.join('')).join(' '):h.alerts[0],/reply failed after possible mutation/)
     await drop(h);await key(h,'z',{metaKey:true});assert.equal(restores.length,1)
   })
 }
@@ -182,12 +183,12 @@ for(const kind of ['makeDir','createFile','copyTemplate']) test(`${kind} records
 test('partial ZIP preserves actual identified archives and reports failure while blocking older Undo',async t=>{
   const calls=[],h=await mountApp(t,{
     transfer:async()=>[moved('/src/a','/dst/a')],loadConfig:async()=>({zipPrefs:{oneClick:true}}),
-    zipPathsWithReceipt:async()=>({entries:[receipt('/home/note 2.zip')],error:'second archive failed'}),
+    startCompression:async()=>compression({entries:[receipt('/home/note 2.zip')],error:'second archive failed'}),
     restoreMoves:async m=>{calls.push(['restore',m]);return[]},
     trash:async(paths,expected)=>{calls.push(['trash',paths,expected]);return{entries:paths.map(original=>({original})),error:null}},
   })
   await drop(h);await launchBareMutation(h,'zipPaths');await key(h,'z',{metaKey:true});await key(h,'z',{metaKey:true})
-  assert.deepEqual(calls,[['trash',['/home/note 2.zip'],[{path:'/home/note 2.zip',...identity}]]]);assert.deepEqual(h.alerts,['second archive failed'])
+  assert.deepEqual(calls,[['trash',['/home/note 2.zip'],[{path:'/home/note 2.zip',...identity}]]]);assert.deepEqual(h.alerts,[]);assert.ok(h.root.findAll(n=>n.props.role==='alert'||n.props.className==='extraction-error').some(n=>n.children.join('').includes('second archive failed')))
 })
 
 test('late unknown transfer does not discard a newer identified rename completion',async t=>{
@@ -220,14 +221,14 @@ for(const partial of [false,true]) test(`batch rename ${partial?'partial complet
 })
 
 test('sequential copies and successful ZIP retain older inverses in completion order',async t=>{
-  let n=0;const calls=[],h=await mountApp(t,{transfer:async()=>[moved('/src/a',`/home/copy ${++n}`)],loadConfig:async()=>({zipPrefs:{oneClick:true}}),zipPathsWithReceipt:async()=>({entries:[receipt('/home/exact 2.zip')],error:null}),trash:async(paths,expected)=>{calls.push([paths,expected]);return{entries:paths.map(original=>({original})),error:null}}})
+  let n=0;const calls=[],h=await mountApp(t,{transfer:async()=>[moved('/src/a',`/home/copy ${++n}`)],loadConfig:async()=>({zipPrefs:{oneClick:true}}),startCompression:async()=>compression({entries:[receipt('/home/exact 2.zip')],error:null}),trash:async(paths,expected)=>{calls.push([paths,expected]);return{entries:paths.map(original=>({original})),error:null}}})
   await drop(h,'copy');await drop(h,'copy');await launchBareMutation(h,'zipPaths')
   await key(h,'z',{metaKey:true});await key(h,'z',{metaKey:true});await key(h,'z',{metaKey:true});await key(h,'z',{metaKey:true})
   assert.deepEqual(calls,[[['/home/exact 2.zip'],[{path:'/home/exact 2.zip',...identity}]],[['/home/copy 2'],[{path:'/home/copy 2',...identity}]],[['/home/copy 1'],[{path:'/home/copy 1',...identity}]]])
 })
 
 test('unavailable ZIP reply blocks older Undo without guessing an archive path',async t=>{
-  const calls=[],h=await mountApp(t,{transfer:async()=>[moved('/src/a','/dst/a')],loadConfig:async()=>({zipPrefs:{oneClick:true}}),zipPathsWithReceipt:async()=>undefined,restoreMoves:async m=>{calls.push(m);return[]}})
+  const calls=[],h=await mountApp(t,{transfer:async()=>[moved('/src/a','/dst/a')],loadConfig:async()=>({zipPrefs:{oneClick:true}}),startCompression:async()=>undefined,restoreMoves:async m=>{calls.push(m);return[]}})
   await drop(h);await launchBareMutation(h,'zipPaths');await key(h,'z',{metaKey:true});assert.deepEqual(calls,[])
 })
 

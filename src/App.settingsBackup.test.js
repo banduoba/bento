@@ -76,7 +76,7 @@ test('close saves unrelated archive preferences changed during import before nat
   const gate = deferred(), writes = []
   const h = await mountApp(t, {
     saveConfig: async value => { writes.push(value); if (value.searchPaths.includes('/Imported')) await gate.promise },
-    zipPathsWithReceipt: async () => ({ entries: [] }),
+    startCompression: async () => ({id:'zip',operation:'compress',state:'completed',total:1,processed:1,results:[],elapsedMs:0}),
   })
   const component = name => h.root.findAll(n => typeof n.type === 'function' && n.type.name === name)[0]
   let imported

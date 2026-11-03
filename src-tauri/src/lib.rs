@@ -23,6 +23,7 @@ mod native_icons;
 mod native_menu;
 mod native_actions;
 mod extraction;
+mod compression;
 mod search_results;
 use native_icons::file_icons;
 
@@ -601,7 +602,7 @@ struct TransferItem {
 }
 
 #[derive(Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq)]
-struct FileIdentity {
+pub(crate) struct FileIdentity {
     dev: String,
     ino: String,
 }
@@ -859,7 +860,7 @@ async fn reveal_in_finder(path: String) -> Result<(), String> {
 
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct ZipOptions {
+pub(crate) struct ZipOptions {
     /// 压缩包文件名（不含路径；缺省：单个源=源名.zip，多个源=归档.zip）
     name: Option<String>,
     /// 压缩级别 0-9（速度快=1，体积小=9，自定义=1..9），缺省 1
@@ -3178,6 +3179,7 @@ pub fn run() {
             native_actions::show_get_info,
             native_actions::extract_archive,
             extraction::start_extraction,
+            compression::start_compression,
             extraction::extraction_status,
             extraction::cancel_extraction,
             extraction::stop_extraction,
