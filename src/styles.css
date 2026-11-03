@@ -1119,34 +1119,30 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 
 /* 行内复制路径按钮：悬停行时出现在行首 */
 .row-copy-slot {
-  position: absolute;
-  left: -12px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 12px;
-  height: 20px;
-  display: inline-flex;
+  display: none;
+  width: 18px;
+  height: 18px;
+  flex: none;
   align-items: center;
   justify-content: center;
 }
+.row:hover .row-copy-slot, .row:focus-within .row-copy-slot { display: inline-flex; }
 .row-copy {
   border: none;
   background: transparent;
   color: var(--text-2);
-  width: 12px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   border-radius: 4px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  visibility: hidden;
   flex: none;
   padding: 0;
 }
-.row:hover .row-copy, .row:focus-within .row-copy { visibility: visible; }
 .row-copy:hover { background: var(--hover-bg); color: var(--text); }
-.row-copy.copied { visibility: visible; color: var(--accent); }
+.row-copy.copied { color: var(--accent); }
 
 .rename-input {
   font: inherit;

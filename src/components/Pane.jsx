@@ -1547,8 +1547,8 @@ export default function Pane({
                   <div
                     className="row-name"
                   >
-                    <span className="row-copy-slot">
-                      {!isRenaming && (
+                    {!isRenaming && (
+                      <span className="row-copy-slot">
                         <button
                           className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
                           title="复制路径"
@@ -1563,8 +1563,8 @@ export default function Pane({
                         >
                           {copiedPath === entry.path ? <IconCheck size={12} /> : <IconCopy size={12} />}
                         </button>
-                      )}
-                    </span>
+                      </span>
+                    )}
                     {entry.is_dir ? (
                       <button
                         className={`disclosure${expandedDirs.has(entry.path) ? ' open' : ''}`}
