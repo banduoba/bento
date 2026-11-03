@@ -2051,7 +2051,7 @@ export default function App() {
       {recoveryNotice && <div role="alert">{recoveryNotice} <button onClick={() => setRecoveryNotice(null)}>知道了</button></div>}
       {saveError && <div role="alert">保存失败：{saveError} <button onClick={() => flushPersistence().catch(error => setSaveError(String(error)))}>重试保存</button></div>}
       <div className="titlebar" onMouseDown={titlebarMouseDown}>
-        <TitlebarNavigation tab={focusedTab} onBack={navBack} onForward={navForward} />
+        <TitlebarNavigation tab={focusedTab} shortcuts={cfg.shortcuts} onBack={navBack} onForward={navForward} />
         <div className="tb-title" title={focusedTab?.path}>{windowTitle}</div>
         <div className="tb-center">
           <div className="layout-pick-wrap">

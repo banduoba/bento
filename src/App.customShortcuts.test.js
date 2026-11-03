@@ -62,3 +62,9 @@ test('opening shortcut settings releases native view key equivalents for the rec
  await h.run(()=>settings.props.onClose())
  assert.deepEqual(state(),{'view-icons':'Super+1','view-list':'Super+2','view-columns':'Super+3'})
 })
+
+test('titlebar navigation displays the effective back and forward bindings',async t=>{
+ const h=await mountApp(t,{loadConfig:async()=>({shortcuts:{'go-back':'Meta+Alt+KeyB','go-forward':null}})})
+ assert.equal(h.root.findByProps({'aria-label':'后退'}).props.title,'后退 (⌥⌘B)')
+ assert.equal(h.root.findByProps({'aria-label':'前进'}).props.title,'前进 (未设置)')
+})
