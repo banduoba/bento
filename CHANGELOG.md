@@ -1,8 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-03
 
-- Reduced file row height to 21px and refreshed the QSpace-style path bar.
+- Improved global name matching and coverage; name and system indexes now run in parallel and stream initial results without waiting for every source. File results locate and select their file; folder results open directly.
+- Added native Open With app icons and application selection, Finder Get Info, Quick Look, and Archive Utility extraction to the context menu, alongside creation, view, sort and column controls.
+- Reduced file row height to 21px, refined the path bar and row corners, and kept copy-path controls in a fixed icon slot to avoid hover movement.
+- Switched standard sidebar locations to macOS sidebar glyphs and improved dialog keyboard focus and accessibility.
+- Added versioned manual settings backup/import and headless benchmark regression checks.
+- Added privacy-conscious usage counts with an immediate opt-out in Settings → About. Reports contain only a random installation ID, app version, macOS and architecture; the owner dashboard is private.
+- Updated English and Chinese documentation and separate Apple Silicon / Intel downloads.
 
 ## 0.3.1 — 2026-11-02
 

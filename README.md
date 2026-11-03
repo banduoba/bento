@@ -33,7 +33,7 @@
 
 **Bento** is a lightweight multi-pane file manager for macOS. It puts several folders on screen at once — like the compartments of a bento box — so moving, comparing and organising files stops being a game of window juggling.
 
-It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface, keeps the Finder conventions you already know, and adds the things power users miss: split layouts, per-pane tabs, instant search, real drag & drop with other apps, and a QSpace-style archive dialog.
+It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface, keeps the Finder conventions you already know, and adds the things power users miss: split layouts, per-pane tabs, file-name and content search, real drag & drop with other apps, and a QSpace-style archive dialog.
 
 > Bento is inspired by [QSpace](https://qspace.awehunt.com/). It is an independent open-source project and is not affiliated with QSpace.
 
@@ -43,13 +43,13 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | --- | --- |
 | **Multi-pane layouts** | 10 presets — single, side-by-side, stacked, 2×2, and several 3-pane arrangements. Switch with the toolbar or View menu. |
 | **Tabs & workspaces** | Every pane has its own Finder-style tabs. Current pane tabs appear below all workspaces; click one to switch to that existing tab. Save whole layouts (panes, tabs, paths) as named workspaces in the sidebar. |
-| **Sidebar folder tree** | Expand Home, favorites and volumes one folder level at a time. The tree starts collapsed; only expanded branches are read and watched. Folder names open in the focused pane; failed or limited reads can be retried or opened as a full folder. |
+| **Sidebar folder tree** | Standard locations use macOS sidebar glyphs. Expand Home, favorites and volumes one folder level at a time. The tree starts collapsed; only expanded branches are read and watched. Folder names open in the focused pane; failed or limited reads can be retried or opened as a full folder. |
 | **Instant search** | Global file-name search backed by the [fsearch](https://github.com/noahdunnagan/fsearch) index and macOS system index — contiguous filename matching, `*` / `?` wildcards, `ext:` filters and `re:` regular expressions — plus **content search** with a side preview that highlights matching lines. |
 | **Native drag & drop** | Drag files out to Finder or any other app, drop files in from anywhere, or move them between panes. It works even when Bento sits behind other windows, and drop targets are highlighted as you hover. |
 | **Real clipboard** | <kbd>⌘C</kbd> puts real file URLs on the system pasteboard, so <kbd>⌘V</kbd> in Finder and other apps pastes the files themselves. Paste files from the clipboard into Bento too; PNG and TIFF images can also be pasted as files. |
 | **Native file operations** | Ordinary file operations use macOS Finder/AppKit. For files on hidden, non-startup APFS volumes, Bento uses macOS FileManager with a native Keep Both / Cancel conflict dialog attached to Bento; this route has no Finder progress UI and never replaces an existing item automatically. Basic file-operation undo is available with <kbd>⌘Z</kbd> during the current session; undo receipts are session-only and there is no history or queue UI. |
 | **Create Archive** | A QSpace-style dialog: choose location and name, speed / size / custom compression level, optional password, one-click mode and per-item archives. |
-| **File context menu** | Open With lists compatible installed apps and offers a system app picker. Get Info opens Finder’s information window; Quick Look previews the selection. Supported archives can be expanded by macOS Archive Utility in their current folder. Creation, view, sort and column controls are also available from the menu. Copy-path buttons appear inline only on hover and reserve no empty column while idle. |
+| **File context menu** | Open With lists compatible installed apps and offers a system app picker. Get Info opens Finder’s information window; Quick Look previews the selection. Supported archives can be expanded by macOS Archive Utility using its extraction preferences. Creation, view, sort and column controls are also available from the menu. Hover replaces the file icon with a copy-path button in the same fixed slot; disclosure arrows and names stay in place. Compatible apps display their native icons. |
 | **Batch rename** | Replace (including regex captures such as $1), add, format (with counters and dates) and change case, with a live before/after preview. |
 | **New file** | Right-click empty space in a pane and choose **新建**: Text (`未命名.txt`), Markdown (`未命名.md`), or any file you drop in `~/Library/Application Support/com.bento.app/templates/` (for example a `.docx`). The new item is renamed immediately. A clash becomes `未命名 2.txt` and never overwrites. |
 | **Compact rows** | File rows use a compact 21px height. |
@@ -59,15 +59,22 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 | **Remembers everything** | Window frame, layout, tabs, paths, sort order, column widths and preferences are restored on launch. Follows the system light / dark appearance. |
 | **Settings backup** | Settings → Backup manually exports or imports a versioned JSON file with general/sidebar preferences, search preferences/ranges and favorites. Archive settings/passwords, sessions, tabs, workspaces, layouts and folder views are excluded. Imports replace the included preferences only after successful validation and saving. |
 
-Name and content search both support Current Folder, Home and Global. Click a file result or press Enter to open its containing folder and locate/select the file in the focused pane. Folder results open the folder itself. Hover or use the arrow keys to select or preview; the context menu’s Open action opens the item itself. Current Folder/Home scan only when you submit a search, include new unindexed files, skip directory links, and apply scope, visibility and format filters before the result cap (200 by default). Large or inaccessible trees show partial-result notices; errors offer Retry. Local scans have a 2-second soft budget, 100,000 entries, depth 64, 16 MiB per file and 64 KiB per line. Global name searches require ordinary words to appear as contiguous substrings in the filename; multiple words must all match. The index and macOS system index are supplemented by a bounded, nonrecursive check of matching results’ parent folders for nearby unindexed items. Coverage can still be partial. The compact search panel aligns name, location, size and date columns; type and sort controls stay in one toolbar, with full coverage notices available under Details. Replacing a search cancels local work; an opaque index call may finish in the background while only the latest replacement waits. Dropping a downloaded attachment or pasting supported file URLs from another app imports a copy into the focused folder.
+Name and content search both support Current Folder, Home and Global. Click a file result or press Enter to open its containing folder and locate/select the file in the focused pane. Folder results open the folder itself. Hover or use the arrow keys to select or preview; the context menu’s Open action opens the item itself. Current Folder/Home scan only when you submit a search, include new unindexed files, skip directory links, and apply scope, visibility and format filters before the result cap (200 by default). Large or inaccessible trees show partial-result notices; errors offer Retry. Local scans have a 2-second soft budget, 100,000 entries, depth 64, 16 MiB per file and 64 KiB per line. Global name searches require ordinary words to appear as contiguous substrings in the filename; multiple words must all match. The name index and macOS system index run in parallel and publish initial results before all sources finish. A newer query cancels or supersedes older work; delayed batches cannot replace completed results or change the selected file. The sources are supplemented by a bounded, nonrecursive check of matching results’ parent folders for nearby unindexed items. Coverage can still be partial. The compact search panel aligns name, location, size and date columns; type and sort controls stay in one toolbar, with full coverage notices available under Details. Replacing a search cancels local work; uninterruptible engine calls remain isolated on a bounded background worker and stale results are ignored. Dropping a downloaded attachment or pasting supported file URLs from another app imports a copy into the focused folder.
 
-The sidebar starts at 220px wide (drag range 180–520px; double-click its divider to reset). Bento remembers the width. Inline rename grows to fit the name, wraps within the 260px default name column and visible pane, and uses an 18px line height; Enter confirms, while Escape cancels. The compact copy-path button copies the path of the item on that row. Top-bar back and forward follow the current pane's history. Settings can show a Full Disk Access shortcut when search lacks access to protected locations. About can check the latest version and open its download page; it does not silently install updates.
+The sidebar starts at 220px wide (drag range 180–520px; double-click its divider to reset). Bento remembers the width. Inline rename grows to fit the name, wraps within the 260px default name column and visible pane, and uses an 18px line height; Enter confirms, while Escape cancels. Copy-path controls in file rows and search results share a fixed icon slot, so hovering does not shift names or folder arrows. Top-bar back and forward follow the current pane's history. Settings can show a Full Disk Access shortcut when search lacks access to protected locations. About can check the latest version and open its download page; it does not silently install updates.
 
 ## Install
 
 ### Download
 
-Choose the matching asset from the **[latest Releases page](https://github.com/banduoba/bento/releases/latest)**: `Bento_0.3.1_macOS_AppleSilicon_arm64.dmg` or `.app.zip` for Apple Silicon, and `Bento_0.3.1_macOS_Intel_x86_64.dmg` or `.app.zip` for Intel. `SHA256SUMS` lists checksums. Open the `.dmg` and drag **Bento** into `/Applications`. Intel Macs do not need Rosetta. The Intel build is cross-compiled; native Intel hardware testing is pending.
+Download **[Bento 0.4.0](https://github.com/banduoba/bento/releases/tag/v0.4.0)** or visit the [latest Releases page](https://github.com/banduoba/bento/releases/latest).
+
+| Mac | Installer | App archive |
+| --- | --- | --- |
+| Apple Silicon (M1 or newer) | [Apple Silicon DMG](https://github.com/banduoba/bento/releases/download/v0.4.0/Bento_0.4.0_macOS_AppleSilicon_arm64.dmg) | [Apple Silicon ZIP](https://github.com/banduoba/bento/releases/download/v0.4.0/Bento_0.4.0_macOS_AppleSilicon_arm64.app.zip) |
+| Intel | [Intel DMG](https://github.com/banduoba/bento/releases/download/v0.4.0/Bento_0.4.0_macOS_Intel_x86_64.dmg) | [Intel ZIP](https://github.com/banduoba/bento/releases/download/v0.4.0/Bento_0.4.0_macOS_Intel_x86_64.app.zip) |
+
+Open the DMG and drag **Bento** into `/Applications`, or extract the matching ZIP. [SHA256SUMS](https://github.com/banduoba/bento/releases/download/v0.4.0/SHA256SUMS) lists checksums. Intel Macs do not need Rosetta. Intel builds are cross-compiled; native Intel hardware testing is pending.
 
 The build is not notarized by Apple, so macOS may block the first launch. Either *right-click → Open*, or clear the download quarantine flag once:
 
@@ -82,7 +89,7 @@ Prefer to build it yourself? It takes a few minutes the first time.
 **Requirements**
 
 - macOS on Apple Silicon (the tested target)
-- [Node.js](https://nodejs.org/) 18 or newer
+- [Node.js](https://nodejs.org/) 22.12 or newer (24+ for analytics service tests)
 - [Rust](https://rustup.rs/) (stable) and the Xcode Command Line Tools (`xcode-select --install`)
 
 **Build**
@@ -175,7 +182,7 @@ src-tauri/tauri.conf.json  Window and bundle configuration
 
 ## Status & limitations
 
-Bento is young software (`0.3.1`). Know before you use it:
+Bento is young software (`0.4.0`). Know before you use it:
 
 - The application interface is currently **Simplified Chinese only**; native menu labels follow the macOS preferred language (English, Simplified Chinese or Traditional Chinese).
 - Select the architecture-specific release asset (`AppleSilicon_arm64` or `Intel_x86_64`). The Intel build is cross-compiled; native Intel hardware testing is pending. Intel Macs do not need Rosetta.
