@@ -6,7 +6,7 @@ use super::{
 use serde::Serialize;
 use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -208,6 +208,7 @@ struct NameLiteral {
 struct ParsedQuery {
     engine: fsearch::Query,
     literals: Vec<NameLiteral>,
+    spotlight_terms: Vec<String>,
 }
 impl ParsedQuery {
     fn literal_names_accept(&self, path: &Path) -> bool {
@@ -240,9 +241,11 @@ fn parse_query(query: &str, content: bool) -> Result<ParsedQuery> {
     let home = std::env::var("HOME").unwrap_or_default();
     let invalid = |e| SearchError::new("invalidQuery", e);
     let mut literals = vec![];
+    let mut spotlight_terms = vec![];
+    let mut source_pattern = None;
     let input = if content {
         content_filters(query)
-    } else if query.contains(['[', ']']) {
+    } else {
         let mut filters = fsearch::Query::parse("", &home).map_err(invalid)?;
         let mut candidates = vec![];
         for word in query_words(query) {
@@ -251,50 +254,81 @@ fn parse_query(query: &str, content: bool) -> Result<ParsedQuery> {
             } else {
                 false
             };
-            // Only ordinary filename terms need this adapter. Explicit filters (including
-            // re:/path:/in:) and the engine's path-glob syntax keep their own grammar.
-            if filter || !word.contains(['[', ']']) || word.contains('/') {
-                candidates.push(word);
-                continue;
-            }
             let (negate, name) = word
                 .strip_prefix('!')
                 .map_or((false, word.as_str()), |s| (true, s));
+            // Keep the engine's explicit filters, path words, modifiers and brace globs.
+            if filter
+                || name.contains('/')
+                || name.contains(['{', '}'])
+                || name.starts_with(['\'', '^'])
+                || name.ends_with('$')
+                || name.is_empty()
+            {
+                candidates.push(word);
+                continue;
+            }
             let glob = name.contains(['*', '?']);
             let pattern = if glob {
                 super::glob_to_regex(name)
             } else {
                 regex::escape(name)
             };
-            literals.push(NameLiteral {
-                pattern: regex::bytes::RegexBuilder::new(&pattern)
-                    .case_insensitive(true)
-                    .dot_matches_new_line(true)
-                    .build()
-                    .map_err(|e| invalid(e.to_string()))?,
-                negate,
-            });
-            if !negate {
-                // The engine cannot escape bracket classes. Broaden just these characters;
-                // literal admission below removes decoys before the final result cap.
-                let broad = name.replace(['[', ']'], "?");
-                candidates.push(if glob { broad } else { format!("*{broad}*") });
+            let pattern = regex::bytes::RegexBuilder::new(&pattern)
+                .case_insensitive(true)
+                .dot_matches_new_line(true)
+                .build()
+                .map_err(|e| invalid(e.to_string()))?;
+            let adapted_glob =
+                name.contains(['[', ']']) || (!name.is_ascii() && name.contains('?'));
+            if !negate && adapted_glob && source_pattern.is_none() {
+                source_pattern = Some(pattern.clone());
             }
-            // A broad negative candidate could hide valid names; enforce it only at admission.
+            literals.push(NameLiteral { pattern, negate });
+            if !negate && !glob {
+                spotlight_terms.push(name.to_owned());
+            }
+            if adapted_glob {
+                if !negate {
+                    // fsearch cannot escape bracket literals, and its ?/[ parser is
+                    // not UTF-8 safe. Star-only candidates retain literal runs; the
+                    // native name regex (when available) and admission enforce the
+                    // exact pattern. Never broaden a negative source exclusion.
+                    let broad = name.replace(['[', ']'], "*");
+                    let broad = if !name.is_ascii() {
+                        broad.replace('?', "*")
+                    } else {
+                        broad
+                    };
+                    candidates.push(if glob { broad } else { format!("*{broad}*") });
+                }
+            } else if negate || glob {
+                candidates.push(word);
+            } else {
+                // A basename glob requires every ordinary word in the name itself,
+                // before the index's top-k. Fuzzy tokens can inherit ancestor matches.
+                candidates.push(format!("*{name}*"));
+            }
         }
         candidates
             .into_iter()
             .map(|word| format!("\"{word}\""))
             .collect::<Vec<_>>()
             .join(" ")
-    } else {
-        query.into()
     };
+    let mut engine = fsearch::Query::parse(&input, &home).map_err(invalid)?;
+    // Reuse the engine's pre-top-k regex slot for the adapted literal/glob when
+    // no explicit re: filter owns it. Every other filter keeps its own grammar.
+    if engine.name_re.is_none() {
+        engine.name_re = source_pattern;
+    }
     Ok(ParsedQuery {
-        engine: fsearch::Query::parse(&input, &home).map_err(invalid)?,
+        engine,
         literals,
+        spotlight_terms,
     })
 }
+
 fn query_accepts(query: &ParsedQuery, path: &Path, md: &fs::Metadata) -> bool {
     if !query.literal_names_accept(path) {
         return false;
@@ -731,16 +765,34 @@ fn indexed(
     }
     Ok(())
 }
-// fsearch terms may be fuzzy, negated, or satisfied by ancestors. They cannot safely
-// narrow a filename-only source. Keep Spotlight candidates broad and admit them below
-// with the actual parsed query, literal names, scope, visibility and format filters.
-fn spotlight_command(root: Option<&Path>) -> std::process::Command {
+// Only positive ordinary filename substrings can safely narrow this filename source.
+// Explicit path/regex/glob queries retain a broad fallback and full admission below.
+fn spotlight_predicate(query: &ParsedQuery) -> String {
+    let terms: Vec<_> = query
+        .spotlight_terms
+        .iter()
+        .filter_map(|term| {
+            // Control characters have no portable metadata-query literal spelling.
+            if term.chars().any(char::is_control) {
+                return None;
+            }
+            let escaped = term.replace('\\', "\\\\").replace('"', "\\\"");
+            Some(format!("kMDItemFSName == \"*{escaped}*\"cd"))
+        })
+        .collect();
+    if terms.is_empty() {
+        "kMDItemFSName == \"*\"".into()
+    } else {
+        terms.join(" && ")
+    }
+}
+fn spotlight_command(root: Option<&Path>, query: &ParsedQuery) -> std::process::Command {
     let mut cmd = std::process::Command::new("mdfind");
     cmd.arg("-0");
     if let Some(root) = root {
         cmd.arg("-onlyin").arg(root);
     }
-    cmd.arg("kMDItemFSName == \"*\"");
+    cmd.arg(spotlight_predicate(query));
     cmd
 }
 // Kill and reap even on read error/cancellation. No detached subprocess or reader thread.
@@ -772,7 +824,7 @@ fn spotlight(
             response.warn("sourceBudget", "系统索引达到共享候选预算");
             break;
         }
-        let mut cmd = spotlight_command(root.map(PathBuf::as_path));
+        let mut cmd = spotlight_command(root.map(PathBuf::as_path), &query);
         let mut child = Child(
             cmd.stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -857,6 +909,125 @@ fn spotlight(
     }
     Ok(())
 }
+// Verify only siblings of already admitted hits. This never descends into children,
+// follows an entry symlink, or reads file contents; network filesystem time is soft.
+fn verify_siblings(
+    request: &Request,
+    roots: &[PathBuf],
+    cancel: &AtomicBool,
+    remaining: &mut usize,
+    response: &mut SearchResponse,
+    budget: &Budget,
+) -> Result<()> {
+    cancelled(cancel)?;
+    let query = parse_query(&request.query, false)?;
+    if request.mode != "name" || query.spotlight_terms.is_empty() || response.truncated {
+        return Ok(());
+    }
+    let start = Instant::now();
+    let mut parents = vec![];
+    let mut seen = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    let mut parent_overflow = false;
+    for hit in &response.items {
+        cancelled(cancel)?;
+        if start.elapsed() >= budget.duration {
+            response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
+            return Ok(());
+        }
+        let Some(parent) = Path::new(&hit.path).parent() else {
+            continue;
+        };
+        if !seen_paths.insert(parent.to_path_buf()) || !eligible(parent, roots, request) {
+            continue;
+        }
+        let Ok(parent) = fs::canonicalize(parent) else {
+            continue;
+        };
+        if query
+            .engine
+            .scope
+            .as_ref()
+            .is_some_and(|scope| !parent.starts_with(Path::new(std::ffi::OsStr::from_bytes(scope))))
+        {
+            continue;
+        }
+        if seen.insert(parent.clone()) {
+            if parents.len() == 32 {
+                parent_overflow = true;
+                break;
+            }
+            parents.push(parent);
+        }
+    }
+    if parent_overflow {
+        response.warn("siblingBudget", "同级目录核验达到目录预算，结果可能不完整");
+    }
+    let mut visited = 0;
+    for parent in parents {
+        cancelled(cancel)?;
+        if start.elapsed() >= budget.duration || visited >= budget.entries {
+            response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
+            return Ok(());
+        }
+        let entries = match fs::read_dir(&parent) {
+            Ok(entries) => entries,
+            Err(e) => {
+                response.warn("readError", format!("部分同级目录无法读取: {e}"));
+                continue;
+            }
+        };
+        for entry in entries {
+            cancelled(cancel)?;
+            if start.elapsed() >= budget.duration || visited >= budget.entries {
+                response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
+                return Ok(());
+            }
+            visited += 1;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    response.warn("readError", format!("部分同级目录项无法读取: {e}"));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            // Cheap name/visibility/dedup gates precede metadata and canonicalization.
+            if !visible(&path, request.show_hidden)
+                || !query.literal_names_accept(&path)
+                || response
+                    .items
+                    .iter()
+                    .any(|hit| Path::new(&hit.path) == path)
+            {
+                continue;
+            }
+            if *remaining == 0 {
+                response.warn("sourceBudget", "同级目录核验达到共享候选预算");
+                return Ok(());
+            }
+            *remaining -= 1;
+            let md = match fs::symlink_metadata(&path) {
+                Ok(md) => md,
+                Err(e) => {
+                    response.warn("readError", format!("部分同级目录项无法读取: {e}"));
+                    continue;
+                }
+            };
+            if (!md.is_file() && !md.is_dir())
+                || !eligible(&path, roots, request)
+                || !format_ok(&path, md.is_dir(), &request.format)
+                || !query_accepts(&query, &path, &md)
+            {
+                continue;
+            }
+            if admit(response, item(&path, &md, None, None), request.limit) {
+                return Ok(());
+            }
+        }
+    }
+    cancelled(cancel)
+}
 fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchResponse> {
     let roots = request
         .roots
@@ -903,6 +1074,18 @@ fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchRespons
             }
         }
     }
+    verify_siblings(
+        request,
+        &roots,
+        cancel,
+        &mut remaining,
+        &mut response,
+        &Budget {
+            entries: 20_000,
+            duration: Duration::from_millis(180),
+            ..Budget::default()
+        },
+    )?;
     cancelled(cancel)?;
     Ok(response)
 }
@@ -1398,6 +1581,126 @@ mod tests {
     }
 
     #[test]
+    fn global_plain_names_reject_subsequences_typos_and_ancestor_only_terms() {
+        for (text, path, wanted) in [
+            ("id1234567890", "/reports/ID1234567890 copy.txt", true),
+            (
+                "id1234567890",
+                "/reports/abid1c2d3e4f5a6b7c8d9e0.txt",
+                false,
+            ),
+            ("report", "/reports/reprot.txt", false),
+            ("reports invoice", "/reports/invoice.pdf", false),
+            ("reports invoice", "/elsewhere/Invoice REPORTS.pdf", true),
+            ("\"project report\"", "/elsewhere/project report.txt", true),
+            (
+                "\"project report\"",
+                "/elsewhere/project other report.txt",
+                false,
+            ),
+        ] {
+            let parsed = parse_query(text, false).unwrap();
+            // Exercise the source query before top-k, independently of final admission.
+            assert_eq!(
+                parsed
+                    .engine
+                    .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                    .is_some(),
+                wanted,
+                "source candidate {text}: {path}"
+            );
+            assert_eq!(
+                parsed.literal_names_accept(Path::new(path)),
+                wanted,
+                "literal admission {text}: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_unicode_plain_bracket_and_glob_names_do_not_panic_or_match_decoys() {
+        let f = Fixture::new();
+        for (text, wanted_name, decoy_name) in [
+            ("报告", "报告一.txt", "报其他告.txt"),
+            ("\"报告 [2026]\"", "报告 [2026].txt", "报告 x2026x.txt"),
+            ("*报告?.txt", "报告一.txt", "报告.txt"),
+            ("报告 !*草稿?*", "报告定稿.txt", "报告草稿一.txt"),
+        ] {
+            let wanted = f.file(wanted_name, "wanted");
+            let decoy = f.file(decoy_name, "decoy");
+            let parsed = parse_query(text, false).unwrap();
+            assert!(
+                query_accepts(&parsed, &wanted, &fs::metadata(&wanted).unwrap()),
+                "{text}"
+            );
+            assert!(
+                !query_accepts(&parsed, &decoy, &fs::metadata(&decoy).unwrap()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_literal_adapter_preserves_explicit_modifiers_paths_and_filters() {
+        for (text, path, size, wanted) in [
+            ("^report", "/review/report.txt", 3, true),
+            ("^report", "/review/other-report.txt", 3, false),
+            ("txt$", "/review/report.txt", 3, true),
+            ("txt$", "/review/report.txt.bak", 3, false),
+            ("'report", "/review/report.txt", 3, true),
+            ("!draft *.pdf", "/review/report.pdf", 3, true),
+            ("!draft *.pdf", "/draft/report.pdf", 3, false),
+            ("reports/invoice", "/review/reports/invoice.pdf", 3, true),
+            (
+                "report ext:txt kind:file size:>=2",
+                "/review/report.txt",
+                3,
+                true,
+            ),
+            (
+                "report ext:txt kind:file size:>=2",
+                "/review/report.txt",
+                1,
+                false,
+            ),
+            ("report type:doc", "/review/report.pdf", 3, true),
+            ("report type:doc", "/review/report.png", 3, false),
+            (
+                "report path:archive in:/review",
+                "/review/archive/report.txt",
+                3,
+                true,
+            ),
+            (
+                "report path:archive in:/review",
+                "/elsewhere/archive/report.txt",
+                3,
+                false,
+            ),
+            ("report mtime:<7d", "/review/report.txt", 3, false),
+        ] {
+            let parsed = parse_query(text, false).unwrap();
+            assert_eq!(
+                parsed
+                    .engine
+                    .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, size, 0)
+                    .is_some(),
+                wanted,
+                "{text}: {path}"
+            );
+        }
+        assert_eq!(
+            parse_query("report limit:4", false).unwrap().engine.limit,
+            4
+        );
+        let content = parse_query("report invoice ext:txt", true).unwrap();
+        assert!(content.engine.tokens.is_empty());
+        assert!(content.literals.is_empty());
+        assert!(content.spotlight_terms.is_empty());
+        assert_eq!(content.engine.exts, [b"txt".to_vec()]);
+    }
+
+    #[test]
     fn global_name_parser_keeps_date_and_wildcard_brackets_literal() {
         let f = Fixture::new();
         let literal = f.file("report [2026-11-01].txt", "fixture");
@@ -1462,56 +1765,9 @@ mod tests {
     }
 
     #[test]
-    fn spotlight_bracket_candidates_are_broad_and_literal_admission_rejects_decoys() {
-        let f = Fixture::new();
-        let wanted = f.file("report [2026-11-01].txt", "fixture");
-        let decoy = f.file("report x2026-11-01x.txt", "decoy");
-        for text in ["*[2026-11-01]*", "\"report [2026-11-01]\""] {
-            let command = spotlight_command(None);
-            assert_eq!(
-                command.get_args().collect::<Vec<_>>(),
-                ["-0", "kMDItemFSName == \"*\""]
-            );
-            let parsed = parse_query(text, false).unwrap();
-            assert!(query_accepts(
-                &parsed,
-                &wanted,
-                &fs::metadata(&wanted).unwrap()
-            ));
-            assert!(!query_accepts(
-                &parsed,
-                &decoy,
-                &fs::metadata(&decoy).unwrap()
-            ));
-        }
-    }
-    #[test]
-    fn spotlight_candidates_preserve_negative_modifier_ancestor_and_fuzzy_matches() {
-        for (text, path) in [
-            ("!draft *.pdf", "/review/report.pdf"),
-            ("^report", "/review/report.pdf"),
-            ("reports invoice", "/review/reports/invoice.pdf"),
-            ("rprt", "/review/report.pdf"),
-        ] {
-            let parsed = fsearch::Query::parse(text, "/review").unwrap();
-            assert!(
-                parsed
-                    .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
-                    .is_some(),
-                "{text}: {path}"
-            );
-            let command = spotlight_command(None);
-            assert_eq!(command.get_program(), "mdfind");
-            assert_eq!(
-                command.get_args().collect::<Vec<_>>(),
-                ["-0", "kMDItemFSName == \"*\""]
-            );
-        }
-    }
-
-    #[test]
-    fn spotlight_candidates_preserve_exact_root_argument_and_broad_predicate() {
-        let command = spotlight_command(Some(Path::new("/review roots/[2026]")));
+    fn spotlight_predicate_narrows_all_plain_terms_and_preserves_root_argument() {
+        let query = parse_query("report id1234567890 ext:txt", false).unwrap();
+        let command = spotlight_command(Some(Path::new("/review roots/[2026]")), &query);
         assert_eq!(command.get_program(), "mdfind");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
@@ -1519,8 +1775,256 @@ mod tests {
                 "-0",
                 "-onlyin",
                 "/review roots/[2026]",
-                "kMDItemFSName == \"*\"",
+                "kMDItemFSName == \"*report*\"cd && kMDItemFSName == \"*id1234567890*\"cd",
             ]
+        );
+        // Narrowing happens at the producer, so unrelated names cannot exhaust its
+        // shared candidate budget before the first matching name is delivered.
+        assert_ne!(spotlight_predicate(&query), "kMDItemFSName == \"*\"");
+    }
+    #[test]
+    fn spotlight_predicate_escapes_literals_and_does_not_narrow_explicit_grammar() {
+        for (text, expected) in [
+            ("\"报告 [2026]\"", "kMDItemFSName == \"*报告 [2026]*\"cd"),
+            (r"report\copy", r#"kMDItemFSName == "*report\\copy*"cd"#),
+            ("!draft *.pdf", "kMDItemFSName == \"*\""),
+            ("^report", "kMDItemFSName == \"*\""),
+            ("report$", "kMDItemFSName == \"*\""),
+            ("re:report path:archive", "kMDItemFSName == \"*\""),
+            ("reports/invoice", "kMDItemFSName == \"*\""),
+            ("*report*", "kMDItemFSName == \"*\""),
+        ] {
+            assert_eq!(
+                spotlight_predicate(&parse_query(text, false).unwrap()),
+                expected,
+                "{text}"
+            );
+        }
+        // Quotes have the same grouping semantics as the locked query parser.
+        let mut parsed = parse_query("report", false).unwrap();
+        parsed.spotlight_terms = vec!["a\"b\\c".into()];
+        assert_eq!(
+            spotlight_predicate(&parsed),
+            r#"kMDItemFSName == "*a\"b\\c*"cd"#
+        );
+    }
+
+    fn sibling_request(f: &Fixture) -> (Request, Vec<PathBuf>, SearchResponse) {
+        let hit = f.file("inside/id1234567890.txt", "seed");
+        let hit = fs::canonicalize(hit).unwrap();
+        let mut request = req();
+        request.query = "id1234567890".into();
+        request.scope = "global".into();
+        request.mode = "name".into();
+        let root = fs::canonicalize(f.0.join("inside")).unwrap();
+        let mut response = SearchResponse::new("fsearch+spotlight");
+        admit(
+            &mut response,
+            item(&hit, &fs::metadata(&hit).unwrap(), None, None),
+            request.limit,
+        );
+        (request, vec![root], response)
+    }
+    #[test]
+    fn sibling_verification_finds_unindexed_copies_without_recursion_or_symlinks() {
+        let f = Fixture::new();
+        let (request, roots, mut response) = sibling_request(&f);
+        f.file("inside/id1234567890 copy 2.txt", "copy");
+        f.file("inside/subdir/id1234567890 nested.txt", "nested");
+        f.file("outside/id1234567890 outside.txt", "outside");
+        f.file("inside/.id1234567890.txt", "hidden");
+        std::os::unix::fs::symlink(
+            &roots[0].join("id1234567890.txt"),
+            roots[0].join("id1234567890 alias.txt"),
+        )
+        .unwrap();
+        let mut remaining = 100;
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut remaining,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        let mut names: Vec<_> = response.items.iter().map(|hit| hit.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["id1234567890 copy 2.txt", "id1234567890.txt"]);
+        assert!(!response.incomplete);
+        let entries = fs::read_dir(&roots[0]).unwrap().count();
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut remaining,
+            &mut response,
+            &Budget {
+                entries,
+                ..Budget::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), 2);
+        assert!(
+            !response.incomplete,
+            "one shared parent is scanned only once"
+        );
+    }
+    #[test]
+    fn sibling_verification_honors_explicit_scope_format_hidden_and_result_limit() {
+        let f = Fixture::new();
+        let (mut request, roots, seed) = sibling_request(&f);
+        f.file("inside/id1234567890.png", "wrong format");
+        f.file("inside/.id1234567890.txt", "hidden");
+        f.file("inside/id1234567890 copy.txt", "copy");
+        request.format = "document".into();
+        request.limit = 1;
+        let mut response = seed;
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut 100,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), 1);
+        assert!(response.truncated);
+        response.truncated = false;
+        request.limit = 200;
+        request.show_hidden = true;
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut 100,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), 3);
+        assert!(response.items.iter().all(|hit| !hit.path.ends_with(".png")));
+        let excluded = f.0.join("other");
+        fs::create_dir(&excluded).unwrap();
+        request.query = format!("id1234567890 in:{}", excluded.display());
+        let before = response.items.len();
+        f.file("inside/id1234567890 new copy.txt", "new copy");
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut 100,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), before);
+    }
+    #[test]
+    fn sibling_verification_bounds_parents_and_rejects_out_of_scope_seed_parents() {
+        let f = Fixture::new();
+        let mut request = req();
+        request.query = "id1234567890".into();
+        request.mode = "name".into();
+        let mut response = SearchResponse::new("fsearch");
+        for n in 0..34 {
+            let seed = f.file(&format!("inside/{n}/id1234567890.txt"), "seed");
+            let seed = fs::canonicalize(seed).unwrap();
+            f.file(&format!("inside/{n}/id1234567890 copy.txt"), "copy");
+            admit(
+                &mut response,
+                item(&seed, &fs::metadata(&seed).unwrap(), None, None),
+                200,
+            );
+        }
+        let outside = f.file("outside/id1234567890.txt", "seed");
+        let outside = fs::canonicalize(outside).unwrap();
+        f.file("outside/id1234567890 copy.txt", "copy");
+        // A stale/out-of-scope source hit must never authorize scanning its parent.
+        response.items.insert(
+            0,
+            item(&outside, &fs::metadata(&outside).unwrap(), None, None),
+        );
+        let roots = vec![fs::canonicalize(f.0.join("inside")).unwrap()];
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut 200,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), 35 + 32);
+        assert!(response.warnings.iter().any(|w| w.code == "siblingBudget"));
+        assert!(!response
+            .items
+            .iter()
+            .any(|hit| hit.path.ends_with("outside/id1234567890 copy.txt")));
+    }
+
+    #[test]
+    fn sibling_verification_honors_cancellation_and_budgets() {
+        let f = Fixture::new();
+        let (request, roots, seed) = sibling_request(&f);
+        f.file("inside/id1234567890 copy.txt", "copy");
+        let mut response = seed;
+        let error = verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(true),
+            &mut 100,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        for (entries, duration, remaining, warning) in [
+            (0, Duration::from_secs(2), 100, "siblingBudget"),
+            (100, Duration::ZERO, 100, "siblingBudget"),
+            (100, Duration::from_secs(2), 0, "sourceBudget"),
+        ] {
+            response.warnings.clear();
+            verify_siblings(
+                &request,
+                &roots,
+                &AtomicBool::new(false),
+                &mut { remaining },
+                &mut response,
+                &Budget {
+                    entries,
+                    duration,
+                    ..Budget::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(response.items.len(), 1);
+            assert!(response.warnings.iter().any(|w| w.code == warning));
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[ignore = "manual system index probe; set BENTO_QA_SEARCH and optionally BENTO_QA_ROOTS"]
+    fn manual_global_name_search_probe() {
+        let mut request = req();
+        request.query = std::env::var("BENTO_QA_SEARCH").expect("set BENTO_QA_SEARCH");
+        request.scope = "global".into();
+        request.mode = "name".into();
+        request.limit = 1000;
+        request.roots = std::env::var_os("BENTO_QA_ROOTS")
+            .map(|roots| {
+                std::env::split_paths(&roots)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let response = global_search(&request, &AtomicBool::new(false)).unwrap();
+        println!(
+            "BENTO_QA_RESPONSE={}",
+            serde_json::to_string(&response).unwrap()
         );
     }
 
