@@ -18,10 +18,10 @@ test('a spring request expands one existing folder without navigation, selection
  assert.ok(h.rows.some(row=>row.path==='/d/folder/nested'))
  assert.deepEqual(h.navigations,[]);assert.deepEqual(selected,[])
 })
-for(const reason of ['other-tab','other-root','disconnected','file','symlink','icons','renaming']){
+for(const reason of ['other-tab','other-root','disconnected','file','icons','renaming']){
  test(`spring request ignores ${reason}`,async t=>{
   const h=await mountPane(t),req=request()
-  const item=reason==='file'?entry('folder'):reason==='symlink'?{...folder,is_symlink:true}:folder
+  const item=reason==='file'?entry('folder'):folder
   await h.batch(h.requests[0],[item],true,1)
   if(reason==='other-tab')req.tabId='another'
   if(reason==='other-root')req.root='/stale'
@@ -30,3 +30,12 @@ for(const reason of ['other-tab','other-root','disconnected','file','symlink','i
   assert.equal(h.childRequests.length,0)
  })
 }
+
+test('directory aliases use the existing one-level manual expansion behavior',async t=>{
+ const h=await mountPane(t)
+ await h.batch(h.requests[0],[{...folder,is_symlink:true}],true,1)
+ await h.update({springOpen:request()})
+ assert.equal(h.childRequests.length,1)
+ assert.equal(h.childRequests[0].path,'/d/folder')
+ assert.deepEqual(h.navigations,[])
+})
