@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added delayed drag-hover expansion for collapsed folders in list view, with cancellation and stale-target checks.
+
 ## 0.4.0 — 2026-11-03
 
 - Improved global name matching and coverage; name and system indexes now run in parallel and stream initial results without waiting for every source. File results locate and select their file; folder results open directly.

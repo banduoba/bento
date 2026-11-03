@@ -52,6 +52,7 @@ export default function Pane({
   flash,
   reveal,
   onRevealDone,
+  springOpen = null,
   onFocus,
   onNav,
   onBack,
@@ -1065,6 +1066,19 @@ export default function Pane({
   }
 
   const renamingHere = renaming && renaming.tabId === tab.id ? renaming : null
+  const appliedSpring = useRef(null)
+  useEffect(() => {
+    if (!springOpen || appliedSpring.current === springOpen) return
+    appliedSpring.current = springOpen
+    if (springOpen.tabId !== tab.id || springOpen.root !== tab.path || viewMode !== 'list' || renamingHere) return
+    const { element, path } = springOpen
+    if (!element?.isConnected || element.dataset?.path !== path || element.dataset?.springFolder !== path) return
+    const entry = rows.find(row => row.path === path)
+    if (!entry?.is_dir || entry.isPseudo || entry.is_symlink || expandedDirs.has(path)) return
+    setExpandedDirs(previous => new Set(previous).add(path))
+    if (kidsRef.current[path] === undefined) loadKids(path)
+  }, [springOpen, tab.id, tab.path, viewMode, renamingHere, rows, expandedDirs])
+
   useEffect(() => {
     if (!renamingHere || !marqueeRef.current) return
     window.removeEventListener('mousemove', marqueeRef.current.onMove)
@@ -1575,6 +1589,7 @@ export default function Pane({
                   key={vi.key}
                   data-path={entry.isPseudo ? undefined : entry.path}
                   data-dir={entry.is_dir && !entry.isPseudo ? '1' : undefined}
+                  data-spring-folder={entry.is_dir && !entry.isPseudo && !entry.is_symlink && !isRenaming && !expandedDirs.has(entry.path) ? entry.path : undefined}
                   className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${focused && kbdCurrent === entry.path ? ' kbd-current' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${
                     dropTarget === entry.path ? ' drop-target' : ''
                   }`}
