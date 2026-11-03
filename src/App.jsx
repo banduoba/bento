@@ -1445,11 +1445,12 @@ export default function App() {
       ...choices.map(app => ({
         label: `${app.name}${app.path === discovered.defaultApp ? '（默认）' : ''}`,
         title: [app.name, app.version, app.path].filter(Boolean).join(' · '),
+        iconPath: app.path,
         action: () => nativeMenuAction(() => api.openWith(paths, app.path)),
       })),
       !discovered ? { label: error ? `无法读取应用：${error}` : '正在读取应用…', disabled: true } : null,
       choices.length ? { sep: true } : null,
-      { label: '其他…', action: () => nativeMenuAction(() => api.chooseApplicationAndOpen(paths)) },
+      { label: '其他…', iconSpace: choices.length > 0, action: () => nativeMenuAction(() => api.chooseApplicationAndOpen(paths)) },
     ].filter(Boolean)
   }
   const fileMenu = (tabId, entry, x, y) => {

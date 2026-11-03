@@ -1,19 +1,23 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { IconChevronRight } from '../icons'
+import FileIcon from './FileIcon'
 import { menuPosition, submenuPosition } from '../contextMenuPosition'
 
 function MenuButton({ item, onPick }) {
   return (
     <button
       type="button"
-      className={`menu-item${item.danger ? ' danger' : ''}`}
+      className={`menu-item${item.danger ? ' danger' : ''}${item.iconPath || item.iconSpace ? ' has-icon' : ''}`}
       disabled={item.disabled}
       data-label={item.label}
       title={item.title || item.label}
       onClick={() => onPick(item)}
     >
       {item.checked !== undefined && <span className="menu-check">{item.checked ? '✓' : ''}</span>}
+      {(item.iconPath || item.iconSpace) && <span className="menu-app-icon" aria-hidden="true">
+        {item.iconPath && <FileIcon path={item.iconPath} ext="app" />}
+      </span>}
       <span className="menu-label">{item.label}</span>
       {item.shortcut && <span className="sc">{item.shortcut}</span>}
     </button>
