@@ -274,6 +274,12 @@ export default function SearchOverlay({
     onClose()
   }
 
+  const activateResult = (item) => {
+    if (!item) return
+    if (item.is_dir) choose(item)
+    else locate(item)
+  }
+
   // 搜索结果拖出应用到其他软件（原生拖拽）
   useEffect(() => {
     const onMove = (e) => {
@@ -314,7 +320,7 @@ export default function SearchOverlay({
       setSelIdx((i) => Math.max(i - 1, 0))
     } else if (e.key === 'Enter') {
       e.preventDefault()
-      if (query.trim()) locate(sorted[selIdx])
+      if (query.trim()) activateResult(sorted[selIdx])
       else if (history[selIdx]) searchHistory(history[selIdx])
     }
   }
@@ -381,7 +387,7 @@ export default function SearchOverlay({
         copyText(item.path)
       }}
     >
-      <IconCopy size={13} />
+      <IconCopy size={12} />
     </button>
   )
 
@@ -406,6 +412,16 @@ export default function SearchOverlay({
     </button>
   )
 
+  const resultName = (item) => (
+    <span className="search-name-cell">
+      {copyAction(item)}
+      <span className="fileicon"><FileIcon path={item.path} name={item.name} isDir={item.is_dir} /></span>
+      <span className="search-name" title={item.name}>
+        {mode === 'name' ? <Highlight text={item.name} query={query} /> : item.name}
+      </span>
+    </span>
+  )
+
   const createdDate = sortBy === 'btime'
   const dateLabel = createdDate ? '创建日期' : '修改日期'
   const indexBuilding = scope === 'global' && idxStatus && !idxStatus.ready
@@ -415,6 +431,7 @@ export default function SearchOverlay({
   const coverageSummary = response?.truncated ? '结果已截断，建议收窄范围'
     : hasCoverageNotice ? '结果可能不完整' : '名称索引准备中'
   const selectedItem = query.trim() ? sorted[selIdx] : null
+  const resultActionLabel = selectedItem?.is_dir ? '打开文件夹' : '定位'
 
   return (
     <div className={`search-overlay${open ? '' : ' hidden'}`} aria-hidden={!open} inert={!open} onMouseDown={onClose}>
@@ -532,11 +549,11 @@ export default function SearchOverlay({
                 }}
                 onClick={(e) => {
                   if (suppressClickRef.current || e.target.closest('button')) return
-                  locate(item)
+                  activateResult(item)
                 }}
                 onDoubleClick={(e) => {
                   if (suppressClickRef.current || e.target.closest('button')) return
-                  locate(item)
+                  activateResult(item)
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault()
@@ -545,13 +562,9 @@ export default function SearchOverlay({
                   setMenu({ x: e.clientX, y: e.clientY, item })
                 }}
               >
-                {copyAction(item)}
-                <span className="fileicon">
-                  <FileIcon path={item.path} name={item.name} isDir={item.is_dir} />
-                </span>
                 {mode === 'name' ? (
                   <>
-                    <span className="search-name" title={item.name}><Highlight text={item.name} query={query} /></span>
+                    {resultName(item)}
                     <span className="search-dir" title={item.dir}>{item.dir}</span>
                     <span className="search-size">{item.is_dir ? '--' : fmtSize(item.size)}</span>
                     <span className="search-date">{fmtDate(createdDate ? item.btime_ms : item.mtime_ms)}</span>
@@ -559,7 +572,7 @@ export default function SearchOverlay({
                 ) : (
                   <span className="search-main">
                     <span className="search-heading">
-                      <span className="search-name" title={item.name}>{item.name}</span>
+                      {resultName(item)}
                       <span className="search-date" title={dateLabel}>{fmtDate(createdDate ? item.btime_ms : item.mtime_ms)}</span>
                     </span>
                     <span className="search-details">
@@ -650,8 +663,8 @@ export default function SearchOverlay({
               : `${sorted.length} 个结果${elapsed != null ? ` · ${elapsed} ms` : ''}`}
           </span>
           {selectedItem && <span className="search-selected-path" title={selectedItem.path}>{selectedItem.path}</span>}
-          <span className="search-hint" title="↑↓ 选择 · 单击 / ↩ 定位 · 右键打开与更多操作 · Esc 关闭">
-            ↑↓ 选择 · ↩ {query.trim() ? '定位' : '搜索'} · Esc 关闭
+          <span className="search-hint" title={`↑↓ 选择 · 单击 / ↩ ${resultActionLabel} · 右键打开与更多操作 · Esc 关闭`}>
+            ↑↓ 选择 · ↩ {query.trim() ? resultActionLabel : '搜索'} · Esc 关闭
           </span>
         </div>
       </div>

@@ -289,7 +289,7 @@ async function showResults(t, items, props) {
 }
 
 for (const is_dir of [false, true]) {
-  test(`single click locates and selects a ${is_dir ? 'folder' : 'file'} result; hover only previews`, async t => {
+  test(`single click ${is_dir ? 'opens a folder' : 'locates and selects a file'} result; hover only previews`, async t => {
     const entry = { ...item('报告 [一] '), is_dir }
     const h = await showResults(t, [item('one.txt'), entry])
     await h.run(() => h.rows()[1].props.onMouseEnter())
@@ -298,18 +298,18 @@ for (const is_dir of [false, true]) {
     assert.deepEqual(h.located, [])
     assert.deepEqual(h.closed, [])
     await h.run(() => h.rows()[1].props.onClick(rowEvent()))
-    assert.deepEqual(h.located, [[entry.dir, entry.path]])
+    assert.deepEqual(h.located, is_dir ? [] : [[entry.dir, entry.path]])
     assert.equal(h.closed.length, 1)
-    assert.deepEqual(h.opened, [])
+    assert.deepEqual(h.opened, is_dir ? [entry] : [])
   })
-  test(`Enter locates and selects a ${is_dir ? 'folder' : 'file'} result without opening it`, async t => {
+  test(`Enter ${is_dir ? 'opens a folder' : 'locates and selects a file'} result`, async t => {
     const entry = { ...item('报告 [一] '), is_dir }
     const h = await showResults(t, [item('one.txt'), entry], { mode: 'name' })
     await h.run(() => h.input().props.onKeyDown({ key: 'ArrowDown', preventDefault() {} }))
     await h.run(() => h.input().props.onKeyDown({ key: 'Enter', preventDefault() {} }))
-    assert.deepEqual(h.located, [[entry.dir, entry.path]])
+    assert.deepEqual(h.located, is_dir ? [] : [[entry.dir, entry.path]])
     assert.equal(h.closed.length, 1)
-    assert.deepEqual(h.opened, [])
+    assert.deepEqual(h.opened, is_dir ? [entry] : [])
   })
 }
 
@@ -325,19 +325,20 @@ test('explicit context Open opens the item and closes without locating', async t
 })
 
 for (const is_dir of [false, true]) {
-  test(`double click locates the containing directory and selects a ${is_dir ? 'folder' : 'file'} result`, async t => {
+  test(`double click ${is_dir ? 'opens a folder' : 'locates and selects a file'} result`, async t => {
     const entry = { ...item('报告 [一] '), is_dir }
     const h = await showResults(t, [entry], { mode: 'name' })
     await h.run(() => h.rows()[0].props.onDoubleClick?.(rowEvent()))
-    assert.deepEqual(h.located, [[entry.dir, entry.path]])
+    assert.deepEqual(h.located, is_dir ? [] : [[entry.dir, entry.path]])
     assert.equal(h.closed.length, 1)
-    assert.deepEqual(h.opened, [])
+    assert.deepEqual(h.opened, is_dir ? [entry] : [])
   })
 }
 
-test('copy and reveal buttons keep their actions without double-click navigation or starting a drag', async t => {
-  const entry = item()
-  const h = await showResults(t, [entry], { mode: 'name' })
+for (const mode of ['name', 'content']) for (const is_dir of [false, true]) {
+  test(`${mode} copy and reveal keep ${is_dir ? 'folder' : 'file'} actions without activation or drag`, async t => {
+  const entry = { ...item(), is_dir }
+  const h = await showResults(t, [entry], { mode })
   const row = h.rows()[0]
   for (const button of row.findAllByType('button')) {
     const down = { ...rowEvent(true), button: 0, clientX: 0, clientY: 0 }
@@ -358,9 +359,11 @@ test('copy and reveal buttons keep their actions without double-click navigation
   assert.deepEqual(h.closed, [])
   assert.deepEqual(h.drags, [])
 })
+}
 
-test('native drag suppresses the following click and double click; a later gesture can locate', async t => {
-  const entry = item()
+for (const is_dir of [false, true]) {
+  test(`native drag suppresses ${is_dir ? 'folder opening' : 'file location'} until a later gesture`, async t => {
+  const entry = { ...item(), is_dir }
   const h = await showResults(t, [entry], { mode: 'name' })
   await h.run(() => {
     h.rows()[0].props.onMouseDown({ button: 0, clientX: 0, clientY: 0 })
@@ -377,9 +380,10 @@ test('native drag suppresses the following click and double click; a later gestu
   assert.deepEqual(h.closed, [])
   await h.flush()
   await h.run(() => h.rows()[0].props.onDoubleClick?.(rowEvent()))
-  assert.deepEqual(h.located, [[entry.dir, entry.path]])
+  assert.deepEqual(h.located, is_dir ? [] : [[entry.dir, entry.path]])
+  assert.deepEqual(h.opened, is_dir ? [entry] : [])
 })
-
+}
 
 test('direct scope and format controls keep every choice one click away', async t => {
   const scopes = [], modes = [], sorts = []
@@ -572,3 +576,19 @@ test('pending index status shows unknown coverage honestly and retains Full Disk
   assert.ok(h.text().includes('已显示可用结果'))
   assert.ok(!h.text().includes('当前结果来自系统索引'))
 })
+
+
+for (const is_dir of [false, true]) {
+  test(`selected ${is_dir ? 'folder' : 'file'} action hint matches activation and explicit context focus action stays separate`, async t => {
+    const entry = { ...item('target'), is_dir }
+    const h = await showResults(t, [entry], { mode: 'name' })
+    const hint = h.root.find(n => n.props.className === 'search-hint')
+    assert.ok(hint.children.join('').includes(is_dir ? '打开文件夹' : '定位'))
+    await h.run(() => h.rows()[0].props.onContextMenu({ ...rowEvent(), clientX: 0, clientY: 0 }))
+    const menu = h.root.find(n => !!n.props.menu?.items).props.menu
+    await h.run(() => menu.items.find(n => n.label === (is_dir ? '在聚焦窗格中打开' : '在聚焦窗格中显示')).action())
+    assert.deepEqual(h.located, [[is_dir ? entry.path : entry.dir, is_dir ? null : entry.path]])
+    assert.deepEqual(h.opened, [])
+    assert.equal(h.closed.length, 1)
+  })
+}
