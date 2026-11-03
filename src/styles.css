@@ -1120,33 +1120,34 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .disclosure.open svg { transform: rotate(90deg); }
 .disclosure-spacer { width: 16px; flex: none; display: inline-block; }
 
-/* 行内复制路径按钮：悬停行时出现在行首 */
-.row-copy-slot {
-  width: 20px;
-  height: 20px;
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
+/* 行内复制路径按钮覆盖在图标槽中，避免悬停时挤动文件名或箭头。 */
+.copy-icon-slot { position: relative; }
+.copy-icon-image { display: flex; align-items: center; justify-content: center; }
+.row:hover .copy-icon-slot.has-copy .copy-icon-image,
+.row:focus-within .copy-icon-slot.has-copy .copy-icon-image { visibility: hidden; }
 .row-copy {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   border: none;
   background: transparent;
   color: var(--text-2);
-  width: 20px;
-  height: 20px;
-  border-radius: 6px;
+  width: 18px;
+  height: 18px;
+  border-radius: 4px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  visibility: hidden;
   flex: none;
   padding: 0;
+  visibility: hidden;
 }
-.row:hover .row-copy { visibility: visible; }
+.row:hover .copy-icon-slot.has-copy .row-copy,
+.row:focus-within .copy-icon-slot.has-copy .row-copy { visibility: visible; }
 .row-copy:hover { background: var(--hover-bg); color: var(--text); }
-.row-copy.copied { visibility: visible; color: var(--accent); }
+.row-copy.copied { color: var(--accent); }
 
 .rename-input {
   font: inherit;
@@ -1221,13 +1222,18 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .menu {
   position: fixed;
   z-index: 100;
-  min-width: 200px;
+  min-width: min(200px, calc(100vw - 16px));
+  width: max-content;
+  max-width: min(360px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overflow-x: hidden;
   background: var(--menu-bg);
   backdrop-filter: blur(20px);
   border: 0.5px solid var(--popover-border);
-  border-radius: 12px;
+  border-radius: 6px;
   box-shadow: var(--popover-shadow);
-  padding: 6px;
+  padding: 4px;
   animation: menuIn var(--ui-duration) var(--ui-ease);
 }
 @keyframes menuIn {
@@ -1235,16 +1241,21 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   to { opacity: 1; transform: scale(1); }
 }
 .menu-item {
+  -webkit-appearance: none;
+  appearance: none;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 24px;
+  gap: 16px;
   width: 100%;
+  min-height: 23px;
   border: none;
   background: transparent;
-  padding: 6px 10px;
-  border-radius: 8px;
-  font-size: 13px;
+  box-shadow: none;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 19px;
   font-family: inherit;
   color: var(--text);
   cursor: pointer;
@@ -1253,6 +1264,16 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .menu-item:hover:not(:disabled) { background: var(--accent); color: #fff; }
 .menu-item:hover:not(:disabled) .sc { color: rgba(255, 255, 255, 0.8); }
 .menu-item .menu-check { width: 14px; flex: none; margin-right: 4px; text-align: center; }
+.menu-item.has-icon { column-gap: 6px; }
+.menu-app-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.menu-app-icon > img, .menu-app-icon > svg { width: 16px; height: 16px; }
 .menu-label {
   flex: 1;
   min-width: 0;
@@ -1265,19 +1286,18 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .menu-sub.open > .menu-item { background: var(--accent); color: #fff; }
 .menu-sub.open > .menu-item .sc { color: rgba(255, 255, 255, 0.8); }
 .menu.submenu {
-  position: absolute;
-  z-index: 2;
-  min-width: 168px;
-  max-width: 280px;
+  position: fixed;
+  z-index: 101;
+  min-width: min(168px, calc(100vw - 16px));
 }
 .menu-item:disabled { color: var(--disabled-text); cursor: default; }
 .menu-item.danger:not(:disabled) { color: var(--danger); }
 .menu-item.danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
-.menu .sc { font-size: 12px; color: var(--text-2); }
+.menu .sc { flex: none; font-size: 11px; color: var(--text-2); }
 .menu hr {
   border: none;
   border-top: 0.5px solid var(--hairline);
-  margin: 4px 8px;
+  margin: 4px 6px;
 }
 
 button { font-family: inherit; }
