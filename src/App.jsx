@@ -984,6 +984,14 @@ export default function App() {
     writeText(text).catch(() => copyText(text)).catch(e => alert(String(e)))
   }
 
+  // Plain-text names are an explicit command, separate from native file-copy references.
+  const copyPlainNames = (tabId, paths) => {
+    const list = orderedPaths(tabId, paths).filter(path => typeof path === 'string' && path)
+    if (!list.length) return
+    const text = list.map(basename).join('\n')
+    return writeText(text).catch(() => copyText(text)).catch(error => alert(String(error)))
+  }
+
   // Receipts stay in memory only. An inverse must identify the actual native result.
   const identified = r => typeof r.dest === 'string' && r.dest.startsWith('/')
     && typeof r.identity?.dev === 'string' && /^\d+$/.test(r.identity.dev)
@@ -1504,6 +1512,7 @@ export default function App() {
       { sep: true },
       { label: entry.is_dir ? '添加到书签' : '将所在文件夹添加到书签', action: () => addFavorite(entry.is_dir ? entry.path : parentDir) },
       { label: '在终端打开', action: () => nativeMenuAction(() => api.openTerminal(termDir)) },
+      { label: '复制名称', shortcut: '⇧⌘C', action: () => copyPlainNames(tabId, paths) },
       { label: '拷贝路径', shortcut: '⌥⌘C', action: () => copyPlainPaths(tabId, paths) },
       { label: '在访达中显示', action: () => nativeMenuAction(() => Promise.all(paths.map(path => api.reveal(path)))) },
     ].filter(Boolean)
@@ -1766,6 +1775,7 @@ export default function App() {
       if (blocked) return
       if (kind === 'undo') undoLast()
       else if (kind === 'copy') doCopyCut(tid, 'copy')
+      else if (kind === 'copy-names') return copyPlainNames(tid)
       else if (kind === 'cut') doCopyCut(tid, 'move')
       else if (kind === 'paste') doPaste(tid)
       else if (kind === 'select-all') onSelect(tid, new Set((rowsCache.current[tid] || []).map(row => row.path)))
@@ -1880,6 +1890,11 @@ export default function App() {
     const firstEntry = () => paneRows.find((x) => x.path === paths[0])
 
     const listBlocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen
+    if (meta && e.shiftKey && !e.altKey && !e.ctrlKey && (e.code === 'KeyC' || e.key.toLowerCase() === 'c') && !listBlocked && !renaming) {
+      e.preventDefault()
+      if (!e.repeat) copyPlainNames(tid)
+      return
+    }
     if (meta && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'i' && !listBlocked && !renaming && paths.length) {
       e.preventDefault()
       nativeMenuAction(() => api.showGetInfo(orderedPaths(tid, paths)))
