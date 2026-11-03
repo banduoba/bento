@@ -2,7 +2,7 @@
 export const ENTER_RENAME = 'rename'
 export const ENTER_OPEN = 'open'
 
-export const LIST_ROW_HEIGHT = 24
+export const LIST_ROW_HEIGHT = 21
 
 export function normalizeEnterAction(value) {
   return value === ENTER_OPEN ? ENTER_OPEN : ENTER_RENAME

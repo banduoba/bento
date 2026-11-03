@@ -5,6 +5,7 @@ function MenuButton({ item, onPick }) {
   return (
     <button
       type="button"
+      role="menuitem"
       className={`menu-item${item.danger ? ' danger' : ''}`}
       disabled={item.disabled}
       data-label={item.label}
@@ -102,7 +103,7 @@ function MenuItems({ items, onPick }) {
   )
 }
 
-export default function ContextMenu({ menu, onClose }) {
+export default function ContextMenu({ menu, onClose, keyboard = false }) {
   const ref = useRef(null)
   const [pos, setPos] = useState({ left: menu.x, top: menu.y })
 
@@ -115,8 +116,16 @@ export default function ContextMenu({ menu, onClose }) {
         top: Math.min(menu.y, window.innerHeight - r.height - 8),
       })
     }
-    const close = () => onClose()
-    const onKey = (e) => e.key === 'Escape' && onClose()
+    const close = (e) => onClose(e)
+    const onKey = (e) => {
+      if (e.key === 'Escape') {
+        if (keyboard) {
+          e.preventDefault()
+          e.stopPropagation()
+        }
+        onClose(e)
+      } else if (keyboard && e.key === 'Tab') onClose(e)
+    }
     window.addEventListener('mousedown', close)
     window.addEventListener('blur', close)
     window.addEventListener('keydown', onKey)
@@ -125,10 +134,14 @@ export default function ContextMenu({ menu, onClose }) {
       window.removeEventListener('blur', close)
       window.removeEventListener('keydown', onKey)
     }
-  }, [menu, onClose])
+  }, [menu, onClose, keyboard])
+
+  useEffect(() => {
+    if (keyboard) ref.current?.querySelector('button:not(:disabled)')?.focus({ preventScroll: true })
+  }, [keyboard])
 
   const onPick = (item) => {
-    onClose()
+    onClose({ type: 'pick' })
     item.action?.()
   }
 
@@ -138,8 +151,27 @@ export default function ContextMenu({ menu, onClose }) {
       className="menu"
       style={pos}
       role="menu"
+      onKeyDown={keyboard ? (e) => {
+        // Pane-local menus are not tracked by App's global shortcut handler.
+        e.stopPropagation()
+        if (e.key === 'Escape' || e.key === 'Tab') {
+          if (e.key === 'Escape') e.preventDefault()
+          onClose(e)
+          return
+        }
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+        e.preventDefault()
+        const buttons = [...ref.current.querySelectorAll('button:not(:disabled)')]
+        const active = buttons.indexOf(ref.current.ownerDocument.activeElement)
+        const next = e.key === 'Home' ? 0 : e.key === 'End' ? buttons.length - 1
+          : (active + (e.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length
+        buttons[next]?.focus({ preventScroll: true })
+      } : undefined}
       onMouseDown={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.preventDefault()}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        if (keyboard) e.stopPropagation()
+      }}
     >
       <MenuItems items={menu.items} onPick={onPick} />
     </div>
