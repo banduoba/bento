@@ -1560,13 +1560,13 @@ export default function Pane({
                         <IconChevronRight size={12} />
                       </button>
                     ) : null}
-                    <span className="fileicon copy-icon-slot" style={!entry.is_dir && entry.depth > 0 ? { marginLeft: entry.depth * 18 + 20 } : undefined}>
+                    <span className={`fileicon copy-icon-slot${!isRenaming && !entry.isPseudo ? ' has-copy' : ''}`} style={!entry.is_dir && entry.depth > 0 ? { marginLeft: entry.depth * 18 + 20 } : undefined}>
                       {!entry.isPseudo && (
                         <span className="copy-icon-image">
                           <FileIcon path={entry.path} name={entry.name} isDir={entry.is_dir} ext={entry.ext} />
                         </span>
                       )}
-                      {!isRenaming && (
+                      {!isRenaming && !entry.isPseudo && (
                         <button
                           className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
                           title="复制路径"

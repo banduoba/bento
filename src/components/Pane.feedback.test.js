@@ -55,7 +55,7 @@ test('completed file operation feedback leaves the file view unobstructed', asyn
   await h.batch(h.requests[0], [entry('copied.txt')], true, 1)
   await h.resolve(h.requests[0])
   const copy = h.root.findByProps({ className: 'row-copy' })
-  assert.equal(copy.parent.props.className, 'fileicon copy-icon-slot')
+  assert.equal(copy.parent.props.className, 'fileicon copy-icon-slot has-copy')
   assert.equal(h.root.findAll(n => n.props.className === 'row-copy-slot').length, 0)
   await h.update({ operationToast: { tabId: 'a', paths: ['/d/copied.txt'], text: 'copied' } })
   assert.deepEqual(h.rows.map(r => r.path), ['/d/copied.txt'])

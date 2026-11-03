@@ -1120,7 +1120,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 /* 行内复制路径按钮覆盖在图标槽中，避免悬停时挤动文件名或箭头。 */
 .copy-icon-slot { position: relative; }
 .copy-icon-image { display: flex; align-items: center; justify-content: center; }
-.row:hover .copy-icon-image, .row:focus-within .copy-icon-image { visibility: hidden; }
+.row:hover .copy-icon-slot.has-copy .copy-icon-image,
+.row:focus-within .copy-icon-slot.has-copy .copy-icon-image { visibility: hidden; }
 .row-copy {
   position: absolute;
   left: 50%;
@@ -1140,7 +1141,8 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   padding: 0;
   visibility: hidden;
 }
-.row:hover .row-copy, .row:focus-within .row-copy { visibility: visible; }
+.row:hover .copy-icon-slot.has-copy .row-copy,
+.row:focus-within .copy-icon-slot.has-copy .row-copy { visibility: visible; }
 .row-copy:hover { background: var(--hover-bg); color: var(--text); }
 .row-copy.copied { color: var(--accent); }
 
