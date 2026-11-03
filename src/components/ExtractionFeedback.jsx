@@ -16,7 +16,7 @@ export default function ExtractionFeedback({ job, operation = 'extract', startin
   {busy && <>
    <p className="extraction-source" title={job?.source || ''}>{job?.source ? basename(job.source) : '正在准备输出目录…'}</p>
    <div className="extraction-indicator" role="progressbar" aria-label={`${verb}进度`} aria-valuetext={label(job?.state) || `正在准备${verb}`} />
-   <p className="extraction-detail" title={job?.currentEntry || ''}>{job?.currentEntry || (compress ? `已生成 ${(job?.outputBytes > 0 ? fmtSize(job.outputBytes) : '0 B')}` : '文件将解压到压缩包旁的新文件夹中。')}</p>
+   <p className="extraction-detail" title={job?.currentEntry || ''}>{job?.currentEntry || (compress ? (job?.outputBytes > 0 ? `已生成 ${fmtSize(job.outputBytes)}` : '正在扫描并准备文件…') : '文件将解压到压缩包旁的新文件夹中。')}</p>
   </>}
   {!busy && job?.results?.length > 0 && <ul className="extraction-results">
    {job.results.map((result, i) => <li key={i}>

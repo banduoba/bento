@@ -5,14 +5,23 @@ export const extractionActive = job => !!job && ['running', 'cancelling'].includ
 export function createExtractionTask({ api, onChange, onTerminal, onStarted = () => {}, schedule = cb => setTimeout(cb, 350), unschedule = clearTimeout }) {
  let state = { operation: 'extract', job: null, starting: false, cancelling: false, error: null }
  let live = true, timer = null, starting = false, cancellation = null
- let terminalId = null, epoch = 0, polling = false, statusUnknown = true, operationError = null
+ let terminalId = null, epoch = 0, polling = false, statusUnknown = true, operationError = null, dismissTimer = null
  const completions = new Map()
+ const clearDismiss = () => { if (dismissTimer !== null) clearTimeout(dismissTimer); dismissTimer = null }
  const publish = patch => {
   if (!live) return
   state = { ...state, ...patch }; onChange(state)
   if (state.job && !extractionActive(state.job)) { completions.get(state.job.id)?.(state.job); completions.delete(state.job.id) }
   if (state.job && !extractionActive(state.job) && terminalId !== state.job.id) {
    terminalId = state.job.id; onTerminal(state.job)
+   clearDismiss()
+   if (state.job?.state === 'completed' && !state.error) {
+    const id = state.job.id
+    dismissTimer = setTimeout(() => {
+     dismissTimer = null
+     if (live && !starting && state.job?.id === id && state.job.state === 'completed' && !state.error) publish({ job: null, error: null })
+    }, 4000)
+   }
   }
  }
  const clear = () => { if (timer !== null) unschedule(timer); timer = null }
@@ -44,7 +53,7 @@ export function createExtractionTask({ api, onChange, onTerminal, onStarted = ()
    await ready
    if (!live || statusUnknown || extractionActive(state.job)) return null
    epoch++; const generation = epoch; cancellation = null; operationError = null
-   clear(); publish({ job: null, operation: compression ? 'compress' : 'extract', starting: true, cancelling: false, error: null })
+   clear(); clearDismiss(); publish({ job: null, operation: compression ? 'compress' : 'extract', starting: true, cancelling: false, error: null })
    const job = compression ? await api.startCompression(paths, compression.dir, compression.options) : await api.startExtraction(paths)
    if (!live || generation !== epoch) return null
    if (!job || typeof job.id !== 'string' || !Array.isArray(job.results)) throw new Error('无法确认归档任务结果，请检查输出目录')
@@ -87,10 +96,11 @@ export function createExtractionTask({ api, onChange, onTerminal, onStarted = ()
   dismiss() {
    if (!extractionActive(state.job) && !starting) {
     operationError = null
+    clearDismiss()
     if (!statusUnknown) clear()
     publish({ job: null, error: null })
    }
   },
-  dispose() { live = false; epoch++; clear(); for (const resolve of completions.values()) resolve(null); completions.clear() },
+  dispose() { live = false; epoch++; clear(); clearDismiss(); for (const resolve of completions.values()) resolve(null); completions.clear() },
  }
 }

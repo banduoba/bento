@@ -90,6 +90,19 @@ fn publish_unique(
     }
     Err("同名压缩包过多".into())
 }
+// Info-ZIP writes zi* temporary files and only renames the result at exit.
+// This directory is private and contains no source files at its top level.
+fn staged_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .take(32)
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.metadata().ok())
+        .fold(0u64, |total, metadata| total.saturating_add(metadata.len()))
+}
 fn compress_group(
     sources: &[String],
     dir: &Path,
@@ -144,12 +157,21 @@ fn compress_group(
             }
             command.current_dir(&links);
         }
-        command.arg(&archive).args(names).args(["-x", "*.DS_Store"]);
+        command
+            .arg("-b")
+            .arg(&stage.path)
+            .arg(&archive)
+            .args(names)
+            .args(["-x", "*.DS_Store"]);
+        let mut written = 0;
         extraction::run_child_observed(
             command,
             cancel,
             |_| {},
-            || tick(fs::metadata(&archive).map(|m| m.len()).unwrap_or(0)),
+            || {
+                written = written.max(staged_bytes(&stage.path));
+                tick(written)
+            },
         )?;
         tick(fs::metadata(&archive).map(|m| m.len()).unwrap_or(0));
         publish_unique(&archive, dir, name, cancel)

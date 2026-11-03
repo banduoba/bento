@@ -519,7 +519,7 @@ export default function App() {
     refreshDirectories(job.results.flatMap(result => [parentPath(result.source), result.output && parentPath(result.output)]))
     const origin = archiveOrigins.current.get(job.id)
     archiveOrigins.current.delete(job.id)
-    if (job.operation !== 'compress') setArchiveCompleted({ job, origin })
+    setArchiveCompleted({ job, origin })
   }, (job, context) => archiveOrigins.current.set(job.id, context?.tabId || null))
   useEffect(() => {
     if (!cfg || !archiveCompleted) return

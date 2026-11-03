@@ -64,3 +64,12 @@ test('disposal during compression launch never registers a late completion waite
  await task.ready;const pending=task.compress(['/a'],'/out',{}).then(value=>{settled=true;result=value})
  await Promise.resolve();await Promise.resolve();task.dispose();gate.resolve({...running,operation:'compress'});await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,true);assert.equal(result,null);assert.deepEqual(started,[]);await pending
 })
+test('successful completion closes automatically after four seconds without changing its terminal notification',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const h=harness({extractionStatus:async()=>done});await h.task.ready
+ t.mock.timers.tick(3999);assert.equal(h.task.snapshot.job.id,'job-1');t.mock.timers.tick(1);assert.equal(h.task.snapshot.job,null);assert.equal(h.terminal.length,1);h.task.dispose()
+})
+test('failed and cancelled tasks remain visible and a new task cancels the previous success dismissal',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']})
+ for(const state of ['failed','partial','cancelled']){const h=harness({extractionStatus:async()=>({...done,state})});await h.task.ready;t.mock.timers.tick(10000);assert.equal(h.task.snapshot.job.state,state);h.task.dispose()}
+ const h=harness({extractionStatus:async()=>done,startExtraction:async()=>({...running,id:'new'})});await h.task.ready;await h.task.start(['/b.zip']);t.mock.timers.tick(4000);assert.equal(h.task.snapshot.job.id,'new');h.task.dispose()
+})

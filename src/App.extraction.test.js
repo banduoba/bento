@@ -41,3 +41,11 @@ for (const closed of [false,true]) test(`extraction completion ${closed?'does no
  if(closed){assert.equal(origin,undefined);assert.ok(h.panes.every(n=>!n.props.reveal))}
  else {assert.equal(origin.path,'/home');assert.deepEqual([...h.panes[0].props.selection],['/home/sample 2'])}
 })
+test('compression completion automatically selects created ZIP files and excludes failed outputs',async t=>{
+ const h=await mountApp(t,{extractionStatus:async()=>({...job,operation:'compress',source:'/home/a',total:3,processed:3,state:'partial',results:[{source:'/home/a',output:'/home/a.zip',state:'completed',error:null},{source:'/home/b',output:'/home/b.zip',state:'completed',error:null},{source:'/home/c',output:null,state:'failed',error:'failed'}]})})
+ assert.deepEqual([...h.panes[0].props.selection],['/home/a.zip','/home/b.zip']);assert.equal(h.panes[0].props.reveal.path,'/home/a.zip')
+})
+test('success feedback disappears while automatically selected output stays selected',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});const h=await mountApp(t,{extractionStatus:async()=>({...job,operation:'compress',results:[{source:'/home/a',output:'/home/a.zip',state:'completed',error:null}]})})
+ assert.deepEqual([...h.panes[0].props.selection],['/home/a.zip']);await h.run(()=>t.mock.timers.tick(4000));assert.equal(h.root.findAll(n=>n.props['data-extraction-feedback']).length,0);assert.deepEqual([...h.panes[0].props.selection],['/home/a.zip'])
+})

@@ -225,3 +225,47 @@ fn mixed_sources_with_a_link_to_output_do_not_recurse_into_private_staging() {
     let output = result.output.unwrap();
     assert!(fs::metadata(output).unwrap().len() < 100_000);
 }
+#[test]
+fn generated_bytes_increase_while_a_large_zip_is_still_running() {
+    use std::io::{Read, Write};
+    let f = Fixture::new();
+    let input = f.0.join("source/large.bin");
+    let mut random = fs::File::open("/dev/urandom").unwrap();
+    let mut block = vec![0u8; 1024 * 1024];
+    random.read_exact(&mut block).unwrap();
+    let mut file = fs::File::create(&input).unwrap();
+    for _ in 0..64 {
+        file.write_all(&block).unwrap()
+    }
+    drop(file);
+    let cancel = AtomicBool::new(false);
+    let mut observed = Vec::new();
+    let result = compress_group(
+        &[input.to_string_lossy().into()],
+        &f.0.join("out"),
+        "live.zip",
+        &ZipOptions {
+            level: Some(9),
+            ..Default::default()
+        },
+        &cancel,
+        |bytes| {
+            observed.push(bytes);
+            if observed
+                .windows(2)
+                .any(|p| p[0] > 0 && p[1] > p[0] && p[1] < 32 * 1024 * 1024)
+            {
+                cancel.store(true, Ordering::Release)
+            }
+        },
+    );
+    assert_eq!(
+        result.state, "cancelled",
+        "output size must become positive before completion; samples={observed:?}"
+    );
+    assert!(observed
+        .windows(2)
+        .any(|p| p[0] > 0 && p[1] > p[0] && p[1] < 32 * 1024 * 1024));
+    assert!(result.output.is_none());
+    assert_eq!(fs::read_dir(f.0.join("out")).unwrap().count(), 0);
+}
