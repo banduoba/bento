@@ -1547,8 +1547,26 @@ export default function Pane({
                   <div
                     className="row-name"
                   >
-                    {!isRenaming && (
-                      <span className="row-copy-slot">
+                    {entry.is_dir ? (
+                      <button
+                        className={`disclosure${expandedDirs.has(entry.path) ? ' open' : ''}`}
+                        style={entry.depth ? { marginLeft: entry.depth * 18 } : undefined}
+                        title={expandedDirs.has(entry.path) ? '折叠' : '展开'}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onDoubleClick={(e) => e.stopPropagation()}
+                        draggable={false}
+                        onClick={(e) => toggleExpand(e, entry)}
+                      >
+                        <IconChevronRight size={12} />
+                      </button>
+                    ) : null}
+                    <span className="fileicon copy-icon-slot" style={!entry.is_dir && entry.depth > 0 ? { marginLeft: entry.depth * 18 + 20 } : undefined}>
+                      {!entry.isPseudo && (
+                        <span className="copy-icon-image">
+                          <FileIcon path={entry.path} name={entry.name} isDir={entry.is_dir} ext={entry.ext} />
+                        </span>
+                      )}
+                      {!isRenaming && (
                         <button
                           className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
                           title="复制路径"
@@ -1563,24 +1581,6 @@ export default function Pane({
                         >
                           {copiedPath === entry.path ? <IconCheck size={12} /> : <IconCopy size={12} />}
                         </button>
-                      </span>
-                    )}
-                    {entry.is_dir ? (
-                      <button
-                        className={`disclosure${expandedDirs.has(entry.path) ? ' open' : ''}`}
-                        style={entry.depth ? { marginLeft: entry.depth * 18 } : undefined}
-                        title={expandedDirs.has(entry.path) ? '折叠' : '展开'}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        onDoubleClick={(e) => e.stopPropagation()}
-                        draggable={false}
-                        onClick={(e) => toggleExpand(e, entry)}
-                      >
-                        <IconChevronRight size={12} />
-                      </button>
-                    ) : null}
-                    <span className="fileicon" style={!entry.is_dir && entry.depth > 0 ? { marginLeft: entry.depth * 18 + 20 } : undefined}>
-                      {entry.isPseudo ? null : (
-                        <FileIcon path={entry.path} name={entry.name} isDir={entry.is_dir} ext={entry.ext} />
                       )}
                     </span>
                     {isRenaming ? (

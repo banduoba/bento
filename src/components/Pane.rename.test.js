@@ -32,6 +32,8 @@ test('inline rename retains its editor identity and focus across controlled valu
   assert.equal(r.value,'xy.txt')
   await r.h.update({renaming:{tabId:'a',path:'/d/a.txt',value:r.value}})
   assert.equal(r.h.root.findByProps({className:'rename-input'}),rename)
+  assert.equal(r.h.root.findAll(n=>n.props.className==='copy-icon-image').length,1)
+  assert.equal(r.h.root.findAll(n=>typeof n.props.className==='string'&&n.props.className.startsWith('row-copy')).length,0)
   assert.equal(document.activeElement,r.input)
   assert.equal(r.commits,0)
 })

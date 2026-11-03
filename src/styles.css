@@ -1117,17 +1117,15 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .disclosure.open svg { transform: rotate(90deg); }
 .disclosure-spacer { width: 16px; flex: none; display: inline-block; }
 
-/* 行内复制路径按钮：悬停行时出现在行首 */
-.row-copy-slot {
-  display: none;
-  width: 18px;
-  height: 18px;
-  flex: none;
-  align-items: center;
-  justify-content: center;
-}
-.row:hover .row-copy-slot, .row:focus-within .row-copy-slot { display: inline-flex; }
+/* 行内复制路径按钮覆盖在图标槽中，避免悬停时挤动文件名或箭头。 */
+.copy-icon-slot { position: relative; }
+.copy-icon-image { display: flex; align-items: center; justify-content: center; }
+.row:hover .copy-icon-image, .row:focus-within .copy-icon-image { visibility: hidden; }
 .row-copy {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   border: none;
   background: transparent;
   color: var(--text-2);
@@ -1140,7 +1138,9 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   justify-content: center;
   flex: none;
   padding: 0;
+  visibility: hidden;
 }
+.row:hover .row-copy, .row:focus-within .row-copy { visibility: visible; }
 .row-copy:hover { background: var(--hover-bg); color: var(--text); }
 .row-copy.copied { color: var(--accent); }
 
