@@ -1181,7 +1181,7 @@ fn spotlight(
         let mut oversized = false;
         loop {
             cancelled(cancel)?;
-            if start.elapsed() >= Duration::from_secs(2) {
+            if start.elapsed() >= Duration::from_secs(4) {
                 response.warn("timeBudget", "系统索引达到时间预算");
                 return Ok(());
             }
