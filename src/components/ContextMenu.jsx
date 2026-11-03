@@ -24,16 +24,17 @@ function MenuButton({ item, onPick }) {
   )
 }
 
-function SubMenu({ items, onPick, onEnter, onLeave, anchorRef }) {
+function SubMenu({ items, onPick, onEnter, onLeave, anchorRef, rootRef }) {
   const ref = useRef(null)
   const [box, setBox] = useState({ left: 8, top: 8 })
 
   useLayoutEffect(() => {
     const place = () => {
       const el = ref.current
-      const parent = anchorRef.current
-      if (!el || !parent) return
-      setBox(submenuPosition(parent.getBoundingClientRect(), el.offsetWidth, el.offsetHeight, window.innerWidth, window.innerHeight))
+      const anchor = anchorRef.current
+      const parent = rootRef.current
+      if (!el || !anchor || !parent) return
+      setBox(submenuPosition(parent.getBoundingClientRect(), anchor.getBoundingClientRect(), el.offsetWidth, el.offsetHeight, window.innerWidth, window.innerHeight))
     }
     place()
     window.addEventListener('resize', place)
@@ -42,18 +43,18 @@ function SubMenu({ items, onPick, onEnter, onLeave, anchorRef }) {
       window.removeEventListener('resize', place)
       window.removeEventListener('scroll', place, true)
     }
-  }, [items, anchorRef])
+  }, [items, anchorRef, rootRef])
 
   const content = (
     <div ref={ref} className="menu submenu" style={box} role="menu"
       onMouseEnter={onEnter} onMouseLeave={onLeave} onMouseDown={(e) => e.stopPropagation()}>
-      <MenuItems items={items} onPick={onPick} />
+      <MenuItems items={items} onPick={onPick} rootRef={rootRef} />
     </div>
   )
   return createPortal(content, document.body)
 }
 
-function MenuBranch({ item, onPick }) {
+function MenuBranch({ item, onPick, rootRef }) {
   const [open, setOpen] = useState(false)
   const anchorRef = useRef(null)
   const closeTimer = useRef(null)
@@ -86,17 +87,17 @@ function MenuBranch({ item, onPick }) {
           <IconChevronRight size={12} />
         </span>
       </button>
-      {open && <SubMenu items={item.children} onPick={onPick} onEnter={show} onLeave={hide} anchorRef={anchorRef} />}
+      {open && <SubMenu items={item.children} onPick={onPick} onEnter={show} onLeave={hide} anchorRef={anchorRef} rootRef={rootRef} />}
     </div>
   )
 }
 
-function MenuItems({ items, onPick }) {
+function MenuItems({ items, onPick, rootRef }) {
   return items.map((it, i) =>
     it.sep ? (
       <hr key={`sep-${i}`} />
     ) : it.children ? (
-      <MenuBranch key={`${it.label}-${i}`} item={it} onPick={onPick} />
+      <MenuBranch key={`${it.label}-${i}`} item={it} onPick={onPick} rootRef={rootRef} />
     ) : (
       <MenuButton key={`${it.label}-${i}`} item={it} onPick={onPick} />
     )
@@ -146,7 +147,7 @@ export default function ContextMenu({ menu, onClose }) {
       onMouseDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
     >
-      <MenuItems items={menu.items} onPick={onPick} />
+      <MenuItems items={menu.items} onPick={onPick} rootRef={ref} />
     </div>
   )
 }
