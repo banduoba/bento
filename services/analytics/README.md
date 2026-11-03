@@ -35,5 +35,5 @@ Version and architecture breakdowns show each installation's latest report;
 7-day and 30-day counts include today and count distinct installations. Daily
 membership is retained for 35 UTC dates; lifetime installation records remain.
 
-For local checks, use Node 22.13+ and run `npm ci`, `npm test`, then `npm run check`
+For local checks, use Node 24+ and run `npm ci`, `npm test`, then `npm run check`
 from this directory. Tests execute the production SQL against in-memory SQLite.

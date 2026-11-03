@@ -115,10 +115,10 @@ async function handle(request, env) {
     // No cross-origin dashboard API access, even if a token is supplied.
     const origin = request.headers.get('Origin');
     if (origin && origin !== url.origin) return json({ error: 'origin_not_allowed' }, 403);
+    if (!await authorized(request, env.ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
     if (!(await env.ADMIN_LIMIT.limit({ key: 'bento-dashboard' })).success) {
       return json({ error: 'rate_limited' }, 429, { 'Retry-After': '60' });
     }
-    if (!await authorized(request, env.ADMIN_TOKEN)) return json({ error: 'unauthorized' }, 401, { 'WWW-Authenticate': 'Bearer' });
     return json(await readStats(env.DB, utcDay()));
   }
   if ((url.pathname === '/' || url.pathname === '/dashboard') && request.method === 'GET') return dashboard();

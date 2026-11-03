@@ -169,6 +169,18 @@ test('dashboard shell includes no secret, blocks framing, and keeps token out of
   assert.match(response.headers.get('Content-Security-Policy'), /script-src 'nonce-/);
 });
 
+test('unauthenticated stats requests cannot exhaust the owner quota', async t => {
+  const env = environment(t);
+  let calls = 0;
+  env.ADMIN_LIMIT.limit = async () => ({ success: ++calls <= 30 });
+  for (let index = 0; index < 40; index++) {
+    assert.equal((await worker.fetch(stats(index % 2 ? { Authorization: 'Bearer incorrect' } : {}), env)).status, 401);
+  }
+  assert.equal(calls, 0);
+  assert.equal((await worker.fetch(stats({ Authorization: 'Bearer ' + ownerToken }), env)).status, 200);
+  assert.equal(calls, 1);
+});
+
 test('only Tauri CORS origins may submit; native requests and allowed preflight work', async t => {
   const env = environment(t);
   for (const origin of ['tauri://localhost', 'http://tauri.localhost', 'https://tauri.localhost']) {
