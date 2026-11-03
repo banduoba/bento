@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Redesigned preferences with a native-style icon sidebar, section headers, grouped controls, aligned shortcut keycaps, and responsive light/dark layouts.
+
 - Added app shortcut customization with Finder/Commander presets, key recording, conflict protection, per-command reset/clear and separate JSON import/export; native file clipboard and basic editing keys remain unchanged.
 
 - Added Copy Names in selection and Edit menus, with Shift-Command-C for newline-separated names; native file copy/paste and Option-Command-C path copying remain unchanged.

@@ -26,7 +26,7 @@ async function mount(t, native = true) {
   const error = console.error; console.error = (...a) => { if (!String(a[0]).startsWith('react-test-renderer is deprecated.')) error(...a) }
   try { await act(async () => { renderer = create(React.createElement(mod.exports.default, { open: true, searchPaths: [], onClose() {}, onExportSettings: () => ({ version: 1 }), onImportSettings: async text => { calls.push(['apply', text]); if (state.fail) throw state.fail } })) }) } finally { console.error = error }
   t.after(async () => { await act(async () => renderer.unmount()); for (const [key, value] of Object.entries(prev)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value } })
-  const button = label => renderer.root.findAllByType('button').find(n => n.children.join('') === label)
+  const button = label => renderer.root.findAllByType('button').find(n => (n.props['aria-label'] || n.children.join('')) === label)
   return { state, calls, button, text: () => JSON.stringify(renderer.toJSON()), async click(label) { assert.ok(button(label), `${label} exists`); await act(async () => { await button(label).props.onClick() }) } }
 }
 test('Settings backup describes the scope, uses JSON save/open dialogs and reports success', async t => {
