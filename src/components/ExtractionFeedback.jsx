@@ -5,6 +5,7 @@ export default function ExtractionFeedback({ job, operation = 'extract', startin
  const compress = (job?.operation || operation) === 'compress'
  const verb = compress ? '压缩' : '解压'
  const label = state => ({ running: `正在${verb}`, cancelling: '正在取消', completed: `${verb}完成`, partial: `部分${verb}完成`, failed: `${verb}失败`, cancelled: `已取消${verb}` })[state]
+ const elapsed = job ? (job.elapsedMs < 1000 ? `${job.elapsedMs} ms` : `${(job.elapsedMs / 1000).toFixed(3)} 秒`) : ''
  const busy = starting || extractionActive(job)
  const partial = job?.results?.some(result => result.output && result.state !== 'completed')
  return <aside className="extraction-feedback" data-extraction-feedback role="region" aria-labelledby="extraction-feedback-title"
@@ -31,7 +32,7 @@ export default function ExtractionFeedback({ job, operation = 'extract', startin
   {!compress && partial && !busy && <p className="extraction-detail">未完成文件已保留在输出目录，并带有未完成标记。</p>}
   {(error || job?.error) && <p className="extraction-error" role="alert">{error || job.error}</p>}
   <footer className="extraction-feedback-footer">
-   <span>{job ? `已用时 ${Math.floor(job.elapsedMs / 1000)} 秒` : ''}</span>
+   <span>{job ? `已用时 ${elapsed}` : ''}</span>
    {busy ? <button className="btn small" disabled={starting || cancelling || job?.state === 'cancelling'} onClick={onCancel}>{cancelling || job?.state === 'cancelling' ? '正在取消…' : `取消${verb}`}</button>
     : <button className="btn small" onClick={onDismiss}>完成</button>}
   </footer>
