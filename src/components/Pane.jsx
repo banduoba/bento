@@ -1561,7 +1561,7 @@ export default function Pane({
                             showCopyToast(entry.path, e.currentTarget.getBoundingClientRect())
                           }}
                         >
-                          {copiedPath === entry.path ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                          {copiedPath === entry.path ? <IconCheck size={12} /> : <IconCopy size={12} />}
                         </button>
                       )}
                     </span>

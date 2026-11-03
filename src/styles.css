@@ -1119,9 +1119,12 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 
 /* 行内复制路径按钮：悬停行时出现在行首 */
 .row-copy-slot {
-  width: 20px;
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
   height: 20px;
-  flex: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1130,9 +1133,9 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   border: none;
   background: transparent;
   color: var(--text-2);
-  width: 20px;
+  width: 12px;
   height: 20px;
-  border-radius: 6px;
+  border-radius: 4px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -1141,7 +1144,7 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   flex: none;
   padding: 0;
 }
-.row:hover .row-copy { visibility: visible; }
+.row:hover .row-copy, .row:focus-within .row-copy { visibility: visible; }
 .row-copy:hover { background: var(--hover-bg); color: var(--text); }
 .row-copy.copied { visibility: visible; color: var(--accent); }
 
@@ -1218,13 +1221,18 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .menu {
   position: fixed;
   z-index: 100;
-  min-width: 200px;
+  min-width: min(200px, calc(100vw - 16px));
+  width: max-content;
+  max-width: min(360px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overflow-x: hidden;
   background: var(--menu-bg);
   backdrop-filter: blur(20px);
   border: 0.5px solid var(--popover-border);
-  border-radius: 12px;
+  border-radius: 6px;
   box-shadow: var(--popover-shadow);
-  padding: 6px;
+  padding: 4px;
   animation: menuIn var(--ui-duration) var(--ui-ease);
 }
 @keyframes menuIn {
@@ -1232,16 +1240,21 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
   to { opacity: 1; transform: scale(1); }
 }
 .menu-item {
+  -webkit-appearance: none;
+  appearance: none;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 24px;
+  gap: 16px;
   width: 100%;
+  min-height: 23px;
   border: none;
   background: transparent;
-  padding: 6px 10px;
-  border-radius: 8px;
-  font-size: 13px;
+  box-shadow: none;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 19px;
   font-family: inherit;
   color: var(--text);
   cursor: pointer;
@@ -1262,19 +1275,18 @@ body.col-resizing, body.col-resizing * { cursor: col-resize !important; user-sel
 .menu-sub.open > .menu-item { background: var(--accent); color: #fff; }
 .menu-sub.open > .menu-item .sc { color: rgba(255, 255, 255, 0.8); }
 .menu.submenu {
-  position: absolute;
-  z-index: 2;
-  min-width: 168px;
-  max-width: 280px;
+  position: fixed;
+  z-index: 101;
+  min-width: min(168px, calc(100vw - 16px));
 }
 .menu-item:disabled { color: var(--disabled-text); cursor: default; }
 .menu-item.danger:not(:disabled) { color: var(--danger); }
 .menu-item.danger:hover:not(:disabled) { background: var(--danger); color: #fff; }
-.menu .sc { font-size: 12px; color: var(--text-2); }
+.menu .sc { flex: none; font-size: 11px; color: var(--text-2); }
 .menu hr {
   border: none;
   border-top: 0.5px solid var(--hairline);
-  margin: 4px 8px;
+  margin: 4px 6px;
 }
 
 button { font-family: inherit; }

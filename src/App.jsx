@@ -55,6 +55,7 @@ const MIME = 'application/x-bento'
 // 没有选中项时各窗格共用同一只空 Set。每次渲染 new Set() 会让统计 effect 的依赖一直变，
 // 分批加载时每一批都会把更新深度打满。
 const EMPTY_SELECTION = new Set()
+const EXTRACTABLE_EXTENSIONS = new Set(['zip', 'tar', 'tgz', 'gz', 'tbz', 'tbz2', 'bz2', 'txz', 'xz', 'cpio'])
 
 // 调试埋点：写进 dev 日志（stderr）
 const trace = (m) => {
@@ -935,7 +936,10 @@ export default function App() {
     },
     select: (tabId, path) => onSelect(tabId, new Set([path])),
     reveal: (tabId, path) => setRevealReq({ tabId, path, nonce: Date.now() }),
-    present: (path, paths, session) => api.quickLook(path, paths, session),
+    present: (path, paths, session) => api.quickLook(path, paths, session).catch(error => {
+      alert(`无法预览：${error}`)
+      throw error
+    }),
     update: (path, paths, session, revision) => api.updateQuickLook(path, paths, session, revision),
   }
   const previewNavigation = useRef(null)
@@ -1314,11 +1318,13 @@ export default function App() {
     const p = normalizeZipPrefs(cfg.zipPrefs)
     const name = zipDefaultName(paths, dir)
     const openDlg = () => setZipDlg({ id: Date.now(), paths, dir, name, tabId })
-    const what = paths.length > 1 ? `${paths.length} 项` : `「${entry.name}」`
-    if (!p.oneClick) return [{ label: `压缩${what}…`, action: openDlg }]
+    const what = paths.length > 1 ? ` ${paths.length} 个项目` : ''
+    const title = paths.length > 1 ? `压缩 ${paths.length} 个项目` : `压缩「${entry.name}」`
+    if (!p.oneClick) return [{ label: `压缩${what}…`, title, action: openDlg }]
     return [
       {
         label: `压缩${what}`,
+        title,
         action: () =>
           runZip(paths, dir, { name, level: levelOf(p), password: p.password, separate: p.separate && paths.length > 1 }, tabId),
       },
@@ -1423,60 +1429,95 @@ export default function App() {
   }
 
   // ---------- 右键菜单 ----------
+  const nativeMenuAction = async action => {
+    try { await action() } catch (error) { alert(String(error)) }
+  }
+  const openWithItems = (paths, discovered, error) => {
+    const applications = Array.isArray(discovered?.apps) ? discovered.apps : []
+    const seen = new Set()
+    const choices = applications.filter(app => {
+      if (!app?.path || !app.name || seen.has(app.path)) return false
+      seen.add(app.path)
+      return true
+    }).sort((a, b) => Number(b.path === discovered.defaultApp) - Number(a.path === discovered.defaultApp))
+    return [
+      paths.length > 1 ? { label: `应用于所选全部 ${paths.length} 个项目`, disabled: true } : null,
+      ...choices.map(app => ({
+        label: `${app.name}${app.path === discovered.defaultApp ? '（默认）' : ''}`,
+        title: [app.name, app.version, app.path].filter(Boolean).join(' · '),
+        action: () => nativeMenuAction(() => api.openWith(paths, app.path)),
+      })),
+      !discovered ? { label: error ? `无法读取应用：${error}` : '正在读取应用…', disabled: true } : null,
+      choices.length ? { sep: true } : null,
+      { label: '其他…', action: () => nativeMenuAction(() => api.chooseApplicationAndOpen(paths)) },
+    ].filter(Boolean)
+  }
   const fileMenu = (tabId, entry, x, y) => {
-    const paths = sel[tabId]?.has(entry.path) && sel[tabId].size > 1 ? selArr(tabId) : [entry.path]
+    const paths = orderedPaths(tabId, sel[tabId]?.has(entry.path) && sel[tabId].size > 1 ? selArr(tabId) : [entry.path])
     const pi = paneIndexOf(tabId)
     const parentDir = parentPath(entry.path)
     const termDir = entry.is_dir ? entry.path : parentDir
-    // 文件夹可打开到除当前窗格外的所有窗格（按位置命名）
-    const paneOpenItems = entry.is_dir
-      ? cfg.panes
-          .slice(0, visibleCount)
-          .map((p, j) => ({ p, j }))
-          .filter(({ j }) => j !== pi)
-          .map(({ p, j }) => {
-            const t = p.tabs[p.active] || p.tabs[0]
-            return t
-              ? {
-                  label: `在${paneName(cfg.layout, j)}窗格打开`,
-                  action: () => {
-                    nav(t.id, entry.path)
-                    setFocused(j)
-                    triggerFlash(j)
-                  },
-                }
-              : null
+    const rows = rowsCache.current[tabId] || []
+    const entries = new Map(rows.map(row => [row.path, row]))
+    entries.set(entry.path, entry)
+    const filesOnly = paths.every(path => entries.has(path) && !entries.get(path).is_dir)
+    const canExtract = filesOnly && paths.every(path => EXTRACTABLE_EXTENSIONS.has(basename(path).split('.').pop().toLowerCase()))
+    const previewPath = !entry.is_dir ? entry.path : paths.find(path => entries.has(path) && !entries.get(path).is_dir)
+    const previewDir = locateTab(tabId)?.path || parentDir
+    const paneOpenItems = entry.is_dir && paths.length === 1
+      ? cfg.panes.slice(0, visibleCount).map((pane, j) => ({ pane, j })).filter(({ j }) => j !== pi)
+          .flatMap(({ pane, j }) => {
+            const tab = pane.tabs[pane.active] || pane.tabs[0]
+            return tab ? [{ label: `${paneName(cfg.layout, j)}窗格`, action: () => {
+              nav(tab.id, entry.path)
+              setFocused(j)
+              triggerFlash(j)
+            } }] : []
           })
-          .filter(Boolean)
       : []
-    const items = [
-      { label: '打开', shortcut: '⌘↓', action: () => openEntry(tabId, entry) },
-      ...paneOpenItems,
-      paneOpenItems.length ? { sep: true } : null,
+    const buildItems = (discovered, list, appsError) => [
+      { label: '打开', shortcut: '⌘↓', action: () => paths.length === 1 ? openEntry(tabId, entry)
+        : nativeMenuAction(() => Promise.all(paths.map(path => api.openPath(path)))) },
+      filesOnly ? { label: '打开方式', children: openWithItems(paths, discovered, appsError) } : null,
+      paneOpenItems.length ? { label: '在其他窗格打开', children: paneOpenItems } : null,
+      canExtract ? { label: '解压缩', action: () => nativeMenuAction(() => api.extractArchive(paths)) } : null,
+      previewPath ? { label: '快速查看', shortcut: '空格', action: () => previewNavigation.current.open(tabId, previewDir, previewPath, paths) } : null,
+      { label: '显示简介', shortcut: '⌘I', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
+      { sep: true },
       { label: '拷贝', shortcut: '⌘C', action: () => doCopyCut(tabId, 'copy', paths) },
       { label: '剪切', shortcut: '⌘X', action: () => doCopyCut(tabId, 'move', paths) },
+      { label: '粘贴项目', shortcut: '⌘V', action: () => doPaste(tabId, parentDir) },
       { sep: true },
-      {
-        label: paths.length > 1 ? `重新命名 ${paths.length} 个项目…` : '重新命名',
+      { label: paths.length > 1 ? `重新命名 ${paths.length} 个项目…` : '重新命名',
         shortcut: normalizeEnterAction(cfg?.enterAction) === 'open' ? 'F2' : '↩',
-        action: () =>
-          paths.length > 1
-            ? openBatchRename(tabId, paths)
-            : startRename(tabId, entry.path, entry.name),
-      },
+        action: () => paths.length > 1 ? openBatchRename(tabId, paths) : startRename(tabId, entry.path, entry.name) },
       { label: '拷贝副本', shortcut: '⌘D', action: () => doDuplicate(tabId, paths) },
       ...zipMenuItems(paths, parentDir, entry, tabId),
       { label: '移到废纸篓', danger: true, shortcut: '⌘⌫', action: () => doTrash(tabId, paths) },
       { sep: true },
-      {
-        label: entry.is_dir ? '添加到书签' : '将所在文件夹添加到书签',
-        action: () => addFavorite(entry.is_dir ? entry.path : parentDir),
-      },
-      { label: '在终端打开', action: () => termDir && api.openTerminal(termDir).catch((e) => alert(String(e))) },
-      { label: '拷贝路径', shortcut: '⌥⌘C', action: () => copyPlainPaths(tabId, orderedPaths(tabId, paths)) },
-      { label: '在访达中显示', action: () => api.reveal(entry.path).catch(() => {}) },
+      { label: '新建文件夹', shortcut: '⇧⌘N', action: () => newFolder(tabId, parentDir) },
+      { label: '新建', children: newFileItems(tabId, list, parentDir) },
+      ...folderDisplayItems(parentDir),
+      { sep: true },
+      { label: entry.is_dir ? '添加到书签' : '将所在文件夹添加到书签', action: () => addFavorite(entry.is_dir ? entry.path : parentDir) },
+      { label: '在终端打开', action: () => nativeMenuAction(() => api.openTerminal(termDir)) },
+      { label: '拷贝路径', shortcut: '⌥⌘C', action: () => copyPlainPaths(tabId, paths) },
+      { label: '在访达中显示', action: () => nativeMenuAction(() => Promise.all(paths.map(path => api.reveal(path)))) },
     ].filter(Boolean)
-    setMenu({ x, y, items })
+    const request = Symbol('file-menu')
+    const update = patch => setMenu(current => {
+      if (current?.request !== request) return current
+      const next = { ...current, ...patch }
+      return { ...next, items: buildItems(next.apps, next.fileTemplates, next.appsError) }
+    })
+    setMenu({ kind: 'file', request, tabId, x, y, apps: null, fileTemplates: templates, items: buildItems(null, templates) })
+    if (filesOnly) Promise.resolve().then(() => api.listOpenWith(entry.path))
+      .then(apps => update({ apps })).catch(error => update({ appsError: String(error) }))
+    Promise.resolve().then(() => api.listTemplates()).then(list => {
+      if (!Array.isArray(list)) return
+      setTemplates(list)
+      update({ fileTemplates: list })
+    }).catch(() => {})
   }
 
   // 排序和列按文件夹记住：改当前目录只写它的覆盖，其他目录仍用默认或自己的覆盖。
@@ -1510,10 +1551,9 @@ export default function App() {
       return { ...c, viewSettings: store }
     })
   }
-  const setViewMode = mode => {
-    const tab = activeTabOf(focusIdx)
-    if (tab) {
-      const key = keyFor(tab.path)
+  const setFolderViewMode = (path, mode) => {
+    if (path) {
+      const key = keyFor(path)
       if (viewForPath(cfg.viewSettings, key).mode !== mode) {
         const affected = cfg.panes.flatMap(pane => pane.tabs).filter(item => keyFor(item.path) === key)
         for (const item of affected) delete columnDirectories.current[item.id]
@@ -1529,9 +1569,10 @@ export default function App() {
           return changed ? next : previous
         })
       }
-      commitFolderView(tab.path, { mode })
+      commitFolderView(path, { mode })
     }
   }
+  const setViewMode = mode => setFolderViewMode(activeTabOf(focusIdx)?.path, mode)
   const folderOverridden = (path) => {
     const lex = canonicalPathKey(path)
     if (!lex || !cfg?.viewSettings) return false
@@ -1551,28 +1592,36 @@ export default function App() {
       action: () => path && applyViewToAll(path),
     },
   ]
-  const colMenu = (i, x, y) => {
-    const pane = cfg.panes[i]
-    const path = pane?.tabs[pane.active]?.path
+  const columnItems = path => {
     const current = viewForPath(cfg.viewSettings, keyFor(path))
     const vis = current.columns.visible
-    setMenu({
-      x,
-      y,
-      items: [
-        ...COL_LABELS.map(([key, label]) => ({
-          label,
-          checked: !!vis[key],
-          action: () =>
-            path &&
-            commitFolderView(path, {
-              columns: { widths: current.columns.widths, visible: { ...vis, [key]: !vis[key] } },
-            }),
-        })),
+    return [
+      ...COL_LABELS.map(([key, label]) => ({ label, checked: !!vis[key], action: () => path && commitFolderView(path, {
+        columns: { widths: current.columns.widths, visible: { ...vis, [key]: !vis[key] } },
+      }) })),
+      { sep: true },
+      ...folderViewMenu(path),
+    ]
+  }
+  const folderDisplayItems = path => {
+    const current = viewForPath(cfg.viewSettings, keyFor(path))
+    return [
+      { label: '显示方式', children: [['list', '列表'], ['icons', '图标'], ['columns', '分栏']].map(([mode, label]) => ({
+        label, checked: current.mode === mode, action: () => setFolderViewMode(path, mode),
+      })) },
+      { label: '排序方式', children: [
+        ...[['name', '名称'], ...COL_LABELS].map(([key, label]) => ({ label, checked: current.sort.key === key,
+          action: () => commitFolderView(path, { sort: { key, dir: current.sort.dir } }) })),
         { sep: true },
-        ...folderViewMenu(path),
-      ],
-    })
+        ...[['asc', '升序'], ['desc', '降序']].map(([dir, label]) => ({ label, checked: current.sort.dir === dir,
+          action: () => commitFolderView(path, { sort: { key: current.sort.key, dir } }) })),
+      ] },
+      { label: '显示列', children: columnItems(path) },
+    ]
+  }
+  const colMenu = (i, x, y) => {
+    const pane = cfg.panes[i]
+    setMenu({ x, y, items: columnItems(pane?.tabs[pane.active]?.path) })
   }
 
   const newFileItems = (tabId, list, directory) => {
@@ -1605,20 +1654,22 @@ export default function App() {
       },
       { label: '刷新', shortcut: '⌘R', action: () => refreshTab(tabId) },
       { sep: true },
+      ...folderDisplayItems(path),
       ...folderViewMenu(path),
       { label: '在访达中显示', action: () => api.reveal(path || '/').catch(() => {}) },
     ]
   }
 
   const blankMenu = (tabId, x, y, directory) => {
-    setMenu({ kind: 'blank', tabId, directory, x, y, items: blankItems(tabId, templates, directory) })
+    const request = Symbol('blank-menu')
+    setMenu({ kind: 'blank', request, tabId, directory, x, y, items: blankItems(tabId, templates, directory) })
     api
       .listTemplates()
       .then((list) => {
         if (!Array.isArray(list)) return
         setTemplates(list)
         setMenu((m) => {
-          if (!m || m.kind !== 'blank' || m.tabId !== tabId || m.directory !== directory) return m
+          if (m?.request !== request) return m
           return { ...m, items: blankItems(tabId, list, directory) }
         })
       })
@@ -1826,6 +1877,11 @@ export default function App() {
     const firstEntry = () => paneRows.find((x) => x.path === paths[0])
 
     const listBlocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen
+    if (meta && !e.altKey && !e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'i' && !listBlocked && !renaming && paths.length) {
+      e.preventDefault()
+      nativeMenuAction(() => api.showGetInfo(orderedPaths(tid, paths)))
+      return
+    }
     // 重命名输入框还没挂上时也不要把 Tab/F5/F6 当成窗格命令。
     const paneAction = listBlocked || renaming ? null : resolvePaneKey(e)
     if (paneAction === 'focusNext' || paneAction === 'focusPrev') {

@@ -11,9 +11,10 @@ const bundle = await build({ entryPoints: [fileURLToPath(new URL('../App.jsx', i
   b.onResolve({filter:/^react(?:\/.*)?$/},({path})=>({path:require.resolve(path),external:true}))
   b.onResolve({filter:/(?:^|\/)api(?:\.js)?$/},()=>({path:'api',namespace:'test'}))
   b.onResolve({filter:/(?:^|\/)components\/(Pane|Sidebar)$/},({path})=>({path:path.split('/').pop(),namespace:'test'}))
-  b.onResolve({filter:/^@tauri-apps\//},({path})=>({path,namespace:'test'}))
+  b.onResolve({filter:/^@tauri-apps\/|^react-dom$/},({path})=>({path,namespace:'test'}))
   b.onLoad({filter:/.*/,namespace:'test'},({path})=>({loader:'js',contents:path==='api'
     ? `export const hasTauri=true; export const fileSrc=x=>x; export const api=new Proxy({}, {get:(_,k)=>(...a)=>{const f=globalThis.${bridgeKey}.api[k];if(typeof f!=='function')throw Error('Missing test API: '+String(k));return f(...a)}})`
+    : path==='react-dom' ? 'export const createPortal=content=>content'
     : path==='Pane'||path==='Sidebar'
       ? `import React from 'react'; export default function ${path}(props){return React.createElement('${path.toLowerCase()}-boundary',props)}`
       : path.endsWith('/app') ? `export const getVersion=async()=>"0.2.1"`
@@ -45,7 +46,7 @@ export async function mountApp(t, overrides={}, textClipboard={}) {
   let fileClipboard={changeCount:0,paths:[],ownerToken:null}
   let closeHandler, dropHandler, closes=0, destroyed=0
   const win={setAlwaysOnTop:async()=>{},setTitle:async()=>{},onDragDropEvent:async f=>{dropHandler=f;return()=>{dropHandler=null}},onMoved:async()=>()=>{},onResized:async()=>()=>{},onCloseRequested:async f=>{closeHandler=f;return()=>{closeHandler=null}},close:async()=>{closes++},destroy:async()=>{closes++;destroyed++}}
-  const api={fsearchStatus:async()=>({ready:true}),diskSpace:async()=>1000,homeDir:async()=>'/home',loadConfig:async()=>null,loadViewSettings:async()=>null,loadSession:async()=>null,listTemplates:async()=>[],resolvePath:async p=>p,readFileClipboard:async()=>fileClipboard,copyFilesToClipboard:async paths=>{fileClipboard={changeCount:fileClipboard.changeCount+1,paths:[...paths],ownerToken:`test-${fileClipboard.changeCount+1}`};return{ok:true,...fileClipboard}},pasteImageFromClipboard:async()=>null,saveConfig:async v=>writes.config.push(v),saveViewSettings:async v=>writes.views.push(v),saveSession:async v=>writes.session.push(v),sessionExitReply:async(id,allow)=>replies.push([id,allow]),...overrides}
+  const api={listOpenWith:async()=>({defaultApp:null,apps:[]}),fsearchStatus:async()=>({ready:true}),diskSpace:async()=>1000,homeDir:async()=>'/home',loadConfig:async()=>null,loadViewSettings:async()=>null,loadSession:async()=>null,listTemplates:async()=>[],resolvePath:async p=>p,readFileClipboard:async()=>fileClipboard,copyFilesToClipboard:async paths=>{fileClipboard={changeCount:fileClipboard.changeCount+1,paths:[...paths],ownerToken:`test-${fileClipboard.changeCount+1}`};return{ok:true,...fileClipboard}},pasteImageFromClipboard:async()=>null,saveConfig:async v=>writes.config.push(v),saveViewSettings:async v=>writes.views.push(v),saveSession:async v=>writes.session.push(v),sessionExitReply:async(id,allow)=>replies.push([id,allow]),...overrides}
   globalThis[bridgeKey]={api,win,textClipboard:{readText:async()=>"",writeText:async()=>{},...textClipboard},listen:async(name,fn)=>{events.set(name,fn);return()=>events.delete(name)},invoke:async(cmd,args)=>{invocations.push([cmd,args]);if(cmd==='session_exit_reply')replies.push([args.requestId,args.allowExit])},confirm:async(...args)=>{dialogs.push(args);return discard}}
   mod.exports.clipboard.setClip(null)
   let renderer
