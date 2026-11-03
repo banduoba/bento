@@ -50,7 +50,8 @@ async function mount(t, { native = true, getVersion = async () => '0.2.1', fetch
   globalThis.IS_REACT_ACT_ENVIRONMENT = true
   const Dialog = loadDialog()
   let closed = 0
-  const props = { open: true, searchPaths: [], onClose: () => { closed++ } }
+  let analyticsEnabled = true
+  const props = { open: true, searchPaths: [], analyticsEnabled, onAnalyticsEnabledChange: value => { analyticsEnabled = value }, onClose: () => { closed++ } }
   let renderer
   const originalError = console.error
   try {
@@ -64,7 +65,8 @@ async function mount(t, { native = true, getVersion = async () => '0.2.1', fetch
   const button = label => renderer.root.findAllByType('button').find(node => node.children.join('') === label)
   const click = async label => { assert.ok(button(label), `button ${label} exists`); await act(async () => { button(label).props.onClick() }) }
   return { requests, opened, button, click, text, unmount,
-    get closed() { return closed }, setOpenError(value) { openError = value },
+    get closed() { return closed }, get analyticsEnabled() { return analyticsEnabled },
+    get switchButton() { return renderer.root.findByProps({ 'aria-labelledby': 'settings-analytics-title' }) }, setOpenError(value) { openError = value },
     async update(patch) { Object.assign(props, patch); await act(async () => renderer.update(React.createElement(Dialog, props))) },
     async resolve(index, value) { await act(async () => requests[index].resolve(value)) },
   }
@@ -162,4 +164,21 @@ test('runtime version lookup failure disables comparison while retaining manual 
   assert.equal(h.requests.length, 0)
   await h.click('下载页面')
   assert.deepEqual(h.opened, ['https://github.com/banduoba/bento/releases/latest'])
+})
+
+
+test('About discloses counters, offers an accessible opt-out switch, and sends nothing on toggle', async t => {
+  const h = await mount(t)
+  await h.click('关于')
+  assert.equal(h.switchButton.props.role, 'switch')
+  assert.equal(h.switchButton.props['aria-checked'], true)
+  const disclosure = h.text()
+  assert.ok(disclosure.includes('Cloudflare'))
+  assert.ok(disclosure.includes('random installation ID') || disclosure.includes('随机安装标识'))
+  assert.ok(disclosure.includes('file') || disclosure.includes('文件'))
+  await act(async () => h.switchButton.props.onClick())
+  assert.equal(h.analyticsEnabled, false)
+  await h.update({ analyticsEnabled: false })
+  assert.equal(h.switchButton.props['aria-checked'], false)
+  assert.equal(h.requests.length, 0)
 })

@@ -8,6 +8,7 @@ import AboutSection from './AboutSection'
  * cfg.searchPaths 为空 = 搜索全部已索引位置；非空 = 结果限定在这些目录（及其子目录）内
  */
 export default function SettingsDialog({
+  analyticsEnabled, onAnalyticsEnabledChange,
   open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, enterAction, onEnterActionChange, onExportSettings, onImportSettings, onClose,
 }) {
   const [busy, setBusy] = useState(false)
@@ -91,7 +92,7 @@ export default function SettingsDialog({
             ))}
           </nav>
           <div className="settings-content">
-            {section === 'about' && <AboutSection />}
+            {section === 'about' && <AboutSection analyticsEnabled={analyticsEnabled} onAnalyticsEnabledChange={onAnalyticsEnabledChange} />}
             {section === 'backup' && <section id="settings-backup" className="settings-group" aria-labelledby="settings-backup-title" aria-busy={backupBusy}>
               <h2 id="settings-backup-title">设置备份</h2>
               <div className="settings-card">

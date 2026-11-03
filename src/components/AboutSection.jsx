@@ -4,7 +4,24 @@ import { api, hasTauri } from '../api'
 import { version as demoVersion } from '../../package.json'
 import { DOWNLOAD_URL, ISSUES_URL, PROJECT_URL, fetchLatestRelease } from '../updateCheck'
 
-export default function AboutSection() {
+function analyticsCopy() {
+  const language = (globalThis.navigator?.languages?.[0] || globalThis.navigator?.language || 'en').toLowerCase()
+  if (/^zh-(hant|tw|hk|mo)/.test(language)) return {
+    title: '分享使用統計',
+    description: '預設開啟。透過 Cloudflare 統計每日活躍安裝量與版本：僅傳送隨機安裝識別碼、Bento 版本、macOS 與處理器架構。啟動時與持續執行期間每日最多計數一次；不傳送檔案、路徑或搜尋內容。隨時關閉即可停止傳送。',
+  }
+  if (language.startsWith('zh')) return {
+    title: '分享使用统计',
+    description: '默认开启。通过 Cloudflare 统计每日活跃安装量与版本：仅发送随机安装标识、Bento 版本、macOS 与处理器架构。启动时与持续运行期间每日最多计数一次；不发送文件、路径或搜索内容。随时关闭即可停止发送。',
+  }
+  return {
+    title: 'Share usage counts',
+    description: 'On by default. Cloudflare counts daily active installations and versions using only a random installation ID, Bento version, macOS and processor architecture. Launches and daily activity while running count at most once per day. No files, paths or searches are sent. Turn this off at any time to stop sending.',
+  }
+}
+
+export default function AboutSection({ analyticsEnabled, onAnalyticsEnabledChange }) {
+  const analytics = analyticsCopy()
   const [version, setVersion] = useState(null)
   const [versionError, setVersionError] = useState(false)
   const [result, setResult] = useState({ status: 'idle' })
@@ -94,6 +111,19 @@ export default function AboutSection() {
           <div className="settings-label"><p>打开官方发布页面，手动下载并安装。</p></div>
           <button className="btn small primary" onClick={() => openLink(result.url)}>下载新版本</button>
         </div>}
+      </div>
+      <div className="settings-card">
+        <div className="settings-option">
+          <div className="settings-label">
+            <div className="settings-option-title" id="settings-analytics-title">{analytics.title}</div>
+            <p id="settings-analytics-description">{analytics.description}</p>
+          </div>
+          <button className="settings-toggle" role="switch" aria-checked={analyticsEnabled === true}
+            aria-labelledby="settings-analytics-title" aria-describedby="settings-analytics-description"
+            onClick={() => onAnalyticsEnabledChange?.(!analyticsEnabled)}>
+            <span />
+          </button>
+        </div>
       </div>
       {linkError && <p className="settings-hint" role="alert">{linkError}</p>}
     </section>
