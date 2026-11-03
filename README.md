@@ -108,6 +108,10 @@ npm run dev        # Tauri dev mode with hot reload
 - Grant **Full Disk Access** in *System Settings → Privacy & Security* if you want global and content search to cover protected locations. Bento shows a hint in Settings when it is missing.
 - After replacing the app with a new build, macOS may drop that permission — remove and re-add Bento in the list.
 
+## Usage counts
+
+Bento reports a random installation ID, app version, macOS and processor architecture to its Cloudflare endpoint to count first launches and daily active installations. Reporting is on by default and can be disabled in **Settings → About → Share usage counts**. It sends no files, paths, search terms, account details or hardware identifiers. Repeated launches count once per UTC day; the totals describe reporting installations, not downloads or individual people. Installation identity and this choice are excluded from settings backups.
+
 ## Keyboard shortcuts
 
 The native macOS menu bar includes Bento, File, Edit, View, Go, Window and Help menus. <kbd>⌘1</kbd>, <kbd>⌘2</kbd> and <kbd>⌘3</kbd> switch the focused pane between icon, list and column views; layout switching is available from the toolbar or View menu. Native menu labels default to the macOS system language (English, Simplified Chinese or Traditional Chinese); the React interface is currently Chinese only.

@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { confirm } from '@tauri-apps/plugin-dialog'
 import { blankTab, blankPane, freshId, navigateTab, restoreSession, sessionForDisk, preferencesForDisk } from './session'
 import { createSerialSaver } from './persistence'
+import useUsageAnalytics from './useUsageAnalytics'
 import { createSettingsBackup, parseSettingsBackup } from './settingsBackup'
 import { createSessionClose } from './sessionClose'
 import { createTextEditing, isTextEditingElement } from './textEditing'
@@ -133,6 +134,7 @@ function MiniGrid({ preset }) {
 }
 
 export default function App() {
+  const [analyticsEnabled, onAnalyticsEnabledChange, analyticsPersistenceError] = useUsageAnalytics()
   const [cfg, setCfg] = useState(null)
   const [home, setHome] = useState('/')
   const [recoveryNotice, setRecoveryNotice] = useState(null)
@@ -2317,6 +2319,9 @@ export default function App() {
       />
       <SettingsDialog
         open={settingsOpen}
+        analyticsEnabled={analyticsEnabled}
+        analyticsPersistenceError={analyticsPersistenceError}
+        onAnalyticsEnabledChange={onAnalyticsEnabledChange}
         onExportSettings={() => createSettingsBackup(cfgRef.current)}
         onImportSettings={importSettings}
         searchPaths={cfg.searchPaths}
