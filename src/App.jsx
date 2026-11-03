@@ -1482,7 +1482,7 @@ export default function App() {
       paneOpenItems.length ? { label: '在其他窗格打开', children: paneOpenItems } : null,
       canExtract ? { label: '解压缩', action: () => nativeMenuAction(() => api.extractArchive(paths)) } : null,
       previewPath ? { label: '快速查看', shortcut: '空格', action: () => previewNavigation.current.open(tabId, previewDir, previewPath, paths) } : null,
-      { label: '显示简介', shortcut: '⌘I', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
+      { label: '显示简介', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
       { sep: true },
       { label: '拷贝', shortcut: '⌘C', action: () => doCopyCut(tabId, 'copy', paths) },
       { label: '剪切', shortcut: '⌘X', action: () => doCopyCut(tabId, 'move', paths) },
