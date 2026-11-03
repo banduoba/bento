@@ -1,4 +1,4 @@
-import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { invoke, convertFileSrc, Channel } from '@tauri-apps/api/core'
 import { LIST_BATCH } from './dirLoad.js'
 import { searchApi, demoSearch, searchRequestId } from './search/model.js'
 
@@ -6,7 +6,7 @@ export const hasTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERN
 
 export const api = hasTauri
   ? {
-      ...searchApi(invoke),
+      ...searchApi(invoke, () => new Channel()),
       listDir: (path, showHidden) => invoke('list_dir', { path, showHidden }),
       listSubdirectories: (path, showHidden) => invoke('list_subdirectories', { path, showHidden }),
       // 当前目录分批推送。onBatch 是 Tauri Channel；约 500 条一批，最后一批 done=true。

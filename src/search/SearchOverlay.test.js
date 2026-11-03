@@ -178,7 +178,7 @@ async function mount(t, extra = {}) {
     },
     advance,
     pendingTimeouts: () => [...timers.values()].filter(timer => !timer.interval).length,
-    flush: () => advance(250),
+    flush: () => advance(props.mode === 'name' ? 120 : 250),
     async update(patch) {
       Object.assign(props, patch)
       await run(() => renderer.update(React.createElement(Overlay, props)))
@@ -592,3 +592,59 @@ for (const is_dir of [false, true]) {
     assert.equal(h.closed.length, 1)
   })
 }
+
+
+test('name input submits after 120ms and Chinese composition waits for commit', async t => {
+  const h = await mount(t, { mode: 'name' })
+  await h.type('RCS')
+  await h.advance(119)
+  assert.equal(h.requests.length, 0)
+  await h.advance(1)
+  assert.equal(h.requests.length, 1)
+  await h.run(() => h.input().props.onCompositionStart())
+  await h.type('RCS曲')
+  await h.advance(1000)
+  assert.equal(h.requests.length, 1)
+  await h.type('RCS曲线')
+  await h.run(() => h.input().props.onCompositionEnd())
+  await h.advance(120)
+  assert.equal(h.requests.length, 2)
+  assert.equal(h.requests[1].args[0], 'RCS曲线')
+})
+
+test('partial name results appear before completion and stale progress cannot replace the next query', async t => {
+  const h = await mount(t, { mode: 'name' })
+  await h.type('RCS')
+  await h.flush()
+  const progress = h.requests[0].args[8]
+  await h.run(() => progress(result([item('RCS-first.txt')])))
+  assert.ok(h.text().includes('RCS-first'))
+  assert.ok(h.text().includes('补充搜索中'))
+  await h.type('next')
+  await h.flush()
+  await h.run(() => progress(result([item('stale.txt')])))
+  assert.ok(!h.text().includes('stale.txt'))
+  await h.resolve(1, result([item('next.txt')]))
+  assert.ok(h.text().includes('next.txt'))
+  assert.ok(!h.text().includes('补充搜索中'))
+})
+
+test('late progress after final completion cannot replace final sibling results', async t => {
+  const h = await mount(t, { mode:'name' })
+  await h.type('RCS'); await h.flush()
+  const progress = h.requests[0].args[8]
+  await h.resolve(0, result([item('RCS-final.txt'),item('RCS-sibling.txt')]))
+  await h.run(() => progress(result([item('RCS-partial.txt')])))
+  assert.ok(h.text().includes('RCS-sibling'))
+  assert.ok(!h.text().includes('RCS-partial'))
+})
+
+test('selected file is preserved by path when later snapshots insert results before it', async t => {
+  const h = await mount(t, { mode:'name',sortBy:'name' })
+  await h.type('file'); await h.flush()
+  await h.run(() => h.requests[0].args[8](result([item('B.txt'),item('C.txt')])))
+  await h.run(() => h.input().props.onKeyDown({ key:'ArrowDown',preventDefault(){} }))
+  await h.resolve(0, result([item('A.txt'),item('B.txt'),item('C.txt')]))
+  await h.run(() => h.input().props.onKeyDown({ key:'Enter',preventDefault(){} }))
+  assert.deepEqual(h.located, [['/work','/work/C.txt']])
+})

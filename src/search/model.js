@@ -19,9 +19,15 @@ export const searchRequestId = () => `search_${Date.now().toString(36)}_${++sequ
 export function searchError(error) {
   return error?.message || (typeof error === 'string' ? error : '搜索失败，请重试')
 }
-export function searchApi(invoke) {
-  const searchQuery = (query, scope, root, showHidden, roots, mode, requestId, format = 'all') =>
-    invoke('search_query', { query, scope, root: root ?? null, showHidden, roots: roots || [], mode: mode || 'name', requestId, format })
+export function searchApi(invoke, makeChannel) {
+  const searchQuery = (query, scope, root, showHidden, roots, mode, requestId, format = 'all', onProgress) => {
+    const onProgressChannel = onProgress && makeChannel ? makeChannel() : null
+    if (onProgressChannel) onProgressChannel.onmessage = onProgress
+    return invoke(onProgressChannel ? 'search_query_stream' : 'search_query', {
+      query, scope, root: root ?? null, showHidden, roots: roots || [], mode: mode || 'name', requestId, format,
+      ...(onProgressChannel ? { onProgress: onProgressChannel } : {}),
+    })
+  }
   return { searchQuery, cancelSearch: requestId => invoke('cancel_search', { requestId }),
     search: async (query, scope, root, showHidden, roots, mode) => (await searchQuery(query, scope, root, showHidden, roots, mode, searchRequestId())).items }
 }

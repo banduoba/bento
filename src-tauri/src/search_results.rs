@@ -32,13 +32,13 @@ impl SearchError {
     }
 }
 type Result<T> = std::result::Result<T, SearchError>;
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Warning {
     code: &'static str,
     message: String,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResponse {
     pub items: Vec<SearchItem>,
@@ -1366,6 +1366,131 @@ fn verify_siblings(
     }
     cancelled(cancel)
 }
+// Each source owns half the candidate budget. Publish admitted results as soon as
+// either finishes, without making a cold opaque index delay the system source.
+fn parallel_name_sources(
+    request: &Request,
+    cancel: &AtomicBool,
+    publish: &(dyn Fn(&SearchResponse) + Sync),
+    index: impl FnOnce(usize) -> IndexReply + Send,
+    system: impl FnOnce(usize) -> IndexReply + Send,
+) -> Result<(SearchResponse, usize)> {
+    std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::channel();
+        let index_send = send.clone();
+        scope.spawn(move || {
+            let _ = index_send.send((true, index(CANDIDATE_BUDGET / 2)));
+        });
+        scope.spawn(move || {
+            let _ = send.send((false, system(CANDIDATE_BUDGET / 2)));
+        });
+        let mut response = SearchResponse::new("fsearch+spotlight");
+        response.warn("indexCoverage", "索引覆盖范围有限，结果可能不完整");
+        let mut remaining = 0;
+        let mut failures = vec![];
+        let mut sources = vec![];
+        for (is_index, reply) in receive {
+            cancelled(cancel)?;
+            match merge_index_reply(reply, &mut response, &mut remaining, request.limit) {
+                Ok(()) => sources.push(if is_index { "fsearch" } else { "spotlight" }),
+                Err(error) => {
+                    if error.code == "cancelled" {
+                        return Err(error);
+                    }
+                    response.warn(
+                        if is_index {
+                            "engineUnavailable"
+                        } else {
+                            "systemUnavailable"
+                        },
+                        error.message.clone(),
+                    );
+                    failures.push(error.message);
+                }
+            }
+            if !response.items.is_empty() {
+                let mut snapshot = response.clone();
+                snapshot.warn("sourcesPending", "正在补充其他搜索来源");
+                publish(&snapshot);
+            }
+        }
+        cancelled(cancel)?;
+        if failures.len() == 2 && response.items.is_empty() {
+            return Err(SearchError::new("unavailable", failures.join("；")));
+        }
+        response.source = sources.join("+");
+        Ok((response, remaining))
+    })
+}
+fn progressive_global_names(
+    request: &Request,
+    cancel: &AtomicBool,
+    publish: &(dyn Fn(&SearchResponse) + Sync),
+) -> Result<SearchResponse> {
+    let roots = request
+        .roots
+        .iter()
+        .map(|root| directory(root))
+        .collect::<Result<Vec<_>>>()?;
+    let index_request = request.clone();
+    let index_roots = roots.clone();
+    let (mut response, mut remaining) = parallel_name_sources(
+        request,
+        cancel,
+        publish,
+        move |reserved| match index_worker().run(cancel, Duration::from_secs(2), move |stop| {
+            let mut response = SearchResponse::new("fsearch");
+            let mut remaining = reserved;
+            let result = indexed(
+                &index_request,
+                &index_roots,
+                &stop,
+                &mut remaining,
+                &mut response,
+            );
+            Ok(IndexReply {
+                response,
+                remaining,
+                result,
+            })
+        }) {
+            Ok(reply) => reply,
+            Err(error) => IndexReply {
+                response: SearchResponse::new("fsearch"),
+                remaining: if error.code == "indexBusy" {
+                    reserved
+                } else {
+                    0
+                },
+                result: Err(error),
+            },
+        },
+        |reserved| {
+            let mut response = SearchResponse::new("spotlight");
+            let mut remaining = reserved;
+            let result = spotlight(request, &roots, cancel, &mut remaining, &mut response);
+            IndexReply {
+                response,
+                remaining,
+                result,
+            }
+        },
+    )?;
+    verify_siblings(
+        request,
+        &roots,
+        cancel,
+        &mut remaining,
+        &mut response,
+        &Budget {
+            entries: 20_000,
+            duration: Duration::from_millis(180),
+            ..Budget::default()
+        },
+    )?;
+    cancelled(cancel)?;
+    Ok(response)
+}
 fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchResponse> {
     let roots = request
         .roots
@@ -1562,6 +1687,59 @@ pub async fn search_query(
     request_id: String,
     format: Option<String>,
 ) -> Result<SearchResponse> {
+    execute_search(
+        query,
+        scope,
+        root,
+        show_hidden,
+        limit,
+        roots,
+        mode,
+        request_id,
+        format,
+        None,
+    )
+    .await
+}
+#[tauri::command]
+pub async fn search_query_stream(
+    query: String,
+    scope: String,
+    root: Option<String>,
+    show_hidden: bool,
+    limit: Option<usize>,
+    roots: Option<Vec<String>>,
+    mode: Option<String>,
+    request_id: String,
+    format: Option<String>,
+    on_progress: tauri::ipc::Channel<SearchResponse>,
+) -> Result<SearchResponse> {
+    execute_search(
+        query,
+        scope,
+        root,
+        show_hidden,
+        limit,
+        roots,
+        mode,
+        request_id,
+        format,
+        Some(on_progress),
+    )
+    .await
+}
+async fn execute_search(
+    query: String,
+    scope: String,
+    root: Option<String>,
+    show_hidden: bool,
+    limit: Option<usize>,
+    roots: Option<Vec<String>>,
+    mode: Option<String>,
+    request_id: String,
+    format: Option<String>,
+    on_progress: Option<tauri::ipc::Channel<SearchResponse>>,
+) -> Result<SearchResponse> {
     let active = Active::new(request_id)?;
     let request = Request {
         query: query.trim().into(),
@@ -1609,6 +1787,13 @@ pub async fn search_query(
         }
         if request.scope == "global" {
             let _slot = GlobalSlot::acquire(&active)?;
+            if request.mode == "name" {
+                if let Some(channel) = on_progress {
+                    return progressive_global_names(&request, &active.cancel, &|response| {
+                        let _ = channel.send(response.clone());
+                    });
+                }
+            }
             global_search(&request, &active.cancel)
         } else {
             let root = local_root(&request, &std::env::var("HOME").unwrap_or_default())?;
@@ -2630,6 +2815,62 @@ mod tests {
     }
 
     #[test]
+    fn fast_system_results_publish_before_a_cold_index_finishes_without_losing_either_source() {
+        let fixture = Fixture::new();
+        let a = fixture.file("RCS-index.txt", "index");
+        let b = fixture.file("RCS-system.txt", "system");
+        let mut request = req();
+        request.mode = "name".into();
+        let (release, wait) = std::sync::mpsc::sync_channel(1);
+        let published = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+        let (response, remaining) = parallel_name_sources(
+            &request,
+            &cancel,
+            &|snapshot| {
+                published.lock().unwrap().push(
+                    snapshot
+                        .items
+                        .iter()
+                        .map(|i| i.name.clone())
+                        .collect::<Vec<_>>(),
+                );
+                let _ = release.try_send(());
+            },
+            move |budget| {
+                // The slower index cannot finish until the system snapshot is delivered.
+                wait.recv_timeout(Duration::from_secs(2))
+                    .expect("system publication must not wait for index");
+                let mut response = SearchResponse::new("fsearch");
+                response
+                    .items
+                    .push(item(&a, &fs::metadata(&a).unwrap(), None, None));
+                IndexReply {
+                    response,
+                    remaining: budget - 1,
+                    result: Ok(()),
+                }
+            },
+            |budget| {
+                let mut response = SearchResponse::new("spotlight");
+                response
+                    .items
+                    .push(item(&b, &fs::metadata(&b).unwrap(), None, None));
+                IndexReply {
+                    response,
+                    remaining: budget - 1,
+                    result: Ok(()),
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(published.lock().unwrap()[0], vec!["RCS-system.txt"]);
+        assert_eq!(response.items.len(), 2);
+        assert_eq!(remaining, CANDIDATE_BUDGET - 2);
+        assert!(!response.warnings.iter().any(|w| w.code == "sourcesPending"));
+    }
+
+    #[test]
     #[cfg(target_os = "macos")]
     #[ignore = "manual system index probe; set BENTO_QA_SEARCH and optionally BENTO_QA_ROOTS"]
     fn manual_global_name_search_probe() {
@@ -2645,7 +2886,23 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
-        let response = global_search(&request, &AtomicBool::new(false)).unwrap();
+        let start = Instant::now();
+        let response = if std::env::var_os("BENTO_QA_PROGRESSIVE").is_some() {
+            let first = AtomicBool::new(false);
+            progressive_global_names(&request, &AtomicBool::new(false), &|snapshot| {
+                if !first.swap(true, Ordering::Relaxed) {
+                    println!(
+                        "BENTO_QA_FIRST_MS={} ITEMS={}",
+                        start.elapsed().as_millis(),
+                        snapshot.items.len()
+                    );
+                }
+            })
+            .unwrap()
+        } else {
+            global_search(&request, &AtomicBool::new(false)).unwrap()
+        };
+        println!("BENTO_QA_TOTAL_MS={}", start.elapsed().as_millis());
         println!(
             "BENTO_QA_RESPONSE={}",
             serde_json::to_string(&response).unwrap()

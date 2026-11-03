@@ -118,6 +118,7 @@ export default function SearchOverlay({
   onReveal,
 }) {
   const [query, setQuery] = useState('')
+  const [composing, setComposing] = useState(false)
   const [history, setHistory] = useState(readHistory)
   const [results, setResults] = useState([])
   const [format, setFormat] = useState('all')
@@ -129,7 +130,8 @@ export default function SearchOverlay({
   const previewRef = useRef(null)
   const firstHitRef = useRef(null) // 选中结果的内容预览 {loading, kind, text, matchLines, truncated, path}
   const [busy, setBusy] = useState(false)
-  const [selIdx, setSelIdx] = useState(0)
+  const [fallbackIdx, setFallbackIdx] = useState(0)
+  const [selectedPath, setSelectedPath] = useState(null)
   const [idxStatus, setIdxStatus] = useState(null) // fsearch 引擎状态
   const [menu, setMenu] = useState(null) // { x, y, item }
   const dragRef = useRef(null) // 原生拖拽状态
@@ -183,11 +185,13 @@ export default function SearchOverlay({
     setError(null)
     setElapsed(null)
     setPreview(null)
-    setSelIdx(0)
+    setFallbackIdx(0)
+    setSelectedPath(null)
     const q = query.trim()
-    if (!open || !q) { setBusy(false); return }
+    if (!open || !q || composing) { setBusy(false); return }
     setBusy(true)
     const requestId = searchRequestId()
+    let settled = false
     let submitted = false
     let watchdog = null
     const cancel = () => {
@@ -207,7 +211,13 @@ export default function SearchOverlay({
         setBusy(false)
       }, SEARCH_TIMEOUT_MS)
       try {
-        const r = await api.searchQuery(q, scope, scope === 'pane' ? root : null, showHidden, searchPaths, mode, requestId, format)
+        const r = await api.searchQuery(q, scope, scope === 'pane' ? root : null, showHidden, searchPaths, mode, requestId, format, partial => {
+          if (tokenRef.current !== token || settled) return
+          setResults(partial.items)
+          setResponse(partial)
+          setElapsed(Math.round(performance.now() - t0))
+        })
+        settled = true
         if (tokenRef.current !== token) return
         setResults(r.items)
         setResponse(r)
@@ -215,18 +225,20 @@ export default function SearchOverlay({
       } catch (error) {
         if (tokenRef.current === token) setError(searchError(error))
       } finally {
+        settled = true
         clearTimeout(watchdog)
         submitted = false
         if (tokenRef.current === token) setBusy(false)
       }
-    }, 250)
+    }, mode === 'name' ? 120 : 250)
     return () => {
+      settled = true
       clearTimeout(timerRef.current)
       clearTimeout(watchdog)
       ++tokenRef.current
       cancel()
     }
-  }, [open, query, scope, root, showHidden, searchPaths, mode, format, retry])
+  }, [open, query, scope, root, showHidden, searchPaths, mode, format, retry, composing])
 
   // 预览加载完成后滚动到第一处命中
   useEffect(() => {
@@ -311,6 +323,7 @@ export default function SearchOverlay({
   }, [])
 
   const onKeyDown = (e) => {
+    if (composing || e.isComposing || e.nativeEvent?.isComposing) return
     const count = query.trim() ? sorted.length : history.length
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -333,6 +346,14 @@ export default function SearchOverlay({
     else if (sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
     return arr // score：保持引擎返回的相关度顺序
   }, [results, sortBy])
+  const selectedIndex = selectedPath ? sorted.findIndex(item => item.path === selectedPath) : -1
+  const selIdx = query.trim() ? (selectedIndex >= 0 ? selectedIndex : Math.max(0, Math.min(fallbackIdx, sorted.length - 1))) : fallbackIdx
+  const setSelIdx = update => {
+    const next = typeof update === 'function' ? update(selIdx) : update
+    setFallbackIdx(next)
+    setSelectedPath(query.trim() ? sorted[next]?.path || null : null)
+  }
+
 
   // 内容模式：选中结果变化 → 读取文件内容预览
   useEffect(() => {
@@ -444,6 +465,8 @@ export default function SearchOverlay({
             placeholder={mode === 'content' ? '搜索文件内容…' : '搜索文件名…'}
             aria-label={mode === 'content' ? '搜索文件内容' : '搜索文件名'}
             onChange={(e) => { setQuery(e.target.value); setSelIdx(0) }}
+            onCompositionStart={() => setComposing(true)}
+            onCompositionEnd={() => setComposing(false)}
             onKeyDown={onKeyDown}
             spellCheck={false}
           />
@@ -659,7 +682,7 @@ export default function SearchOverlay({
         </div>
         <div className="search-footer">
           <span className="search-count" role="status" aria-live="polite">
-            {!query.trim() ? '最近搜索' : busy ? '搜索中…' : error ? '搜索失败'
+            {!query.trim() ? '最近搜索' : busy ? (sorted.length ? `${sorted.length} 个结果 · 补充搜索中…` : '搜索中…') : error ? '搜索失败'
               : `${sorted.length} 个结果${elapsed != null ? ` · ${elapsed} ms` : ''}`}
           </span>
           {selectedItem && <span className="search-selected-path" title={selectedItem.path}>{selectedItem.path}</span>}

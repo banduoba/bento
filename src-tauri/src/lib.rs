@@ -3188,6 +3188,7 @@ pub fn run() {
             copy_template_with_receipt,
             search,
             search_results::search_query,
+            search_results::search_query_stream,
             search_results::cancel_search,
             search_content,
             read_text_preview,
