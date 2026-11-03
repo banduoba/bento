@@ -405,10 +405,18 @@ export default function SearchOverlay({
             onKeyDown={onKeyDown}
             spellCheck={false}
           />
-          <select className="search-scope" aria-label="搜索范围" value={scope}
-            onChange={(e) => onScopeChange(e.target.value)}>
-            {SCOPES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
-          </select>
+          <div className="search-scopes" role="group" aria-label="搜索范围">
+            {SCOPES.map(s => (
+              <button key={s.id} className={`seg-btn${scope === s.id ? ' on' : ''}`}
+                aria-pressed={scope === s.id} onClick={() => {
+                  setSelIdx(0)
+                  setMenu(null)
+                  onScopeChange(s.id)
+                }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="search-toolbar">
           <div className="search-modes" role="group" aria-label="搜索方式">
@@ -419,16 +427,18 @@ export default function SearchOverlay({
               </button>
             ))}
           </div>
-          <label className="search-select-label">
-            <span>种类</span>
-            <select aria-label="结果格式过滤" value={format} onChange={(e) => {
-              setFormat(e.target.value)
-              setSelIdx(0)
-              setMenu(null)
-            }}>
-              {FORMATS.map(f => <option key={f.id} value={f.id} title={f.extensions?.join(' · ')}>{f.label}</option>)}
-            </select>
-          </label>
+          <div className="search-formats" role="group" aria-label="结果格式过滤">
+            {FORMATS.map(f => (
+              <button key={f.id} className={`seg-btn${format === f.id ? ' on' : ''}`}
+                aria-pressed={format === f.id} title={f.extensions?.join(' · ')} onClick={() => {
+                  setFormat(current => current === f.id ? 'all' : f.id)
+                  setSelIdx(0)
+                  setMenu(null)
+                }}>
+                {f.label}
+              </button>
+            ))}
+          </div>
           <label className="search-select-label search-sort">
             <span>排序</span>
             <select aria-label="结果排序" value={sortBy} onChange={(e) => onSortChange(e.target.value)}>
