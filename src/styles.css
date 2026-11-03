@@ -439,6 +439,19 @@ input, textarea {
   font: inherit;
   text-align: left;
 }
+.sb-sidebar-glyph {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: inline-block;
+  background-color: var(--accent);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
 .sb-system-icon { flex: none; border-radius: 3px; object-fit: contain; }
 .sb-system-icon.sb-color-icon { border-radius: 0; }
 .sb-item.drive svg { color: var(--muted-icon); }
