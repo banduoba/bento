@@ -207,10 +207,23 @@ struct NameLiteral {
 }
 struct ParsedQuery {
     engine: fsearch::Query,
+    alternate: Option<fsearch::Query>,
+    limited_names: bool,
     literals: Vec<NameLiteral>,
     spotlight_terms: Vec<String>,
 }
 impl ParsedQuery {
+    fn engines(&self) -> impl Iterator<Item = &fsearch::Query> {
+        std::iter::once(&self.engine).chain(self.alternate.iter())
+    }
+    fn warn_coverage(&self, response: &mut SearchResponse) {
+        if self.limited_names {
+            response.warn(
+                "queryCoverage",
+                "部分名称条件受索引语法限制，候选上限可能导致遗漏",
+            );
+        }
+    }
     fn literal_names_accept(&self, path: &Path) -> bool {
         let name = path.file_name().unwrap_or_default().as_bytes();
         self.literals
@@ -237,93 +250,214 @@ fn query_words(query: &str) -> Vec<String> {
     }
     words
 }
+// macOS stores canonically equivalent names in both NFC and NFD. Keep the
+// two source forms bounded; explicit regex/path/filter text is never rewritten.
+fn name_forms(name: &str) -> [String; 2] {
+    #[cfg(target_os = "macos")]
+    if !name.is_ascii() {
+        let text = objc2_foundation::NSString::from_str(name);
+        return [
+            text.precomposedStringWithCanonicalMapping().to_string(),
+            text.decomposedStringWithCanonicalMapping().to_string(),
+        ];
+    }
+    [name.into(), name.into()]
+}
+fn unicode_case(name: &str) -> bool {
+    name.chars()
+        .any(|ch| !ch.is_ascii() && ch.to_lowercase().ne(ch.to_uppercase()))
+}
+fn name_pattern(forms: &[String; 2], glob: bool, path: bool) -> String {
+    let mut alternatives = vec![];
+    for name in forms {
+        let body = if glob {
+            name.chars()
+                .map(|ch| match ch {
+                    '*' => {
+                        if path {
+                            "[^/]*".into()
+                        } else {
+                            ".*".into()
+                        }
+                    }
+                    '?' => {
+                        if path {
+                            "[^/]".into()
+                        } else {
+                            ".".into()
+                        }
+                    }
+                    _ => regex::escape(&ch.to_string()),
+                })
+                .collect::<String>()
+        } else {
+            regex::escape(name)
+        };
+        if !alternatives.contains(&body) {
+            alternatives.push(body);
+        }
+    }
+    let body = format!("(?:{})", alternatives.join("|"));
+    if path {
+        if glob {
+            format!("(?:^|/){body}$")
+        } else {
+            format!("(?:^|/)[^/]*{body}[^/]*$")
+        }
+    } else if glob {
+        format!("^{body}$")
+    } else {
+        body
+    }
+}
 fn parse_query(query: &str, content: bool) -> Result<ParsedQuery> {
     let home = std::env::var("HOME").unwrap_or_default();
     let invalid = |e| SearchError::new("invalidQuery", e);
+    if content {
+        return Ok(ParsedQuery {
+            engine: fsearch::Query::parse(&content_filters(query), &home).map_err(invalid)?,
+            alternate: None,
+            limited_names: false,
+            literals: vec![],
+            spotlight_terms: vec![],
+        });
+    }
+    let compile = |pattern: &str| {
+        regex::bytes::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .dot_matches_new_line(true)
+            .build()
+            .map_err(|e| invalid(e.to_string()))
+    };
+    let mut filters = fsearch::Query::parse("", &home).map_err(invalid)?;
+    let mut candidates = [vec![], vec![]];
+    let mut exact = [vec![], vec![]];
     let mut literals = vec![];
     let mut spotlight_terms = vec![];
-    let mut source_pattern = None;
-    let input = if content {
-        content_filters(query)
-    } else {
-        let mut filters = fsearch::Query::parse("", &home).map_err(invalid)?;
-        let mut candidates = vec![];
-        for word in query_words(query) {
-            let filter = if let Some((key, value)) = word.split_once(':') {
-                filters.filter(key, value, &home).map_err(invalid)?
-            } else {
-                false
-            };
-            let (negate, name) = word
-                .strip_prefix('!')
-                .map_or((false, word.as_str()), |s| (true, s));
-            // Keep the engine's explicit filters, path words, modifiers and brace globs.
-            if filter
-                || name.contains('/')
-                || name.contains(['{', '}'])
-                || name.starts_with(['\'', '^'])
-                || name.ends_with('$')
-                || name.is_empty()
-            {
-                candidates.push(word);
-                continue;
+    let mut source_patterns = vec![];
+    for word in query_words(query) {
+        let filter = if let Some((key, value)) = word.split_once(':') {
+            filters.filter(key, value, &home).map_err(invalid)?
+        } else {
+            false
+        };
+        let (negate, name) = word
+            .strip_prefix('!')
+            .map_or((false, word.as_str()), |s| (true, s));
+        // Explicit grammar stays with the locked parser.
+        if filter
+            || name.contains('/')
+            || name.contains(['{', '}'])
+            || name.starts_with(['\'', '^'])
+            || name.ends_with('$')
+            || name.is_empty()
+        {
+            for form in &mut candidates {
+                form.push(word.clone());
             }
-            let glob = name.contains(['*', '?']);
-            let pattern = if glob {
-                super::glob_to_regex(name)
-            } else {
-                regex::escape(name)
-            };
-            let pattern = regex::bytes::RegexBuilder::new(&pattern)
-                .case_insensitive(true)
-                .dot_matches_new_line(true)
-                .build()
-                .map_err(|e| invalid(e.to_string()))?;
-            let adapted_glob =
-                name.contains(['[', ']']) || (!name.is_ascii() && name.contains('?'));
-            if !negate && adapted_glob && source_pattern.is_none() {
-                source_pattern = Some(pattern.clone());
-            }
-            literals.push(NameLiteral { pattern, negate });
-            if !negate && !glob {
-                spotlight_terms.push(name.to_owned());
-            }
-            if adapted_glob {
+            continue;
+        }
+        let forms = name_forms(name);
+        let glob = name.contains(['*', '?']);
+        let pattern = compile(&name_pattern(&forms, glob, false))?;
+        let adapted = name.contains(['[', ']']) || (!name.is_ascii() && name.contains('?'));
+        let case = unicode_case(name);
+        let normalization = forms[0] != forms[1];
+        if !negate && (adapted || case || normalization) {
+            source_patterns.push((pattern.clone(), compile(&name_pattern(&forms, glob, true))?));
+        }
+        literals.push(NameLiteral { pattern, negate });
+        if !negate && !glob {
+            spotlight_terms.push(forms[0].clone());
+        }
+        for (i, form) in forms.iter().enumerate() {
+            if adapted || (!negate && (case || normalization)) {
                 if !negate {
-                    // fsearch cannot escape bracket literals, and its ?/[ parser is
-                    // not UTF-8 safe. Star-only candidates retain literal runs; the
-                    // native name regex (when available) and admission enforce the
-                    // exact pattern. Never broaden a negative source exclusion.
-                    let broad = name.replace(['[', ']'], "*");
-                    let broad = if !name.is_ascii() {
-                        broad.replace('?', "*")
-                    } else {
-                        broad
-                    };
-                    candidates.push(if glob { broad } else { format!("*{broad}*") });
+                    // Star-only globs avoid the upstream UTF-8 ?/[ parser. Broaden
+                    // cased Unicode characters too: its literal globs only fold ASCII.
+                    let broad: String = form
+                        .chars()
+                        .map(|ch| {
+                            if matches!(ch, '[' | ']')
+                                || (!form.is_ascii() && ch == '?')
+                                || (!ch.is_ascii()
+                                    && (normalization || ch.to_lowercase().ne(ch.to_uppercase())))
+                            {
+                                '*'
+                            } else {
+                                ch
+                            }
+                        })
+                        .collect();
+                    candidates[i].push(if glob { broad } else { format!("*{broad}*") });
+                    // Exact tokens bypass bracket parsing and reject literal decoys
+                    // before top-k even when both native regex slots are occupied.
+                    // They can inherit ancestors, so unsupported conjunctions warn.
+                    for run in form
+                        .split(['*', '?'])
+                        .filter(|run| run.contains(['[', ']']))
+                    {
+                        if !unicode_case(run) {
+                            exact[i].push(format!("'{run}"));
+                        }
+                    }
                 }
             } else if negate || glob {
-                candidates.push(word);
+                candidates[i].push(if negate {
+                    format!("!{form}")
+                } else {
+                    form.clone()
+                });
             } else {
-                // A basename glob requires every ordinary word in the name itself,
-                // before the index's top-k. Fuzzy tokens can inherit ancestor matches.
-                candidates.push(format!("*{name}*"));
+                // Every ordinary term is required in the basename before top-k.
+                candidates[i].push(format!("*{form}*"));
             }
         }
-        candidates
+    }
+    let inputs = candidates.map(|words| {
+        words
             .into_iter()
             .map(|word| format!("\"{word}\""))
             .collect::<Vec<_>>()
             .join(" ")
-    };
-    let mut engine = fsearch::Query::parse(&input, &home).map_err(invalid)?;
-    // Reuse the engine's pre-top-k regex slot for the adapted literal/glob when
-    // no explicit re: filter owns it. Every other filter keeps its own grammar.
-    if engine.name_re.is_none() {
-        engine.name_re = source_pattern;
+    });
+    let mut engines = vec![];
+    let mut limited_names = false;
+    for i in 0..2 {
+        if i == 1 && inputs[0] == inputs[1] && exact[0] == exact[1] {
+            break;
+        }
+        let mut engine = fsearch::Query::parse(&inputs[i], &home).map_err(invalid)?;
+        for token in &exact[i] {
+            engine.push_token(token);
+            // Query.alt replaces only tokens. Preserve every appended constraint
+            // there too, otherwise a normalized alternate could drop the guard.
+            if let Some(alt) = &mut engine.alt {
+                let mut other = fsearch::Query::default();
+                other.tokens = std::mem::take(alt);
+                other.push_token(token);
+                *alt = other.tokens;
+            }
+        }
+        let mut assigned = 0;
+        for (name, path) in &source_patterns {
+            if engine.name_re.is_none() {
+                engine.name_re = Some(name.clone());
+            } else if engine.path_re.is_none() {
+                engine.path_re = Some(path.clone());
+            } else {
+                break;
+            }
+            assigned += 1;
+        }
+        limited_names |= assigned < source_patterns.len();
+        engines.push(engine);
     }
+    let engine = engines.remove(0);
     Ok(ParsedQuery {
         engine,
+        alternate: engines.pop(),
+        limited_names,
         literals,
         spotlight_terms,
     })
@@ -338,15 +472,16 @@ fn query_accepts(query: &ParsedQuery, path: &Path, md: &fs::Metadata) -> bool {
     } else {
         fsearch::walk::KIND_FILE
     };
-    query
-        .engine
-        .match_path(
-            path.as_os_str().as_bytes(),
-            kind,
-            md.len(),
-            (mtime_of(md) / 1000.0) as u32,
-        )
-        .is_some()
+    query.engines().any(|engine| {
+        engine
+            .match_path(
+                path.as_os_str().as_bytes(),
+                kind,
+                md.len(),
+                (mtime_of(md) / 1000.0) as u32,
+            )
+            .is_some()
+    })
 }
 
 // Fixed-size reads, one bounded line and three bounded snippets: never read_to_end/read_line.
@@ -649,7 +784,13 @@ fn indexed(
     };
     let start = Instant::now();
     let mut source_remaining = if content { *remaining } else { *remaining / 2 };
-    for scope in scopes {
+    original.warn_coverage(response);
+    let plans: Vec<_> = scopes
+        .into_iter()
+        .flat_map(|scope| original.engines().map(move |engine| (scope, engine)))
+        .collect();
+    let mut seen = HashSet::new();
+    for (scope, engine) in plans {
         cancelled(cancel)?;
         if start.elapsed() >= Duration::from_secs(2) {
             response.warn("timeBudget", "索引达到本轮时间预算");
@@ -659,7 +800,7 @@ fn indexed(
             response.warn("sourceBudget", "搜索源达到候选预算，结果可能不完整");
             break;
         }
-        let mut query = original.engine.clone();
+        let mut query = engine.clone();
         if !apply_format(&mut query, &request.format) {
             return Ok(());
         }
@@ -735,6 +876,9 @@ fn indexed(
             }
             for hit in found {
                 cancelled(cancel)?;
+                if !seen.insert(hit.path.clone()) {
+                    continue;
+                }
                 if *remaining == 0 {
                     response.warn("sourceBudget", "搜索源达到候选预算，结果可能不完整");
                     break;
@@ -1615,6 +1759,88 @@ mod tests {
                 "literal admission {text}: {path}"
             );
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn global_unicode_names_preserve_canonical_equivalence_and_case() {
+        let f = Fixture::new();
+        for text in ["café", "cafe\u{301}"] {
+            let parsed = parse_query(text, false).unwrap();
+            for name in ["café.txt", "cafe\u{301}.txt", "CAFÉ.txt", "CAFE\u{301}.txt"] {
+                let path = f.file(name, "wanted");
+                assert!(
+                    parsed.engines().any(|engine| engine
+                        .match_path(path.as_os_str().as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                        .is_some()),
+                    "source {text}: {name}"
+                );
+                assert!(
+                    query_accepts(&parsed, &path, &fs::metadata(&path).unwrap()),
+                    "{text}: {name}"
+                );
+            }
+            let decoy = f.file("cafe-other.txt", "decoy");
+            assert!(!query_accepts(
+                &parsed,
+                &decoy,
+                &fs::metadata(&decoy).unwrap()
+            ));
+        }
+    }
+    #[test]
+    fn global_adapted_literals_reject_pre_top_k_decoys_with_multiple_or_explicit_regex() {
+        for (text, wanted, decoy) in [
+            (
+                "[2026] [final]",
+                "/review/[2026] [final].txt",
+                "/review/[2026] final-0001.txt",
+            ),
+            (
+                "re:report [2026]",
+                "/review/report [2026].txt",
+                "/review/report2026-0001.txt",
+            ),
+        ] {
+            let parsed = parse_query(text, false).unwrap();
+            assert!(parsed
+                .engine
+                .match_path(wanted.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                .is_some());
+            assert!(
+                !parsed
+                    .engine
+                    .match_path(decoy.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                    .is_some(),
+                "source decoy {text}: {decoy}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_extra_adapted_conjunction_warns_and_keeps_exact_source_tokens() {
+        let parsed = parse_query("[2026] [final] [copy]", false).unwrap();
+        let mut response = SearchResponse::new("fsearch");
+        parsed.warn_coverage(&mut response);
+        assert!(response.incomplete);
+        assert!(response
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "queryCoverage"));
+        for n in 0..=CANDIDATE_BUDGET {
+            let path = format!("/review/[2026] [final] copy-{n}.txt");
+            assert!(!parsed.engines().any(|engine| engine
+                .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                .is_some()));
+        }
+        // Native exact tokens may inherit a matching ancestor. Final basename
+        // admission rejects that case; the specific warning keeps this limit visible.
+        let inherited = Path::new("/[copy]/[2026] [final] copy.txt");
+        assert!(!parsed.literal_names_accept(inherited));
+        let supported = parse_query("[2026] [final]", false).unwrap();
+        let mut supported_response = SearchResponse::new("fsearch");
+        supported.warn_coverage(&mut supported_response);
+        assert!(!supported_response.incomplete);
     }
 
     #[test]
