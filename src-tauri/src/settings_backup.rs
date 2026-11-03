@@ -81,7 +81,28 @@ fn validate(value: &Value) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShortcutBackup {
+    format: String,
+    version: u32,
+    bindings: std::collections::HashMap<String, Option<String>>,
+}
+fn validate_shortcuts(value: &Value) -> Result<(), String> {
+    let backup: ShortcutBackup = serde_json::from_value(value.clone()).map_err(|e| format!("快捷键方案格式无效：{e}"))?;
+    if backup.format != "bento-shortcuts" || backup.version != 1 || backup.bindings.len() > 64
+        || backup.bindings.iter().any(|(key, value)| key.is_empty() || key.len() > 64
+            || !key.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
+            || value.as_ref().is_some_and(|v| v.is_empty() || v.len() > 80 || !v.is_ascii())) {
+        return Err("快捷键方案格式或版本无效".into());
+    }
+    // The frontend validates command identities, reserved keys and conflicts before applying.
+    Ok(())
+}
 fn read_backup(path: &Path) -> Result<String, String> {
+    read_document(path, validate, MAX_BACKUP_BYTES)
+}
+fn read_document(path: &Path, validate_document: fn(&Value) -> Result<(), String>, limit: usize) -> Result<String, String> {
     if !path.is_absolute() {
         return Err("请选择绝对路径".into());
     }
@@ -92,31 +113,34 @@ fn read_backup(path: &Path) -> Result<String, String> {
         .open(path)
         .map_err(|e| format!("无法读取设置备份：{e}"))?;
     let metadata = file.metadata().map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.len() > MAX_BACKUP_BYTES as u64 {
-        return Err("设置备份必须是不超过 1 MiB 的普通文件".into());
+    if !metadata.is_file() || metadata.len() > limit as u64 {
+        return Err("备份必须是符合大小限制的普通文件".into());
     }
     let mut bytes = Vec::new();
-    file.take(MAX_BACKUP_BYTES as u64 + 1)
+    file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_BACKUP_BYTES {
-        return Err("设置备份超过 1 MiB".into());
+    if bytes.len() > limit {
+        return Err("备份超过大小限制".into());
     }
     let text = String::from_utf8(bytes).map_err(|_| "设置备份必须使用 UTF-8 编码".to_string())?;
     let value: Value =
         serde_json::from_str(&text).map_err(|e| format!("设置备份 JSON 无效：{e}"))?;
-    validate(&value)?;
+    validate_document(&value)?;
     Ok(text)
 }
 
 fn export_backup(destination: &Path, document: &Value, data_dir: &Path) -> Result<(), String> {
+    export_document(destination, document, data_dir, validate, MAX_BACKUP_BYTES)
+}
+fn export_document(destination: &Path, document: &Value, data_dir: &Path, validate_document: fn(&Value) -> Result<(), String>, limit: usize) -> Result<(), String> {
     if !destination.is_absolute() {
         return Err("请选择绝对路径".into());
     }
-    validate(document)?;
+    validate_document(document)?;
     let bytes = serde_json::to_vec_pretty(document).map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_BACKUP_BYTES {
-        return Err("设置备份超过 1 MiB".into());
+    if bytes.len() > limit {
+        return Err("备份超过大小限制".into());
     }
     // Keep a selected backup destination from replacing Bento's own session/config documents.
     let parent = destination.parent().ok_or("备份位置无效")?;
@@ -193,6 +217,18 @@ pub(crate) async fn export_settings_backup(
         .await
         .map_err(|e| e.to_string())?
 }
+#[tauri::command]
+pub(crate) async fn read_shortcut_backup(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || read_document(Path::new(&path), validate_shortcuts, 65536))
+        .await.map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub(crate) async fn export_shortcut_backup(app: tauri::AppHandle, path: String, document: Value) -> Result<(), String> {
+    use tauri::Manager;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || export_document(Path::new(&path), &document, &dir, validate_shortcuts, 65536))
+        .await.map_err(|e| e.to_string())?
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +258,24 @@ mod tests {
         json!({"format":"bento-preferences","version":1,"preferences":{
             "showHidden":true,"showSidebar":false,"sidebarWidth":250,"autoRefresh":true,"alwaysOnTop":false,"enterAction":"open",
             "searchPaths":["/资料/ 空 格 "],"searchPrefs":{"scope":"home","sort":"score","mode":"content"},"favorites":[{"name":"资料","path":"/资料/ 空 格 "}]}})
+    }
+    #[test]
+    fn shortcut_documents_are_bounded_separate_and_cannot_replace_app_data() {
+        let f = Fixture::new();
+        let data = f.0.join("app-data");
+        fs::create_dir(&data).unwrap();
+        let document = json!({"format":"bento-shortcuts","version":1,"bindings":{"file-rename":"Meta+Shift+KeyR","view-list":null}});
+        let destination = f.0.join("shortcuts.json");
+        export_document(&destination, &document, &data, validate_shortcuts, 65536).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&read_document(&destination, validate_shortcuts, 65536).unwrap()).unwrap(), document);
+        assert!(read_backup(&destination).is_err()); // normal preference backups stay strict
+        assert!(export_document(&data.join("config.json"), &document, &data, validate_shortcuts, 65536).is_err());
+        for bad in [json!({"format":"bento-shortcuts","version":2,"bindings":{}}), json!({"format":"bento-shortcuts","version":1,"bindings":{"file-rename":123}}), json!({"format":"bento-shortcuts","version":1,"bindings":{},"extra":1})] {
+            assert!(export_document(&destination, &bad, &data, validate_shortcuts, 65536).is_err());
+        }
+        assert_eq!(serde_json::from_slice::<Value>(&fs::read(&destination).unwrap()).unwrap(), document);
+        fs::write(&destination, " ".repeat(65537)).unwrap();
+        assert!(read_document(&destination, validate_shortcuts, 65536).is_err());
     }
     #[test]
     fn bounded_regular_file_read_validates_complete_document_without_writing() {

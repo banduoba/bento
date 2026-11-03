@@ -3215,6 +3215,8 @@ pub fn run() {
             load_config,
             save_config,
             settings_backup::read_settings_backup,
+            settings_backup::read_shortcut_backup,
+            settings_backup::export_shortcut_backup,
             settings_backup::export_settings_backup,
             load_view_settings,
             save_view_settings,

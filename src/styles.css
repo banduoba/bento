@@ -2081,3 +2081,20 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .sb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sb-tree-note { padding: 4px 12px 5px 34px; color: var(--text-2); font-size: 11px; overflow-wrap: anywhere; }
 .sb-tree-note button { display: block; padding: 2px 0; border: 0; background: transparent; color: var(--accent); font-size: inherit; text-align: left; cursor: pointer; }
+
+/* Shortcut preferences: compact rows, existing settings surfaces and focus rings. */
+.shortcut-presets, .shortcut-backup { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.shortcut-presets > span { color: var(--text-2); font-size: 12px; margin-right: 4px; }
+.shortcut-help { margin: 8px 0 12px; }
+.shortcut-search { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-2); margin-bottom: 10px; }
+.shortcut-search input { min-width: 0; flex: 1; padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; background: var(--control-bg); color: var(--text); font: inherit; }
+.shortcut-row { display: flex; align-items: center; gap: 6px; min-height: 37px; padding: 5px 10px; }
+.shortcut-row + .shortcut-row { border-top: 1px solid var(--border); }
+.shortcut-command { flex: 1; min-width: 0; font-size: 12px; }
+.shortcut-key { min-width: 100px; padding: 4px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--control-bg); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+.shortcut-key.recording { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: 1px; }
+.shortcut-reset { padding: 3px 4px; border: none; background: transparent; color: var(--text-2); font: inherit; font-size: 11px; cursor: pointer; }
+.shortcut-reset:disabled { opacity: .4; cursor: default; }
+.shortcut-notice { padding: 7px 9px; margin: 0 0 10px; font-size: 12px; line-height: 1.5; background: var(--soft-bg); border-radius: 5px; }
+.shortcut-notice.error { color: var(--danger, #d32f2f); }
+.shortcut-backup { margin-top: 12px; }
