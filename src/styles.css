@@ -1987,6 +1987,8 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 
 /* Search completeness is separate from the result count. */
 .search-notice { flex: none; padding: 5px 12px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-2); line-height: 1.6; }
+.search-access { display: flex; align-items: center; flex-wrap: wrap; gap: 3px 12px; }
+.search-access .search-idx-settings-link { margin-left: auto; white-space: nowrap; }
 .search-coverage { flex: none; border-bottom: 1px solid var(--border); color: var(--text-2); font-size: 11px; }
 .search-coverage summary { padding: 4px 12px; cursor: pointer; line-height: 17px; }
 .search-coverage-more { margin-left: 8px; opacity: 0.7; }

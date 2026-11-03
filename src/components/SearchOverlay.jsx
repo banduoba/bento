@@ -388,7 +388,7 @@ export default function SearchOverlay({
   const warnings = [...new Set((response?.warnings || []).map(w => w.message).filter(Boolean))]
   const hasCoverageNotice = !busy && (response?.incomplete || response?.truncated || warnings.length > 0)
   const coverageSummary = response?.truncated ? '结果已截断，建议收窄范围'
-    : hasCoverageNotice ? '结果可能不完整' : indexBuilding ? '全局索引建立中' : '部分目录未获访问权限'
+    : hasCoverageNotice ? '结果可能不完整' : '全局索引建立中'
   const selectedItem = query.trim() ? sorted[selIdx] : null
 
   return (
@@ -441,7 +441,13 @@ export default function SearchOverlay({
           </details>
         </div>
         {error && <div className="search-notice search-error" role="alert"><span>{error}</span><button onClick={() => setRetry(n => n + 1)}>重试</button></div>}
-        {(hasCoverageNotice || indexBuilding || needsDiskAccess) && (
+        {needsDiskAccess && <div className="search-notice search-access" role="status">
+          <span title="未授予完全磁盘访问权限，其他用户和资源库目录不在索引内（系统设置 → 隐私与安全性）">部分目录未索引：需完全磁盘访问权限</span>
+          <button className="search-idx-settings-link" onClick={() => api.openPrivacySettings().catch((e) => alert(String(e)))}>
+            打开系统设置
+          </button>
+        </div>}
+        {(hasCoverageNotice || indexBuilding) && (
           <details className="search-coverage">
             <summary>{coverageSummary}<span className="search-coverage-more">详情</span></summary>
             <div className="search-coverage-details">
@@ -451,12 +457,6 @@ export default function SearchOverlay({
                 {warnings.map(message => <div key={message}>{message}</div>)}
               </>}
               {indexBuilding && <div>全局索引建立中（已收录 {(idxStatus.entries || 0).toLocaleString()} 条），{response?.source?.includes('spotlight') ? '当前结果来自系统索引' : '等待索引就绪'}。</div>}
-              {needsDiskAccess && <div>
-                未授予「完全磁盘访问权限」，其他用户/资源库目录不在索引内（系统设置 → 隐私与安全性）。{' '}
-                <button className="search-idx-settings-link" onClick={() => api.openPrivacySettings().catch((e) => alert(String(e)))}>
-                  打开系统设置
-                </button>
-              </div>}
             </div>
           </details>
         )}
@@ -464,11 +464,11 @@ export default function SearchOverlay({
         <div className={`search-list-pane${mode === 'name' ? ' search-name-table' : ''}`}>
         <div className="search-results" aria-label="搜索结果">
           {mode === 'name' && query.trim() && (
-            <div className="search-columns" role="row">
-              <span className="search-column-name" role="columnheader">名称</span>
-              <span className="search-column-dir" role="columnheader">位置</span>
-              <span className="search-column-size" role="columnheader">大小</span>
-              <span className="search-column-date" role="columnheader">{dateLabel}</span>
+            <div className="search-columns">
+              <span className="search-column-name">名称</span>
+              <span className="search-column-dir">位置</span>
+              <span className="search-column-size">大小</span>
+              <span className="search-column-date">{dateLabel}</span>
             </div>
           )}
           {!query.trim() ? (

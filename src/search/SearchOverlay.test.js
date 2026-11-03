@@ -400,7 +400,7 @@ test('compact selectors keep every scope, mode, format and sort reachable', asyn
 
 test('name table date heading and values follow the selected date sort', async t => {
   const h = await showResults(t, [{ ...item(), btime_ms: 101, mtime_ms: 202 }], { mode: 'name', sortBy: 'btime' })
-  const dateHeading = () => h.root.findAll(n => n.props.role === 'columnheader').at(-1).children.join('')
+  const dateHeading = () => h.root.find(n => n.props.className === 'search-column-date').children.join('')
   const dateValue = () => h.rows()[0].find(n => n.props.className === 'search-date').children.join('')
   assert.equal(dateHeading(), '创建日期')
   assert.equal(dateValue(), 'date:101')
@@ -424,4 +424,23 @@ test('coverage disclosure preserves full warnings without repeating the summary 
   assert.equal(notices.length, 1)
   assert.ok(notices[0].findByType('summary').children.join('').includes('截断'))
   assert.equal(h.root.findAll(n => n.type === 'div' && n.children.join('') === '索引覆盖范围有限，结果可能不完整').length, 1)
+})
+
+
+test('Full Disk Access settings action stays directly available outside collapsed coverage details', async t => {
+  const h = await mount(t, { mode: 'name' })
+  let settingsOpened = 0
+  globalThis.__searchTest.fsearchStatus = async () => ({ ready: true, full_disk_access: false })
+  globalThis.__searchTest.openPrivacySettings = async () => { settingsOpened++ }
+  await h.update({ scope: 'global' })
+  await h.type('needle')
+  await h.flush()
+  await h.resolve(0, result([item()], { incomplete: true }))
+  const settings = h.button('打开系统设置')
+  assert.ok(settings)
+  assert.ok(!settings.props.disabled)
+  for (let node = settings.parent; node; node = node.parent) assert.notEqual(node.type, 'details')
+  await h.run(() => settings.props.onClick())
+  assert.equal(settingsOpened, 1)
+  assert.deepEqual(h.located, [])
 })
