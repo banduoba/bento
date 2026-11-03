@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Added Copy Names in selection and Edit menus, with Shift-Command-C for newline-separated names; native file copy/paste and Option-Command-C path copying remain unchanged.
+
 ## 0.4.0 — 2026-11-03
 
 - Improved global name matching and coverage; name and system indexes now run in parallel and stream initial results without waiting for every source. File results locate and select their file; folder results open directly.

@@ -155,6 +155,12 @@ pub fn install(app: &App) -> tauri::Result<()> {
         MenuItemBuilder::with_id("edit-cut", label(language, "Cut", "剪切", "剪下")).build(app)?;
     let copy = MenuItemBuilder::with_id("edit-copy", label(language, "Copy", "复制", "拷貝"))
         .build(app)?;
+    let copy_names = MenuItemBuilder::with_id(
+        "edit-copy-names",
+        label(language, "Copy Names", "复制名称", "拷貝名稱"),
+    )
+    .enabled(false)
+    .build(app)?;
     let paste = MenuItemBuilder::with_id("edit-paste", label(language, "Paste", "粘贴", "貼上"))
         .build(app)?;
     let select_all = MenuItemBuilder::with_id(
@@ -170,6 +176,7 @@ pub fn install(app: &App) -> tauri::Result<()> {
             .item(&copy)
             .item(&paste)
             .separator()
+            .item(&copy_names)
             .item(&select_all)
             .build()?;
 
@@ -347,6 +354,9 @@ pub fn sync_menu_state(app: AppHandle, mode: String, show_hidden: bool, has_sele
         }
     }
     if let Some(edit) = menu.get("menu-edit").and_then(|item| item.as_submenu().cloned()) {
+        if let Some(item) = edit.get("edit-copy-names").and_then(|item| item.as_menuitem().cloned()) {
+            let _ = item.set_enabled(has_selection);
+        }
         if let Some(item) = edit.get("edit-undo").and_then(|item| item.as_menuitem().cloned()) {
             let _ = item.set_enabled(can_undo);
         }
