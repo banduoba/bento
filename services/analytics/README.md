@@ -5,6 +5,9 @@ not receive file names, paths, searches, account information, or device serials.
 The application stores a random UUIDv4 locally; disabling usage statistics stops
 reports. Only reports received after launch count toward the totals.
 
+Service: <https://bento-usage-analytics.bento-usage-stats.workers.dev>.
+The owner dashboard is at `/dashboard`; ingestion is at `/v1/events`.
+
 `POST /v1/events` with `Content-Type: application/json`:
 
 ```json

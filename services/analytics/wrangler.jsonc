@@ -11,6 +11,7 @@
     {
       "binding": "DB",
       "database_name": "bento-usage-analytics",
+      "database_id": "a8043869-b063-4d9a-9c34-42a61fe840bb",
       "migrations_dir": "migrations"
     }
   ],
