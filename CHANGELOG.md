@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added tracked background archive extraction with cancellation, elapsed time, per-archive results, output-folder location, collision-safe new folders and marked partial output; preserves download quarantine and keeps Archive Utility available for password/unsupported archives.
+
 - Redesigned preferences with a native-style icon sidebar, section headers, grouped controls, aligned shortcut keycaps, and responsive light/dark layouts.
 
 - Added app shortcut customization with Finder/Commander presets, key recording, conflict protection, per-command reset/clear and separate JSON import/export; native file clipboard and basic editing keys remain unchanged.

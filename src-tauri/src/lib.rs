@@ -22,6 +22,7 @@ mod list_stream;
 mod native_icons;
 mod native_menu;
 mod native_actions;
+mod extraction;
 mod search_results;
 use native_icons::file_icons;
 
@@ -3176,6 +3177,10 @@ pub fn run() {
             native_actions::choose_application_and_open,
             native_actions::show_get_info,
             native_actions::extract_archive,
+            extraction::start_extraction,
+            extraction::extraction_status,
+            extraction::cancel_extraction,
+            extraction::stop_extraction,
             reveal_in_finder,
             open_terminal,
             zip_paths,
@@ -3225,6 +3230,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            if let tauri::RunEvent::Exit = event { extraction::shutdown(); }
             if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
                 session_exit::on_exit_requested(app, code, api);
             }

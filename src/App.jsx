@@ -40,6 +40,8 @@ import StatusBar from './components/StatusBar'
 import TitlebarNavigation from './components/TitlebarNavigation'
 import ContextMenu from './components/ContextMenu'
 import BatchRenameDialog from './components/BatchRenameDialog'
+import useExtractionFeedback from './useExtractionFeedback'
+import ExtractionFeedback from './components/ExtractionFeedback'
 import ZipDialog, { normalizeZipPrefs, levelOf } from './components/ZipDialog'
 import SettingsDialog from './components/SettingsDialog'
 import SearchOverlay from './components/SearchOverlay'
@@ -248,6 +250,8 @@ export default function App() {
     if (c.viewSettings) savers.current.views.update(c.viewSettings)
   }
   const flushPersistence = async () => {
+    await api.stopExtraction?.()
+
     await hydration.current.promise
     if (hydration.current.error) throw hydration.current.error
     // Native close must not exit while a manually imported configuration is writing.
@@ -508,6 +512,8 @@ export default function App() {
       if (extra.length) setDirectoryVersions(v => invalidateDirectories(v, extra))
     })
   }
+
+  const extraction = useExtractionFeedback(job => refreshDirectories(job.results.map(result => parentPath(result.source))))
 
   // ---------- 窗口拖动（标题栏空白处按下即拖，双击最大化） ----------
   const titlebarMouseDown = (e) => {
@@ -1525,7 +1531,7 @@ export default function App() {
         : nativeMenuAction(() => Promise.all(paths.map(path => api.openPath(path)))) },
       filesOnly ? { label: '打开方式', children: openWithItems(paths, discovered, appsError) } : null,
       paneOpenItems.length ? { label: '在其他窗格打开', children: paneOpenItems } : null,
-      canExtract ? { label: '解压缩', action: () => nativeMenuAction(() => api.extractArchive(paths)) } : null,
+      canExtract ? { label: '解压缩', action: () => extraction.start(paths) } : null,
       previewPath ? { label: '快速查看', shortcut: shortcutLabel(cfg.shortcuts, 'quick-look'), action: () => previewNavigation.current.open(tabId, previewDir, previewPath, paths) } : null,
       { label: '显示简介', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
       { sep: true },
@@ -1790,7 +1796,7 @@ export default function App() {
   }, [])
   menuCommandRef.current = id => {
     if (!cfg || typeof id !== 'string') return
-    const blocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen || renaming
+    const blocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen || renaming || !!document.activeElement?.closest?.('[data-extraction-feedback]')
     const editing = isTextEditingElement(document.activeElement)
     const tab = activeTabOf(focusIdx)
     if (id === 'app-settings') {
@@ -1880,7 +1886,7 @@ export default function App() {
       return
     }
     const action = resolveShortcut(e, cfg?.shortcuts)
-    const blocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen || renaming
+    const blocked = searchOpen || settingsOpen || batchRename || menu || zipDlg || layoutPickerOpen || renaming || !!document.activeElement?.closest?.('[data-extraction-feedback]')
     const editing = isTextEditingElement(document.activeElement)
     if (action) {
       if (blocked || (editing && !['search-open', 'go-address', 'edit-copy-paths', 'view-refresh'].includes(action))) return
@@ -2276,6 +2282,14 @@ export default function App() {
       </div>
 
       <StatusBar path={focusedTab?.path || '/'} stats={stats[focusedTab?.id]} />
+      <ExtractionFeedback {...extraction} onCancel={extraction.cancel} onDismiss={extraction.dismiss}
+        onSystemExtract={paths => nativeMenuAction(() => api.extractArchive(paths))}
+        onLocate={path => {
+          const tab = activeTabOf(focusIdx)
+          if (!tab) return
+          nav(tab.id, parentPath(path))
+          setRevealReq({ tabId: tab.id, path, nonce: Date.now() })
+        }} />
       {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
       {hoverTip && (
         <div className="drag-tip" style={{ left: hoverTip.x, top: hoverTip.y }}>

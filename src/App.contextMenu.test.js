@@ -32,12 +32,12 @@ test('Open With lists the native default first and uses the captured complete se
   assert.deepEqual(opened, [[[a.path, b.path], '/Apps/Default.app']])
 })
 
-test('native Info, extraction and Open each receive every selected archive, and launch errors are visible', async t => {
+test('Info, tracked extraction and Open receive every selected archive, and extraction start errors are visible', async t => {
   const calls = [], a = entry('a.ZIP'), b = entry('b.tar.gz')
   const h = await mountApp(t, {
     listOpenWith: async () => apps,
     showGetInfo: async paths => calls.push(['info', paths]),
-    extractArchive: async paths => calls.push(['extract', paths]),
+    startExtraction: async paths => { calls.push(['extract', paths]); return {id:'done',state:'completed',total:paths.length,processed:paths.length,results:[],elapsedMs:0} },
     openPath: async path => calls.push(['open', path]),
   })
   await show(h, b, [a.path, b.path], [a, b])
@@ -47,10 +47,10 @@ test('native Info, extraction and Open each receive every selected archive, and 
   await show(h, b, [a.path, b.path], [a, b])
   await pick(h, find(menu(h).items, '打开'))
   assert.deepEqual(calls, [['info', [a.path, b.path]], ['extract', [a.path, b.path]], ['open', a.path], ['open', b.path]])
-  h.api.extractArchive = async () => { throw new Error('Archive Utility unavailable') }
+  h.api.startExtraction = async () => { throw new Error('Extraction unavailable') }
   await show(h, a)
   await pick(h, find(menu(h).items, '解压缩'))
-  assert.ok(h.alerts.some(message => message.includes('Archive Utility unavailable')))
+  assert.ok(h.root.findAll(n => n.props.role === 'alert').some(n => n.children.join('').includes('Extraction unavailable')))
   await show(h, entry('unsupported.7z'))
   assert.equal(find(menu(h).items, '解压缩'), undefined)
   await show(h, a, [a.path, entry('notes.txt').path], [a, entry('notes.txt')])
