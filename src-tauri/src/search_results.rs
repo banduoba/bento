@@ -86,6 +86,7 @@ impl Default for Budget {
         }
     }
 }
+#[derive(Clone)]
 struct Request {
     query: String,
     scope: String,
@@ -740,6 +741,186 @@ fn local_scan(
     Ok(response)
 }
 
+// One persistent worker contains opaque upstream calls. There is no pending
+// request queue: while busy, newer searches use the complementary system source.
+struct IndexWorker {
+    sender: std::sync::mpsc::SyncSender<Box<dyn FnOnce() + Send>>,
+    busy: Arc<AtomicBool>,
+}
+impl Default for IndexWorker {
+    fn default() -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send>>(1);
+        let busy = Arc::new(AtomicBool::new(false));
+        let running = busy.clone();
+        let _ = std::thread::Builder::new()
+            .name("bento-name-index".into())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                    running.store(false, Ordering::Release);
+                }
+            });
+        Self { sender, busy }
+    }
+}
+impl IndexWorker {
+    fn run<T: Send + 'static>(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Duration,
+        job: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        use std::sync::mpsc::{RecvTimeoutError, TrySendError};
+        cancelled(cancel)?;
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(SearchError::new(
+                "indexBusy",
+                "名称索引仍在处理上次查询，已使用其他搜索源",
+            ));
+        }
+        let start = Instant::now();
+        let job_cancel = Arc::new(AtomicBool::new(false));
+        let stop = job_cancel.clone();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let task = Box::new(move || {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let result = job(stop.clone());
+            // A deadline/cancelled request never publishes late output.
+            if !stop.load(Ordering::Relaxed) {
+                let _ = send.send(result);
+            }
+        });
+        if let Err(error) = self.sender.try_send(task) {
+            self.busy.store(false, Ordering::Release);
+            return Err(SearchError::new(
+                "unavailable",
+                match error {
+                    TrySendError::Full(_) => "索引工作通道繁忙",
+                    TrySendError::Disconnected(_) => "索引工作通道不可用",
+                },
+            ));
+        }
+        loop {
+            if let Err(error) = cancelled(cancel) {
+                job_cancel.store(true, Ordering::Relaxed);
+                return Err(error);
+            }
+            let Some(left) = deadline.checked_sub(start.elapsed()) else {
+                job_cancel.store(true, Ordering::Relaxed);
+                return Err(SearchError::new(
+                    "indexTimeout",
+                    "索引查询达到时间预算，已使用其他搜索源",
+                ));
+            };
+            match receive.recv_timeout(left.min(Duration::from_millis(10))) {
+                Ok(result) => {
+                    cancelled(cancel)?;
+                    if start.elapsed() >= deadline {
+                        job_cancel.store(true, Ordering::Relaxed);
+                        return Err(SearchError::new(
+                            "indexTimeout",
+                            "索引查询达到时间预算，已使用其他搜索源",
+                        ));
+                    }
+                    return result;
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(SearchError::new("unavailable", "索引查询工作通道已关闭"))
+                }
+            }
+        }
+    }
+}
+fn index_worker() -> &'static IndexWorker {
+    static WORKER: OnceLock<IndexWorker> = OnceLock::new();
+    WORKER.get_or_init(IndexWorker::default)
+}
+struct IndexReply {
+    response: SearchResponse,
+    remaining: usize,
+    result: Result<()>,
+}
+fn merge_index_reply(
+    reply: IndexReply,
+    response: &mut SearchResponse,
+    remaining: &mut usize,
+    limit: usize,
+) -> Result<()> {
+    *remaining += reply.remaining;
+    response.truncated |= reply.response.truncated;
+    response.incomplete |= reply.response.incomplete;
+    for warning in reply.response.warnings {
+        response.warn(warning.code, warning.message);
+    }
+    for hit in reply.response.items {
+        if admit(response, hit, limit) {
+            break;
+        }
+    }
+    reply.result
+}
+fn reserved_indexed(
+    worker: &IndexWorker,
+    request: &Request,
+    cancel: &AtomicBool,
+    remaining: &mut usize,
+    response: &mut SearchResponse,
+    deadline: Duration,
+    job: impl FnOnce(usize, Arc<AtomicBool>) -> Result<IndexReply> + Send + 'static,
+) -> Result<()> {
+    let reserved = if request.mode == "content" {
+        *remaining
+    } else {
+        *remaining / 2
+    };
+    *remaining -= reserved;
+    match worker.run(cancel, deadline, move |stop| job(reserved, stop)) {
+        Ok(reply) => merge_index_reply(reply, response, remaining, request.limit),
+        Err(error) => {
+            // Busy did not enqueue an operation for this request. A timed-out
+            // opaque call keeps its reservation until the request is discarded.
+            if error.code == "indexBusy" {
+                *remaining += reserved;
+            }
+            Err(error)
+        }
+    }
+}
+fn bounded_indexed(
+    request: &Request,
+    roots: &[PathBuf],
+    cancel: &AtomicBool,
+    remaining: &mut usize,
+    response: &mut SearchResponse,
+) -> Result<()> {
+    let owned = request.clone();
+    let roots = roots.to_vec();
+    reserved_indexed(
+        index_worker(),
+        request,
+        cancel,
+        remaining,
+        response,
+        Duration::from_secs(2),
+        move |reserved, stop| {
+            let mut response = SearchResponse::new("fsearch");
+            let mut remaining = reserved;
+            let result = indexed(&owned, &roots, &stop, &mut remaining, &mut response);
+            Ok(IndexReply {
+                response,
+                remaining,
+                result,
+            })
+        },
+    )
+}
 const CANDIDATE_BUDGET: usize = 10000;
 fn eligible(path: &Path, roots: &[PathBuf], request: &Request) -> bool {
     if !visible(path, request.show_hidden) {
@@ -794,7 +975,7 @@ fn indexed(
         roots.iter().map(Some).collect()
     };
     let start = Instant::now();
-    let mut source_remaining = if content { *remaining } else { *remaining / 2 };
+    let mut source_remaining = *remaining;
     original.warn_coverage(response);
     let plans: Vec<_> = scopes
         .into_iter()
@@ -822,7 +1003,7 @@ fn indexed(
                 Some(scope.as_os_str().as_bytes().to_vec())
             };
         }
-        // Reserve half of the single request budget for the complementary system source.
+        // The bounded worker owns only this request's reserved source budget.
         query.limit = (*remaining).min(source_remaining);
         if content {
             let pattern = content_pattern(&request.query);
@@ -837,6 +1018,7 @@ fn indexed(
             let (found, _) = eng.grep(&query, &grep).map_err(|e| {
                 SearchError::new("unavailable", format!("内容搜索索引尚不可用: {e}"))
             })?;
+            super::FSEARCH_READY.store(true, Ordering::Relaxed);
             cancelled(cancel)?;
             if !found.complete || found.next.is_some() {
                 response.warn("sourceBudget", "内容索引尚有未扫描候选项");
@@ -881,6 +1063,7 @@ fn indexed(
             let found = eng
                 .search(&query)
                 .map_err(|e| SearchError::new("unavailable", format!("名称索引尚不可用: {e}")))?;
+            super::FSEARCH_READY.store(true, Ordering::Relaxed);
             cancelled(cancel)?;
             if found.len() >= query.limit {
                 response.warn("sourceBudget", "名称索引达到候选上限");
@@ -1192,7 +1375,7 @@ fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchRespons
     let mut response = SearchResponse::new("fsearch");
     response.warn("indexCoverage", "索引覆盖范围有限，结果可能不完整");
     let mut remaining = CANDIDATE_BUDGET;
-    let primary = indexed(request, &roots, cancel, &mut remaining, &mut response);
+    let primary = bounded_indexed(request, &roots, cancel, &mut remaining, &mut response);
     if let Err(error) = &primary {
         if error.code == "cancelled" {
             return primary.map(|_| response);
@@ -1441,6 +1624,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
     static NEXT: AtomicU64 = AtomicU64::new(1);
+    static GATE_TEST_LOCK: Mutex<()> = Mutex::new(());
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -1479,6 +1663,182 @@ mod tests {
     fn run(f: &Fixture, r: &Request, b: &Budget) -> SearchResponse {
         local_scan(r, &f.0, &AtomicBool::new(false), b).unwrap()
     }
+    #[test]
+    fn opaque_index_deadline_returns_while_provider_is_still_blocked() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            let worker = IndexWorker::default();
+            let result = worker.run(
+                &AtomicBool::new(false),
+                Duration::from_millis(20),
+                move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(7)
+                },
+            );
+            done_tx.send(result.map_err(|error| error.code)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let timed = done_rx.recv_timeout(Duration::from_millis(100));
+        // Always release the controlled provider before asserting, including red.
+        release_tx.send(()).unwrap();
+        caller.join().unwrap();
+        assert_eq!(timed.unwrap(), Err("indexTimeout"));
+    }
+
+    fn wait_worker_idle(worker: &IndexWorker) {
+        let start = Instant::now();
+        while worker.busy.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!worker.busy.load(Ordering::Acquire));
+    }
+    #[test]
+    fn opaque_worker_busy_cancel_and_status_never_wait_for_blocked_provider() {
+        let worker = Arc::new(IndexWorker::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let calls = Arc::new(AtomicU64::new(0));
+        let owned = worker.clone();
+        let cancel = stop.clone();
+        let counter = calls.clone();
+        let caller = std::thread::spawn(move || {
+            let result = owned.run(&cancel, Duration::from_secs(1), move |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(7)
+            });
+            done_tx.send(result.map_err(|error| error.code)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        // The real app status command probes FDA off-thread but never initializes
+        // the engine or enters its opaque name/content locks.
+        let initialized = super::super::FSEARCH.get().is_some();
+        let status_start = Instant::now();
+        for _ in 0..10 {
+            let snapshot = tauri::async_runtime::block_on(super::super::fsearch_status()).unwrap();
+            assert_eq!(snapshot.entries, 0);
+        }
+        let status_elapsed = status_start.elapsed();
+        let busy = worker.run(&AtomicBool::new(false), Duration::from_secs(1), |_| Ok(99));
+        stop.store(true, Ordering::Relaxed);
+        let cancelled_result = done_rx.recv_timeout(Duration::from_millis(250));
+        release_tx.send(()).unwrap();
+        caller.join().unwrap();
+        wait_worker_idle(&worker);
+        assert_eq!(busy.unwrap_err().code, "indexBusy");
+        assert_eq!(cancelled_result.unwrap(), Err("cancelled"));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(super::super::FSEARCH.get().is_some(), initialized);
+        assert!(status_elapsed < Duration::from_secs(1));
+        assert_eq!(
+            worker
+                .run(&AtomicBool::new(false), Duration::from_secs(1), |_| Ok(11))
+                .unwrap(),
+            11
+        );
+        wait_worker_idle(&worker);
+    }
+    #[test]
+    fn opaque_deadline_releases_global_slot_and_keeps_candidate_reservation() {
+        let _serial = GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let worker = Arc::new(IndexWorker::default());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let owned = worker.clone();
+        let caller = std::thread::spawn(move || {
+            let active = Active::new("opaque_slot_deadline".into()).unwrap();
+            let slot = GlobalSlot::acquire(&active).unwrap();
+            let mut request = req();
+            request.mode = "name".into();
+            let mut remaining = CANDIDATE_BUDGET;
+            let mut response = SearchResponse::new("fsearch");
+            let result = reserved_indexed(
+                &owned,
+                &request,
+                &active.cancel,
+                &mut remaining,
+                &mut response,
+                Duration::from_millis(20),
+                move |reserved, _| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(IndexReply {
+                        remaining: reserved,
+                        response: SearchResponse::new("fsearch"),
+                        result: Ok(()),
+                    })
+                },
+            );
+            drop(slot);
+            done_tx
+                .send((result.map_err(|error| error.code), remaining))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let result = done_rx.recv_timeout(Duration::from_millis(250));
+        let successor = Active::new("opaque_slot_successor".into()).unwrap();
+        let slot = if result.is_ok() {
+            Some(GlobalSlot::acquire(&successor).unwrap())
+        } else {
+            None
+        };
+        release_tx.send(()).unwrap();
+        caller.join().unwrap();
+        wait_worker_idle(&worker);
+        assert_eq!(result.unwrap(), (Err("indexTimeout"), CANDIDATE_BUDGET / 2));
+        assert!(slot.is_some());
+        drop(slot);
+    }
+    #[test]
+    fn completed_index_reply_refunds_unused_candidates_and_merges_bounded_results() {
+        let f = Fixture::new();
+        let path = f.file("needle.txt", "value");
+        let mut request = req();
+        request.mode = "name".into();
+        request.limit = 1;
+        let worker = IndexWorker::default();
+        let mut remaining = CANDIDATE_BUDGET;
+        let mut response = SearchResponse::new("fsearch");
+        reserved_indexed(
+            &worker,
+            &request,
+            &AtomicBool::new(false),
+            &mut remaining,
+            &mut response,
+            Duration::from_secs(1),
+            move |reserved, _| {
+                let mut response = SearchResponse::new("fsearch");
+                response.warn("sourceBudget", "partial source");
+                let md = fs::metadata(&path).unwrap();
+                response.items.push(item(&path, &md, None, None));
+                Ok(IndexReply {
+                    remaining: reserved - 3,
+                    response,
+                    result: Ok(()),
+                })
+            },
+        )
+        .unwrap();
+        wait_worker_idle(&worker);
+        assert_eq!(remaining, CANDIDATE_BUDGET - 3);
+        assert_eq!(response.items.len(), 1);
+        assert!(response.incomplete);
+        assert!(response
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "sourceBudget"));
+    }
+
     #[test]
     fn current_content_finds_unindexed_files_and_honors_smart_case() {
         let f = Fixture::new();
@@ -2324,6 +2684,9 @@ mod tests {
     }
     #[test]
     fn global_slot_coalesces_latest_without_parallel_execution() {
+        let _serial = GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let first = Active::new("gate_first".into()).unwrap();
         let held = GlobalSlot::acquire(&first).unwrap();
         let spawn = |id: &str| {

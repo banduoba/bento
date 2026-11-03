@@ -29,6 +29,9 @@ use bento_fswatch::{make_entry, Entry, FsWatcher};
 /// fsearch 引擎（getattrlistbulk 全盘索引 + FSEvents 实时更新 + 模糊匹配）
 /// 懒初始化：首次全局搜索时启动，首轮建索引期间查询会 Err → 回退 mdfind
 static FSEARCH: OnceLock<Option<fsearch::Engine>> = OnceLock::new();
+// Readiness is observed only after a real source query succeeds. Status polling
+// must never enter upstream locks or initialize the heavy indexing engine.
+static FSEARCH_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn fsearch_engine() -> Option<&'static fsearch::Engine> {
     FSEARCH
@@ -3002,20 +3005,23 @@ struct FsearchStatus {
     full_disk_access: bool,
 }
 
-/// fsearch 引擎状态（全局索引是否建好）
+fn fsearch_status_snapshot(full_disk_access: bool) -> FsearchStatus {
+    FsearchStatus {
+        ready: FSEARCH_READY.load(std::sync::atomic::Ordering::Relaxed),
+        // The upstream count requires locks held by content indexing. Zero means
+        // unknown here; the UI must not present it as a measured catalog size.
+        entries: 0,
+        full_disk_access,
+    }
+}
+
+/// Poll app-owned readiness; never call Engine::status (it locks names/content).
 #[tauri::command]
 async fn fsearch_status() -> Result<FsearchStatus, String> {
-    match fsearch_engine() {
-        Some(eng) => {
-            let st = eng.status();
-            Ok(FsearchStatus {
-                ready: st.ready,
-                entries: st.entries,
-                full_disk_access: st.full_disk_access,
-            })
-        }
-        None => Err("fsearch 不可用".into()),
-    }
+    let access = tauri::async_runtime::spawn_blocking(fsearch::has_full_disk_access)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(fsearch_status_snapshot(access))
 }
 
 #[tauri::command]
