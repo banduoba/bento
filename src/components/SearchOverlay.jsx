@@ -435,8 +435,10 @@ export default function SearchOverlay({
 
   const resultName = (item) => (
     <span className="search-name-cell">
-      {copyAction(item)}
-      <span className="fileicon"><FileIcon path={item.path} name={item.name} isDir={item.is_dir} /></span>
+      <span className="fileicon search-copy-slot">
+        <span className="search-copy-image"><FileIcon path={item.path} name={item.name} isDir={item.is_dir} /></span>
+        {copyAction(item)}
+      </span>
       <span className="search-name" title={item.name}>
         {mode === 'name' ? <Highlight text={item.name} query={query} /> : item.name}
       </span>

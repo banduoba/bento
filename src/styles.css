@@ -1762,8 +1762,14 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
 .search-item:hover .search-reveal, .search-item.on .search-reveal,
 .search-item:focus-within .search-reveal { visibility: visible; }
 .search-reveal:hover { background: var(--hover-bg); color: var(--text); }
-.search-copy { display: none; width: 18px; height: 18px; border-radius: 4px; flex: none; visibility: visible; }
-.search-item:hover .search-copy, .search-item:focus-within .search-copy { display: inline-flex; }
+.search-copy-slot { position: relative; flex: none; }
+.search-copy-image { display: flex; align-items: center; justify-content: center; }
+.search-item .search-copy, .search-item.on .search-copy {
+  display: inline-flex; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 18px; height: 18px; border-radius: 4px; visibility: hidden;
+}
+.search-item:hover .search-copy, .search-item:focus-within .search-copy { visibility: visible; }
+.search-item:hover .search-copy-image, .search-item:focus-within .search-copy-image { visibility: hidden; }
 .search-item-content { display: grid; grid-template-columns: minmax(0, 1fr) 20px; align-items: start; column-gap: 6px; padding: 5px 8px; }
 .search-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .search-heading, .search-details { display: flex; align-items: center; min-width: 0; gap: 6px; }
