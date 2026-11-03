@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { api, hasTauri } from '../api'
 import AboutSection from './AboutSection'
+import useDialogFocus, { isComposingKey } from './useDialogFocus'
 
 /**
  * 设置面板：搜索范围与通用偏好
  * cfg.searchPaths 为空 = 搜索全部已索引位置；非空 = 结果限定在这些目录（及其子目录）内
  */
 export default function SettingsDialog({
+  analyticsEnabled, onAnalyticsEnabledChange, analyticsPersistenceError,
   open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, enterAction, onEnterActionChange, onExportSettings, onImportSettings, onClose,
 }) {
   const [busy, setBusy] = useState(false)
@@ -16,6 +18,7 @@ export default function SettingsDialog({
   const [backupBusy, setBackupBusy] = useState(false)
   const backupRunning = useRef(false)
   const [backupNotice, setBackupNotice] = useState(null)
+  const dialogRef = useDialogFocus(visible)
 
   useEffect(() => {
     if (!visible) return
@@ -25,7 +28,7 @@ export default function SettingsDialog({
   useEffect(() => {
     if (!visible) return
     const onKey = (e) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && !isComposingKey(e)) {
         e.stopPropagation()
         e.preventDefault()
         onClose()
@@ -77,7 +80,7 @@ export default function SettingsDialog({
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
-      <div className="modal settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"
+      <div ref={dialogRef} tabIndex={-1} className="modal settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"
         onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         <div className="modal-title" id="settings-title">设置</div>
         <div className="settings-body">
@@ -91,7 +94,7 @@ export default function SettingsDialog({
             ))}
           </nav>
           <div className="settings-content">
-            {section === 'about' && <AboutSection />}
+            {section === 'about' && <AboutSection analyticsPersistenceError={analyticsPersistenceError} analyticsEnabled={analyticsEnabled} onAnalyticsEnabledChange={onAnalyticsEnabledChange} />}
             {section === 'backup' && <section id="settings-backup" className="settings-group" aria-labelledby="settings-backup-title" aria-busy={backupBusy}>
               <h2 id="settings-backup-title">设置备份</h2>
               <div className="settings-card">

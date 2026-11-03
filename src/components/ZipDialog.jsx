@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { open as pickDir } from '@tauri-apps/plugin-dialog'
 import { hasTauri } from '../api'
+import { isTextEditingElement } from '../textEditing.js'
+import useDialogFocus, { isComposingKey } from './useDialogFocus'
 
 // 「创建归档」对话框（QSpace 风格）：位置 / 文件名 / 压缩方式 / 密码 / 一键压缩 / 单独压缩
 export const DEFAULT_ZIP_PREFS = {
@@ -40,6 +42,7 @@ export default function ZipDialog({ count, dir, defaultName, prefs, onCancel, on
   const [oneClick, setOneClick] = useState(prefs.oneClick)
   const [separate, setSeparate] = useState(prefs.separate && count > 1)
   const nameRef = useRef(null)
+  const dialogRef = useDialogFocus()
 
   useEffect(() => {
     const el = nameRef.current
@@ -70,13 +73,18 @@ export default function ZipDialog({ count, dir, defaultName, prefs, onCancel, on
   return (
     <div className="modal-backdrop" onMouseDown={onCancel}>
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         className="modal zip-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="zip-title"
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
+          if (isTextEditingElement(e.target) && e.metaKey && !e.altKey && !e.ctrlKey && !e.shiftKey &&
+              !isComposingKey(e) && ['a', 'c', 'x', 'v'].includes(e.key.toLowerCase())) return
           e.stopPropagation()
+          if (isComposingKey(e)) return
           if (e.key === 'Escape') onCancel()
           else if (e.key === 'Enter' && e.target.tagName !== 'SELECT' && e.target.tagName !== 'BUTTON') submit()
         }}
@@ -94,6 +102,7 @@ export default function ZipDialog({ count, dir, defaultName, prefs, onCancel, on
           value={separate ? '' : name}
           placeholder={separate ? '各个项目使用各自的名称' : '压缩包名称'}
           disabled={separate}
+          aria-label="压缩包名称"
           onChange={(e) => setName(e.target.value)}
         />
 
@@ -123,6 +132,7 @@ export default function ZipDialog({ count, dir, defaultName, prefs, onCancel, on
           <input
             className="zip-pwinput"
             type="password"
+            aria-label="密码"
             value={pw}
             disabled={!usePw}
             placeholder="密码"

@@ -114,7 +114,7 @@ async function launchBareMutation(h, kind) {
     await menuClick(h,kind==='createFile'?'文本文件':'fixture.template');return
   }
   await h.run(()=>pane.onMenu(id,{path:'/home/note.txt',name:'note.txt',is_dir:false},0,0))
-  await menuClick(h,kind==='rename'?'重新命名':'压缩「note.txt」')
+  await menuClick(h,kind==='rename'?'重新命名':'压缩')
   if(kind==='rename') {
     await h.run(()=>h.panes[0].props.onRenameChange('renamed.txt'))
     await h.run(()=>h.panes[0].props.onRenameCommit())

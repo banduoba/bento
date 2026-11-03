@@ -1,6 +1,6 @@
 [package]
 name = "bento"
-version = "0.3.1"
+version = "0.4.0"
 description = "Bento — a lightweight multi-pane file manager for macOS"
 edition = "2021"
 
@@ -34,7 +34,7 @@ strip = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "block2", "NSPasteboard", "NSPasteboardItem", "NSEvent", "NSResponder", "NSWindow", "NSWorkspace", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSGraphicsContext", "objc2-core-foundation"] }
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL", "NSUUID", "NSObject", "NSDictionary", "NSError", "NSFileManager", "NSLocale", "NSAppleEventDescriptor", "objc2-core-services"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSString", "NSURL", "NSUUID", "NSObject", "NSDictionary", "NSError", "NSFileManager", "NSBundle", "NSLocale", "NSAppleEventDescriptor", "objc2-core-services"] }
 objc2-quick-look-ui = { version = "0.3.2", default-features = false, features = ["std", "QLPreviewItem", "QLPreviewPanel", "objc2-app-kit"] }
 block2 = "0.6"
 

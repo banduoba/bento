@@ -111,6 +111,6 @@ test('list index clamps and pages with overlap', () => {
   assert.equal(listIndexAfterKey('pageUp', 10, 20, 4), 6)
   assert.equal(listIndexAfterKey('pageUp', 2, 20, 4), 0)
   assert.equal(listIndexAfterKey('pageDown', -1, 0, 4), -1)
-  assert.equal(pageStride(24 * 8), 7)
+  assert.equal(pageStride(21 * 8), 7)
   assert.equal(pageStride(0), 9)
 })

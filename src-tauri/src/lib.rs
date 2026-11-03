@@ -21,6 +21,7 @@ mod session_exit;
 mod list_stream;
 mod native_icons;
 mod native_menu;
+mod native_actions;
 mod search_results;
 use native_icons::file_icons;
 
@@ -29,6 +30,9 @@ use bento_fswatch::{make_entry, Entry, FsWatcher};
 /// fsearch 引擎（getattrlistbulk 全盘索引 + FSEvents 实时更新 + 模糊匹配）
 /// 懒初始化：首次全局搜索时启动，首轮建索引期间查询会 Err → 回退 mdfind
 static FSEARCH: OnceLock<Option<fsearch::Engine>> = OnceLock::new();
+// Readiness is observed only after a real source query succeeds. Status polling
+// must never enter upstream locks or initialize the heavy indexing engine.
+static FSEARCH_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn fsearch_engine() -> Option<&'static fsearch::Engine> {
     FSEARCH
@@ -840,11 +844,7 @@ async fn rename_with_receipt(old_path: String, new_name: String) -> Result<Write
 
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    native_actions::open_path(path).await
 }
 
 #[tauri::command]
@@ -3002,20 +3002,23 @@ struct FsearchStatus {
     full_disk_access: bool,
 }
 
-/// fsearch 引擎状态（全局索引是否建好）
+fn fsearch_status_snapshot(full_disk_access: bool) -> FsearchStatus {
+    FsearchStatus {
+        ready: FSEARCH_READY.load(std::sync::atomic::Ordering::Relaxed),
+        // The upstream count requires locks held by content indexing. Zero means
+        // unknown here; the UI must not present it as a measured catalog size.
+        entries: 0,
+        full_disk_access,
+    }
+}
+
+/// Poll app-owned readiness; never call Engine::status (it locks names/content).
 #[tauri::command]
 async fn fsearch_status() -> Result<FsearchStatus, String> {
-    match fsearch_engine() {
-        Some(eng) => {
-            let st = eng.status();
-            Ok(FsearchStatus {
-                ready: st.ready,
-                entries: st.entries,
-                full_disk_access: st.full_disk_access,
-            })
-        }
-        None => Err("fsearch 不可用".into()),
-    }
+    let access = tauri::async_runtime::spawn_blocking(fsearch::has_full_disk_access)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(fsearch_status_snapshot(access))
 }
 
 #[tauri::command]
@@ -3168,6 +3171,11 @@ pub fn run() {
             rename_with_receipt,
             regex_rename_preview,
             open_path,
+            native_actions::list_open_with,
+            native_actions::open_with,
+            native_actions::choose_application_and_open,
+            native_actions::show_get_info,
+            native_actions::extract_archive,
             reveal_in_finder,
             open_terminal,
             zip_paths,
@@ -3182,6 +3190,7 @@ pub fn run() {
             copy_template_with_receipt,
             search,
             search_results::search_query,
+            search_results::search_query_stream,
             search_results::cancel_search,
             search_content,
             read_text_preview,

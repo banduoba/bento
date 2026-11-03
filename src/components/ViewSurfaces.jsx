@@ -6,7 +6,7 @@ import InlineRename from './InlineRename'
 
 const TILE_WIDTH = 112
 const TILE_HEIGHT = 108
-const COLUMN_ROW_HEIGHT = 24
+const COLUMN_ROW_HEIGHT = 21
 
 function keepEditorMounted(index) {
   return range => {

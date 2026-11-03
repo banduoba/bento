@@ -1,0 +1,16 @@
+{
+  "name": "bento-usage-analytics",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "dev": "wrangler dev --local",
+    "check": "wrangler deploy --dry-run"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "wrangler": "4.156.2"
+  }
+}

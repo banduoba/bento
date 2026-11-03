@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "bento-usage-analytics",
+  "main": "src/index.mjs",
+  "compatibility_date": "2026-11-03",
+  "workers_dev": true,
+  "preview_urls": false,
+  // Persisted request logs are deliberately disabled for this privacy-focused endpoint.
+  "observability": { "enabled": false },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bento-usage-analytics",
+      "database_id": "a8043869-b063-4d9a-9c34-42a61fe840bb",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "ratelimits": [
+    { "name": "INGEST_LIMIT", "namespace_id": "918350201", "simple": { "limit": 300, "period": 60 } },
+    { "name": "INSTALL_LIMIT", "namespace_id": "918350202", "simple": { "limit": 3, "period": 60 } },
+    { "name": "ADMIN_LIMIT", "namespace_id": "918350203", "simple": { "limit": 30, "period": 60 } }
+  ],
+  "triggers": { "crons": ["17 0 * * *"] }
+}

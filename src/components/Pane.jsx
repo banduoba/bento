@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Channel } from '@tauri-apps/api/core'
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { trace, makeDragPreview, fallbackPreview, runNativeDrag } from '../nativeDrag'
@@ -10,9 +11,10 @@ import { applyDirDelta, normalizeFsChanges } from '../fsApply'
 import { applyOverlay, nextLoadRequestId, noteDelta, reduceLoadBatches, shouldRestartLoad } from '../dirLoad'
 import { fmtSize, fmtDate, basename, parentPath, labelOf, makeMatcher, copyText, kindOf, splitName } from '../format'
 import { COL_MIN, COL_MAX, DEFAULT_COLS, applyColVars, fitColumns, normalizeCols, normalizeVis } from '../columns'
-import { IconArrowUp, IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconPencil, IconRefresh, IconSearch } from '../icons'
+import { IconCheck, IconChevronLeft, IconChevronRight, IconCopy, IconFolder, IconSearch } from '../icons'
 import FileIcon from './FileIcon'
 import InlineRename from './InlineRename'
+import ContextMenu from './ContextMenu'
 import { ColumnView, IconView } from './ViewSurfaces'
 
 const MIME = 'application/x-bento'
@@ -130,6 +132,13 @@ export default function Pane({
   const crumbsRef = useRef(null)
   const renameRef = useRef(null)
   const pathInputRef = useRef(null)
+  const pathRevealFrame = useRef(null)
+  const pathMenuButton = useRef(null)
+  const [pathMenu, setPathMenu] = useState(null)
+  const cancelPathReveal = () => {
+    if (pathRevealFrame.current != null) cancelAnimationFrame(pathRevealFrame.current)
+    pathRevealFrame.current = null
+  }
   const innerRef = useRef(null)
 
 
@@ -826,6 +835,8 @@ export default function Pane({
 
   // 地址栏进入编辑模式（点击路径空白/末尾区、铅笔、⌘L 或 ⌘⇧G 信号）
   const beginPathEdit = () => {
+    cancelPathReveal()
+    setPathMenu(null)
     editSeq.current += 1
     completeSeq.current += 1
     pathEditClosed.current = false
@@ -843,7 +854,26 @@ export default function Pane({
     if (!el) return
     el.focus()
     el.select()
+    // WebKit can reveal the selection start after focus/select returns. Wait
+    // through that paint, then move only the viewport, preserving selection.
+    pathRevealFrame.current = requestAnimationFrame(() => {
+      pathRevealFrame.current = requestAnimationFrame(() => {
+        pathRevealFrame.current = null
+        if (pathEditClosed.current || pathInputRef.current !== el ||
+            el.ownerDocument?.activeElement !== el ||
+            el.selectionStart !== 0 || el.selectionEnd !== el.value.length) return
+        el.scrollLeft = Math.max(0, el.scrollWidth - el.clientWidth)
+      })
+    })
+    return cancelPathReveal
   }, [pathFocusNonce])
+
+  useEffect(() => {
+    if (!focused) {
+      cancelPathReveal()
+      setPathMenu(null)
+    }
+  }, [focused])
 
   useEffect(() => {
     if (editPathSignal) beginPathEdit()
@@ -851,6 +881,8 @@ export default function Pane({
 
   // 导航后退出编辑模式
   useEffect(() => {
+    cancelPathReveal()
+    setPathMenu(null)
     editSeq.current += 1
     completeSeq.current += 1
     pathEditClosed.current = true
@@ -860,6 +892,7 @@ export default function Pane({
   }, [tab.id, tab.path])
 
   const cancelPathEdit = () => {
+    cancelPathReveal()
     editSeq.current += 1
     completeSeq.current += 1
     pathEditClosed.current = true
@@ -988,6 +1021,7 @@ export default function Pane({
   }
 
   const onPathKeyDown = (e) => {
+    cancelPathReveal()
     const composing = e.nativeEvent.isComposing || e.keyCode === 229
     const list = completionsRef.current
     if (e.key === 'Tab') {
@@ -1280,15 +1314,6 @@ export default function Pane({
           <button title="前进 (⌘])" disabled={tab.hi >= tab.history.length - 1} onClick={() => onForward(tab.id)}>
             <IconChevronRight size={15} />
           </button>
-          <button title="上级目录 (⌘↑)" disabled={!parentPath(viewMode === 'columns' ? columnDirectory || tab.path : tab.path)} onClick={() => onParent ? onParent(tab.id) : onNav(tab.id, parentPath(tab.path))}>
-            <IconArrowUp size={15} />
-          </button>
-          <button title="刷新 (⌘R)" onClick={() => onNav(tab.id, tab.path, true)}>
-            <IconRefresh size={14} />
-          </button>
-          <button title="编辑路径 (⌘L)" onClick={beginPathEdit}>
-            <IconPencil size={14} />
-          </button>
         </div>
         {editingPath != null ? (
           <div className={`path-edit${pathError ? ' invalid' : ''}`}>
@@ -1303,6 +1328,7 @@ export default function Pane({
               aria-expanded={completions?.matches?.length > 1 ? true : undefined}
               aria-controls={completions?.matches?.length > 1 ? `path-suggest-${tab.id}` : undefined}
               onChange={(e) => {
+                cancelPathReveal()
                 // 继续输入时作废尚未返回的解析和补全，避免旧结果把窗格带走
                 editSeq.current += 1
                 completeSeq.current += 1
@@ -1311,8 +1337,10 @@ export default function Pane({
                 if (pathError) setPathError(null)
               }}
               onKeyDown={onPathKeyDown}
-              onFocus={(e) => e.currentTarget.select()}
+              onPointerDown={cancelPathReveal}
+              onCompositionStart={cancelPathReveal}
               onBlur={(e) => {
+                cancelPathReveal()
                 if (suggestRef.current?.contains(e.relatedTarget)) return
                 commitPathEdit()
               }}
@@ -1413,7 +1441,37 @@ export default function Pane({
             />
           </div>
         )}
-        <div className="filterbox">
+        {editingPath == null && <button
+          ref={pathMenuButton}
+          type="button"
+          className="iconbtn path-more"
+          title="路径操作"
+          aria-label="路径操作"
+          aria-haspopup="menu"
+          aria-expanded={pathMenu != null}
+          onMouseDown={(e) => {
+            // Keep the open menu's outside listener from racing this toggle.
+            e.stopPropagation()
+            onFocus(index)
+          }}
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect()
+            setPathMenu(current => current ? null : { x: r.left, y: r.bottom + 4 })
+          }}
+        ><span aria-hidden="true">⋯</span></button>}
+        {pathMenu && createPortal(<ContextMenu
+          keyboard
+          menu={{ ...pathMenu, items: [
+            { label: '上级目录', shortcut: '⌘↑', disabled: !parentPath(viewMode === 'columns' ? columnDirectory || tab.path : tab.path), action: () => onParent ? onParent(tab.id) : onNav(tab.id, parentPath(tab.path)) },
+            { label: '刷新', shortcut: '⌘R', action: () => onNav(tab.id, tab.path, true) },
+            { label: '编辑路径', shortcut: '⌘L', action: beginPathEdit },
+          ] }}
+          onClose={(event) => {
+            setPathMenu(null)
+            if (event?.key === 'Escape' || event?.key === 'Tab' || event?.type === 'pick') pathMenuButton.current?.focus({ preventScroll: true })
+          }}
+        />, pathMenuButton.current.ownerDocument.body)}
+        {editingPath == null && <div className="filterbox">
           <IconSearch size={13} />
           <input
             placeholder="筛选"
@@ -1429,7 +1487,7 @@ export default function Pane({
               if (!e.metaKey && !e.ctrlKey) e.stopPropagation()
             }}
           />
-        </div>
+        </div>}
       </div>
 
       {viewMode === 'list' && <div className="cols" onContextMenu={(e) => {
@@ -1547,24 +1605,6 @@ export default function Pane({
                   <div
                     className="row-name"
                   >
-                    <span className="row-copy-slot">
-                      {!isRenaming && (
-                        <button
-                          className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
-                          title="复制路径"
-                          onMouseDown={(e) => e.stopPropagation()}
-                          onDoubleClick={(e) => e.stopPropagation()}
-                          draggable={false}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            copyText(entry.path)
-                            showCopyToast(entry.path, e.currentTarget.getBoundingClientRect())
-                          }}
-                        >
-                          {copiedPath === entry.path ? <IconCheck size={13} /> : <IconCopy size={13} />}
-                        </button>
-                      )}
-                    </span>
                     {entry.is_dir ? (
                       <button
                         className={`disclosure${expandedDirs.has(entry.path) ? ' open' : ''}`}
@@ -1578,9 +1618,27 @@ export default function Pane({
                         <IconChevronRight size={12} />
                       </button>
                     ) : null}
-                    <span className="fileicon" style={!entry.is_dir && entry.depth > 0 ? { marginLeft: entry.depth * 18 + 20 } : undefined}>
-                      {entry.isPseudo ? null : (
-                        <FileIcon path={entry.path} name={entry.name} isDir={entry.is_dir} ext={entry.ext} />
+                    <span className={`fileicon copy-icon-slot${!isRenaming && !entry.isPseudo ? ' has-copy' : ''}`} style={!entry.is_dir && entry.depth > 0 ? { marginLeft: entry.depth * 18 + 20 } : undefined}>
+                      {!entry.isPseudo && (
+                        <span className="copy-icon-image">
+                          <FileIcon path={entry.path} name={entry.name} isDir={entry.is_dir} ext={entry.ext} />
+                        </span>
+                      )}
+                      {!isRenaming && !entry.isPseudo && (
+                        <button
+                          className={`row-copy${copiedPath === entry.path ? ' copied' : ''}`}
+                          title="复制路径"
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                          draggable={false}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            copyText(entry.path)
+                            showCopyToast(entry.path, e.currentTarget.getBoundingClientRect())
+                          }}
+                        >
+                          {copiedPath === entry.path ? <IconCheck size={12} /> : <IconCopy size={12} />}
+                        </button>
                       )}
                     </span>
                     {isRenaming ? (

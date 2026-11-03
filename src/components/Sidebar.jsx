@@ -26,13 +26,18 @@ const favoriteIcons = {
   Applications: applicationsIcon,
 }
 
+// macOS CoreTypes sidebar glyphs, tinted like Finder through their original alpha mask.
+function SidebarGlyph({ src }) {
+  const mask = `url("${src}")`
+  return <span className="sb-sidebar-glyph" style={{ WebkitMaskImage: mask, maskImage: mask }} aria-hidden="true" />
+}
+
 function SystemIcon({ src, template }) {
   const kind = template ? 'sb-template-icon' : 'sb-color-icon'
   return <img className={`sb-system-icon ${kind}`} src={src} width={20} height={20} alt="" draggable={false} />
 }
 
-// Finder / QSpace 侧边栏用独立彩色字形。iconForFile 对 Desktop、Downloads 等
-// 返回的是蓝文件夹加角标，不能用于这些已知目录。自定义收藏才用系统图标。
+// 已知目录使用系统侧栏字形；自定义收藏保留 iconForFile 的文件夹图标。
 function bundledFavoriteSrc(favorite) {
   if (favorite?.name && Object.hasOwn(favoriteIcons, favorite.name)) return favoriteIcons[favorite.name]
   const tail = String(favorite?.path || '').split('/').filter(Boolean).pop()
@@ -42,7 +47,7 @@ function bundledFavoriteSrc(favorite) {
 
 function FavoriteIcon({ favorite, native }) {
   const src = bundledFavoriteSrc(favorite)
-  if (src) return <SystemIcon src={src} template={false} />
+  if (src) return <SidebarGlyph src={src} />
   if (native?.icon) return <SystemIcon src={native.icon} template={!!native.template} />
   return <IconFolder size={20} />
 }
@@ -265,7 +270,7 @@ export default function Sidebar({
   }, [tree, home, favorites, vols])
 
   // 列表、自定义收藏和卷需要 iconForFile（特殊目录在列表里仍是文件夹角标）。
-  // 侧边栏展示时，已知特殊目录改用内置彩色字形，不读这份缓存。
+  // 侧边栏展示时，已知特殊目录改用系统侧栏字形，不读这份缓存。
   useEffect(() => {
     const paths = []
     if (home) paths.push(home)
@@ -298,7 +303,7 @@ export default function Sidebar({
       <FolderBranch
         id={`home:${home}`} tree={tree} branches={branches} focusedPath={focusedPath}
         icon={home
-          ? <SystemIcon src={homeIcon} template={false} />
+          ? <SidebarGlyph src={homeIcon} />
           : <IconHouse size={20} />}
         label="主目录"
         path={home}

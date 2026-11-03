@@ -1,4 +1,4 @@
-import { invoke, convertFileSrc } from '@tauri-apps/api/core'
+import { invoke, convertFileSrc, Channel } from '@tauri-apps/api/core'
 import { LIST_BATCH } from './dirLoad.js'
 import { searchApi, demoSearch, searchRequestId } from './search/model.js'
 
@@ -6,7 +6,7 @@ export const hasTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERN
 
 export const api = hasTauri
   ? {
-      ...searchApi(invoke),
+      ...searchApi(invoke, () => new Channel()),
       listDir: (path, showHidden) => invoke('list_dir', { path, showHidden }),
       listSubdirectories: (path, showHidden) => invoke('list_subdirectories', { path, showHidden }),
       // 当前目录分批推送。onBatch 是 Tauri Channel；约 500 条一批，最后一批 done=true。
@@ -30,6 +30,11 @@ export const api = hasTauri
       renameWithReceipt: (oldPath, newName) => invoke('rename_with_receipt', { oldPath, newName }),
       rename: async (oldPath, newName) => (await invoke('rename_with_receipt', { oldPath, newName })).path,
       openPath: (path) => invoke('open_path', { path }),
+      listOpenWith: path => invoke('list_open_with', { path }),
+      openWith: (paths, appPath) => invoke('open_with', { paths, appPath }),
+      chooseApplicationAndOpen: paths => invoke('choose_application_and_open', { paths }),
+      showGetInfo: paths => invoke('show_get_info', { paths }),
+      extractArchive: paths => invoke('extract_archive', { paths }),
       reveal: (path) => invoke('reveal_in_finder', { path }),
       openTerminal: (path) => invoke('open_terminal', { path }),
       zipPathsWithReceipt: (sources, destDir, options) => invoke('zip_paths_with_receipt', { sources, destDir, options: options || null }),
@@ -483,6 +488,13 @@ function mockApi() {
     readFileClipboard: () => Promise.resolve({ changeCount: 0, paths: [] }),
     pasteImageFromClipboard: () => Promise.resolve(null),
     openPath: () => Promise.resolve(),
+    listOpenWith: () => Promise.resolve({ defaultApp: '/System/Applications/TextEdit.app', apps: [{
+      path: '/System/Applications/TextEdit.app', name: 'TextEdit', bundleId: 'com.apple.TextEdit', version: null,
+    }] }),
+    openWith: () => Promise.resolve(),
+    chooseApplicationAndOpen: () => Promise.resolve(false),
+    showGetInfo: () => Promise.resolve(),
+    extractArchive: () => Promise.resolve(),
     reveal: () => Promise.resolve(),
     openTerminal: () => Promise.resolve(),
     zipPaths: (sources, dir, options = {}) => {
