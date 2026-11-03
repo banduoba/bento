@@ -23,6 +23,7 @@ const SORTS = [
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+const SEARCH_TIMEOUT_MS = 8000
 const HISTORY_KEY = 'bento-search-history'
 const normalizeHistory = (items) => Array.isArray(items)
   ? [...new Set(items.filter((s) => typeof s === 'string').map((s) => s.trim()).filter(Boolean))].slice(0, 8)
@@ -136,6 +137,7 @@ export default function SearchOverlay({
   const inputRef = useRef(null)
   const tokenRef = useRef(0)
   const timerRef = useRef(null)
+  const statusPendingRef = useRef(false)
   const menuRef = useRef(null)
   menuRef.current = menu
 
@@ -187,10 +189,23 @@ export default function SearchOverlay({
     setBusy(true)
     const requestId = searchRequestId()
     let submitted = false
+    let watchdog = null
+    const cancel = () => {
+      if (!submitted) return
+      submitted = false
+      api.cancelSearch(requestId).catch(() => {})
+    }
     const t0 = performance.now()
     timerRef.current = setTimeout(async () => {
       submitted = true
       setHistory(items => normalizeHistory([q, ...items]))
+      watchdog = setTimeout(() => {
+        if (tokenRef.current !== token) return
+        ++tokenRef.current
+        cancel()
+        setError('搜索超时，请重试或收窄搜索范围。')
+        setBusy(false)
+      }, SEARCH_TIMEOUT_MS)
       try {
         const r = await api.searchQuery(q, scope, scope === 'pane' ? root : null, showHidden, searchPaths, mode, requestId, format)
         if (tokenRef.current !== token) return
@@ -200,13 +215,16 @@ export default function SearchOverlay({
       } catch (error) {
         if (tokenRef.current === token) setError(searchError(error))
       } finally {
+        clearTimeout(watchdog)
+        submitted = false
         if (tokenRef.current === token) setBusy(false)
       }
     }, 250)
     return () => {
       clearTimeout(timerRef.current)
+      clearTimeout(watchdog)
       ++tokenRef.current
-      if (submitted) api.cancelSearch(requestId).catch(() => {})
+      cancel()
     }
   }, [open, query, scope, root, showHidden, searchPaths, mode, format, retry])
 
@@ -217,18 +235,25 @@ export default function SearchOverlay({
     }
   }, [preview])
 
-  // 全局范围时轮询 fsearch 索引状态（未建好时结果来自系统索引，需要提示）
+  // Keep status polling single flight, including a close/reopen while an invoke is pending.
   useEffect(() => {
     if (!open || scope !== 'global') {
       setIdxStatus(null)
       return
     }
     let live = true
-    const poll = () =>
-      api
-        .fsearchStatus()
-        .then((s) => live && setIdxStatus(s))
-        .catch(() => live && setIdxStatus(null))
+    const poll = async () => {
+      if (!live || statusPendingRef.current) return
+      statusPendingRef.current = true
+      try {
+        const status = await api.fsearchStatus()
+        if (live) setIdxStatus(status)
+      } catch {
+        if (live) setIdxStatus(null)
+      } finally {
+        statusPendingRef.current = false
+      }
+    }
     poll()
     const t = setInterval(poll, 1500)
     return () => {
@@ -384,11 +409,11 @@ export default function SearchOverlay({
   const createdDate = sortBy === 'btime'
   const dateLabel = createdDate ? '创建日期' : '修改日期'
   const indexBuilding = scope === 'global' && idxStatus && !idxStatus.ready
-  const needsDiskAccess = scope === 'global' && idxStatus?.ready && idxStatus.full_disk_access === false
+  const needsDiskAccess = scope === 'global' && idxStatus?.full_disk_access === false
   const warnings = [...new Set((response?.warnings || []).map(w => w.message).filter(Boolean))]
   const hasCoverageNotice = !busy && (response?.incomplete || response?.truncated || warnings.length > 0)
   const coverageSummary = response?.truncated ? '结果已截断，建议收窄范围'
-    : hasCoverageNotice ? '结果可能不完整' : '全局索引建立中'
+    : hasCoverageNotice ? '结果可能不完整' : '名称索引准备中'
   const selectedItem = query.trim() ? sorted[selIdx] : null
 
   return (
@@ -466,7 +491,9 @@ export default function SearchOverlay({
                 {response?.incomplete && <div>搜索未穷尽，当前结果可能不完整。</div>}
                 {warnings.map(message => <div key={message}>{message}</div>)}
               </>}
-              {indexBuilding && <div>全局索引建立中（已收录 {(idxStatus.entries || 0).toLocaleString()} 条），{response?.source?.includes('spotlight') ? '当前结果来自系统索引' : '等待索引就绪'}。</div>}
+              {indexBuilding && <div>
+                名称索引尚未就绪{idxStatus.entries > 0 ? `（已收录 ${idxStatus.entries.toLocaleString()} 条）` : ''}，{response && !busy ? '已显示可用结果' : '搜索将使用当前可用来源'}。
+              </div>}
             </div>
           </details>
         )}

@@ -69,7 +69,7 @@ const result = (items = [], extra = {}) => ({
 async function mount(t, extra = {}) {
   const keys = [
     'window', 'requestAnimationFrame', 'IS_REACT_ACT_ENVIRONMENT',
-    '__searchTest', 'setTimeout', 'clearTimeout',
+    '__searchTest', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
   ]
   const prev = Object.fromEntries(keys.map(k => [k, globalThis[k]]))
   const storage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
@@ -81,10 +81,26 @@ async function mount(t, extra = {}) {
     value: { getItem: () => null, setItem: () => {} },
   })
 
-  let next = 0
+  let next = 0, now = 0
   const timers = new Map()
-  globalThis.setTimeout = fn => { timers.set(++next, fn); return next }
+  globalThis.setTimeout = (fn, delay = 0) => { timers.set(++next, { fn, due: now + delay }); return next }
   globalThis.clearTimeout = id => timers.delete(id)
+  globalThis.setInterval = (fn, delay) => { timers.set(++next, { fn, due: now + delay, interval: delay }); return next }
+  globalThis.clearInterval = id => timers.delete(id)
+  const advance = async ms => act(async () => {
+    const target = now + ms
+    while (true) {
+      const entry = [...timers].filter(([, t]) => t.due <= target).sort((a, b) => a[1].due - b[1].due)[0]
+      if (!entry) break
+      const [id, timer] = entry
+      now = timer.due
+      if (timer.interval) timer.due += timer.interval
+      else timers.delete(id)
+      timer.fn()
+      await Promise.resolve()
+    }
+    now = target
+  })
   const requests = [], cancels = [], previews = [], opened = []
   const located = [], revealed = [], copied = [], drags = [], closed = []
   const drag = deferred()
@@ -160,14 +176,9 @@ async function mount(t, extra = {}) {
     async type(q) {
       await run(() => renderer.root.findByType('input').props.onChange({ target: { value: q } }))
     },
-    async flush() {
-      await run(() => {
-        for (const [id, fn] of [...timers]) {
-          timers.delete(id)
-          fn()
-        }
-      })
-    },
+    advance,
+    pendingTimeouts: () => [...timers.values()].filter(timer => !timer.interval).length,
+    flush: () => advance(250),
     async update(patch) {
       Object.assign(props, patch)
       await run(() => renderer.update(React.createElement(Overlay, props)))
@@ -470,4 +481,94 @@ test('Full Disk Access settings action stays directly available outside collapse
   await h.run(() => settings.props.onClick())
   assert.equal(settingsOpened, 1)
   assert.deepEqual(h.located, [])
+})
+
+
+test('an unresolved search times out at eight seconds, cancels once and ignores its late result after retry', async t => {
+  const h = await mount(t, { mode: 'name' })
+  await h.type('needle')
+  await h.flush()
+  const firstId = h.requests[0].args[6]
+  await h.advance(7999)
+  assert.ok(h.text().includes('搜索中'))
+  assert.deepEqual(h.cancels, [])
+  await h.advance(1)
+  assert.ok(h.text().includes('搜索超时'))
+  assert.ok(!h.text().includes('搜索中'))
+  assert.deepEqual(h.cancels, [firstId])
+  await h.run(() => h.button('重试').props.onClick())
+  await h.flush()
+  assert.equal(h.requests.length, 2)
+  assert.ok(h.text().includes('搜索中'))
+  await h.resolve(0, result([item('late.txt')]))
+  assert.ok(!h.text().includes('late.txt'))
+  assert.ok(h.text().includes('搜索中'))
+  await h.resolve(1, result([item('retried.txt')]))
+  assert.equal(h.pendingTimeouts(), 0)
+  assert.ok(h.text().includes('retried.txt'))
+  await h.advance(8000)
+  assert.ok(!h.text().includes('搜索超时'))
+  assert.deepEqual(h.cancels, [firstId])
+})
+
+test('superseding and closing searches clear their watchdogs', async t => {
+  const h = await mount(t, { mode: 'name' })
+  await h.type('old')
+  await h.flush()
+  await h.advance(4000)
+  await h.type('new')
+  assert.equal(h.pendingTimeouts(), 1)
+  await h.flush()
+  assert.equal(h.pendingTimeouts(), 1)
+  await h.advance(3750)
+  assert.ok(h.text().includes('搜索中'))
+  assert.ok(!h.text().includes('搜索超时'))
+  await h.update({ open: false })
+  assert.equal(h.pendingTimeouts(), 0)
+  await h.advance(8000)
+  assert.ok(!h.text().includes('搜索超时'))
+  assert.deepEqual(h.cancels, h.requests.map(r => r.args[6]))
+})
+
+test('status polling stays single flight across intervals and reopen, and stale status cannot publish', async t => {
+  const h = await mount(t, { mode: 'name' })
+  const statuses = []
+  globalThis.__searchTest.fsearchStatus = () => {
+    const d = deferred()
+    statuses.push(d)
+    return d.promise
+  }
+  await h.update({ scope: 'global' })
+  assert.equal(statuses.length, 1)
+  await h.advance(6000)
+  assert.equal(statuses.length, 1)
+  await h.update({ open: false })
+  await h.update({ open: true })
+  assert.equal(statuses.length, 1)
+  await h.run(() => statuses[0].resolve({ ready: false, entries: 99 }))
+  assert.ok(!h.text().includes('99'))
+  await h.advance(1500)
+  assert.equal(statuses.length, 2)
+  await h.advance(3000)
+  assert.equal(statuses.length, 2)
+  await h.run(() => statuses[1].reject(new Error('status unavailable')))
+  await h.advance(1500)
+  assert.equal(statuses.length, 3)
+  await h.update({ open: false })
+  await h.advance(6000)
+  assert.equal(statuses.length, 3)
+})
+
+test('pending index status shows unknown coverage honestly and retains Full Disk Access action', async t => {
+  const h = await mount(t, { mode: 'name' })
+  globalThis.__searchTest.fsearchStatus = async () => ({ ready: false, entries: 0, full_disk_access: false })
+  await h.update({ scope: 'global' })
+  assert.ok(h.button('打开系统设置'))
+  assert.ok(h.text().includes('名称索引'))
+  assert.ok(!h.text().includes('已收录 0'))
+  await h.type('needle')
+  await h.flush()
+  await h.resolve(0, result([item()], { source: 'local+spotlight' }))
+  assert.ok(h.text().includes('已显示可用结果'))
+  assert.ok(!h.text().includes('当前结果来自系统索引'))
 })
