@@ -6,7 +6,7 @@ use super::{
 use serde::Serialize;
 use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -32,13 +32,13 @@ impl SearchError {
     }
 }
 type Result<T> = std::result::Result<T, SearchError>;
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Warning {
     code: &'static str,
     message: String,
 }
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResponse {
     pub items: Vec<SearchItem>,
@@ -86,6 +86,7 @@ impl Default for Budget {
         }
     }
 }
+#[derive(Clone)]
 struct Request {
     query: String,
     scope: String,
@@ -207,9 +208,23 @@ struct NameLiteral {
 }
 struct ParsedQuery {
     engine: fsearch::Query,
+    alternate: Option<fsearch::Query>,
+    limited_names: bool,
     literals: Vec<NameLiteral>,
+    spotlight_terms: Vec<String>,
 }
 impl ParsedQuery {
+    fn engines(&self) -> impl Iterator<Item = &fsearch::Query> {
+        std::iter::once(&self.engine).chain(self.alternate.iter())
+    }
+    fn warn_coverage(&self, response: &mut SearchResponse) {
+        if self.limited_names {
+            response.warn(
+                "queryCoverage",
+                "部分名称条件受索引语法限制，候选上限可能导致遗漏",
+            );
+        }
+    }
     fn literal_names_accept(&self, path: &Path) -> bool {
         let name = path.file_name().unwrap_or_default().as_bytes();
         self.literals
@@ -236,65 +251,230 @@ fn query_words(query: &str) -> Vec<String> {
     }
     words
 }
+// macOS stores canonically equivalent names in both NFC and NFD. Keep the
+// two source forms bounded; explicit regex/path/filter text is never rewritten.
+fn name_forms(name: &str) -> [String; 2] {
+    #[cfg(target_os = "macos")]
+    if !name.is_ascii() {
+        let text = objc2_foundation::NSString::from_str(name);
+        return [
+            text.precomposedStringWithCanonicalMapping().to_string(),
+            text.decomposedStringWithCanonicalMapping().to_string(),
+        ];
+    }
+    [name.into(), name.into()]
+}
+fn unicode_case(name: &str) -> bool {
+    name.chars()
+        .any(|ch| !ch.is_ascii() && ch.to_lowercase().ne(ch.to_uppercase()))
+}
+fn name_pattern(forms: &[String; 2], glob: bool, path: bool) -> String {
+    let mut alternatives = vec![];
+    for name in forms {
+        let body = if glob {
+            name.chars()
+                .map(|ch| match ch {
+                    '*' => {
+                        if path {
+                            "[^/]*".into()
+                        } else {
+                            ".*".into()
+                        }
+                    }
+                    '?' => {
+                        if path {
+                            "[^/]".into()
+                        } else {
+                            ".".into()
+                        }
+                    }
+                    _ => regex::escape(&ch.to_string()),
+                })
+                .collect::<String>()
+        } else {
+            regex::escape(name)
+        };
+        if !alternatives.contains(&body) {
+            alternatives.push(body);
+        }
+    }
+    let body = format!("(?:{})", alternatives.join("|"));
+    if path {
+        if glob {
+            format!("(?:^|/){body}$")
+        } else {
+            format!("(?:^|/)[^/]*{body}[^/]*$")
+        }
+    } else if glob {
+        format!("^{body}$")
+    } else {
+        body
+    }
+}
 fn parse_query(query: &str, content: bool) -> Result<ParsedQuery> {
     let home = std::env::var("HOME").unwrap_or_default();
     let invalid = |e| SearchError::new("invalidQuery", e);
+    if content {
+        return Ok(ParsedQuery {
+            engine: fsearch::Query::parse(&content_filters(query), &home).map_err(invalid)?,
+            alternate: None,
+            limited_names: false,
+            literals: vec![],
+            spotlight_terms: vec![],
+        });
+    }
+    let compile = |pattern: &str| {
+        regex::bytes::RegexBuilder::new(pattern)
+            .case_insensitive(true)
+            .dot_matches_new_line(true)
+            .build()
+            .map_err(|e| invalid(e.to_string()))
+    };
+    let mut filters = fsearch::Query::parse("", &home).map_err(invalid)?;
+    let mut candidates = [vec![], vec![]];
+    let mut exact = [vec![], vec![]];
     let mut literals = vec![];
-    let input = if content {
-        content_filters(query)
-    } else if query.contains(['[', ']']) {
-        let mut filters = fsearch::Query::parse("", &home).map_err(invalid)?;
-        let mut candidates = vec![];
-        for word in query_words(query) {
-            let filter = if let Some((key, value)) = word.split_once(':') {
-                filters.filter(key, value, &home).map_err(invalid)?
-            } else {
-                false
-            };
-            // Only ordinary filename terms need this adapter. Explicit filters (including
-            // re:/path:/in:) and the engine's path-glob syntax keep their own grammar.
-            if filter || !word.contains(['[', ']']) || word.contains('/') {
-                candidates.push(word);
-                continue;
+    let mut spotlight_terms = vec![];
+    let mut source_patterns = vec![];
+    for word in query_words(query) {
+        let filter = if let Some((key, value)) = word.split_once(':') {
+            filters.filter(key, value, &home).map_err(invalid)?
+        } else {
+            false
+        };
+        let (negate, name) = word
+            .strip_prefix('!')
+            .map_or((false, word.as_str()), |s| (true, s));
+        // Explicit grammar stays with the locked parser.
+        if filter
+            || name.contains('/')
+            || name.contains(['{', '}'])
+            || name.starts_with(['\'', '^'])
+            || name.ends_with('$')
+            || name.is_empty()
+        {
+            for form in &mut candidates {
+                form.push(word.clone());
             }
-            let (negate, name) = word
-                .strip_prefix('!')
-                .map_or((false, word.as_str()), |s| (true, s));
-            let glob = name.contains(['*', '?']);
-            let pattern = if glob {
-                super::glob_to_regex(name)
-            } else {
-                regex::escape(name)
-            };
-            literals.push(NameLiteral {
-                pattern: regex::bytes::RegexBuilder::new(&pattern)
-                    .case_insensitive(true)
-                    .dot_matches_new_line(true)
-                    .build()
-                    .map_err(|e| invalid(e.to_string()))?,
-                negate,
-            });
-            if !negate {
-                // The engine cannot escape bracket classes. Broaden just these characters;
-                // literal admission below removes decoys before the final result cap.
-                let broad = name.replace(['[', ']'], "?");
-                candidates.push(if glob { broad } else { format!("*{broad}*") });
-            }
-            // A broad negative candidate could hide valid names; enforce it only at admission.
+            continue;
         }
-        candidates
+        let forms = name_forms(name);
+        let glob = name.contains(['*', '?']);
+        let pattern = compile(&name_pattern(&forms, glob, false))?;
+        let adapted = name.contains(['[', ']']) || (!name.is_ascii() && name.contains('?'));
+        let case = unicode_case(name);
+        let normalization = forms[0] != forms[1];
+        if !negate && (adapted || case || normalization) {
+            source_patterns.push((pattern.clone(), compile(&name_pattern(&forms, glob, true))?));
+        }
+        literals.push(NameLiteral { pattern, negate });
+        if !negate && !glob {
+            spotlight_terms.push(forms[0].clone());
+        }
+        for (i, form) in forms.iter().enumerate() {
+            if adapted || (!negate && (case || normalization)) {
+                if !negate {
+                    // Star-only globs avoid the upstream UTF-8 ?/[ parser. Broaden
+                    // cased Unicode characters too: its literal globs only fold ASCII.
+                    let broad: String = form
+                        .chars()
+                        .map(|ch| {
+                            if matches!(ch, '[' | ']')
+                                || (!form.is_ascii() && ch == '?')
+                                || (!ch.is_ascii()
+                                    && (normalization || ch.to_lowercase().ne(ch.to_uppercase())))
+                            {
+                                '*'
+                            } else {
+                                ch
+                            }
+                        })
+                        .collect();
+                    candidates[i].push(if glob { broad } else { format!("*{broad}*") });
+                    // Exact tokens bypass bracket parsing and reject literal decoys
+                    // before top-k even when both native regex slots are occupied.
+                    // They can inherit ancestors, so unsupported conjunctions warn.
+                    for run in form
+                        .split(['*', '?'])
+                        .filter(|run| run.contains(['[', ']']))
+                    {
+                        if !unicode_case(run) {
+                            exact[i].push((source_patterns.len() - 1, format!("'{run}")));
+                        }
+                    }
+                }
+            } else if negate || glob {
+                candidates[i].push(if negate {
+                    format!("!{form}")
+                } else {
+                    form.clone()
+                });
+            } else {
+                // Every ordinary term is required in the basename before top-k.
+                candidates[i].push(format!("*{form}*"));
+            }
+        }
+    }
+    let inputs = candidates.map(|words| {
+        words
             .into_iter()
             .map(|word| format!("\"{word}\""))
             .collect::<Vec<_>>()
             .join(" ")
-    } else {
-        query.into()
-    };
+    });
+    let mut engines = vec![];
+    let mut limited_names = false;
+    for i in 0..2 {
+        if i == 1 && inputs[0] == inputs[1] && exact[0] == exact[1] {
+            break;
+        }
+        let mut engine = fsearch::Query::parse(&inputs[i], &home).map_err(invalid)?;
+        let mut assigned = 0;
+        for (name, path) in &source_patterns {
+            if engine.name_re.is_none() {
+                engine.name_re = Some(name.clone());
+            } else if engine.path_re.is_none() {
+                engine.path_re = Some(path.clone());
+            } else {
+                break;
+            }
+            assigned += 1;
+        }
+        for (pattern, token) in &exact[i] {
+            // Native basename regexes already enforce these conditions. The locked
+            // parser evicts its first positive token beyond eight: an internal
+            // fallback guard must never replace an explicit user constraint.
+            if *pattern < assigned
+                || engine.tokens.iter().filter(|t| !t.negate).count() >= 8
+                || engine
+                    .alt
+                    .as_ref()
+                    .is_some_and(|alt| alt.iter().filter(|t| !t.negate).count() >= 8)
+            {
+                continue;
+            }
+            engine.push_token(token);
+            // Query.alt replaces only tokens; retain appended fallback guards too.
+            if let Some(alt) = &mut engine.alt {
+                let mut other = fsearch::Query::default();
+                other.tokens = std::mem::take(alt);
+                other.push_token(token);
+                *alt = other.tokens;
+            }
+        }
+        limited_names |= assigned < source_patterns.len();
+        engines.push(engine);
+    }
+    let engine = engines.remove(0);
     Ok(ParsedQuery {
-        engine: fsearch::Query::parse(&input, &home).map_err(invalid)?,
+        engine,
+        alternate: engines.pop(),
+        limited_names,
         literals,
+        spotlight_terms,
     })
 }
+
 fn query_accepts(query: &ParsedQuery, path: &Path, md: &fs::Metadata) -> bool {
     if !query.literal_names_accept(path) {
         return false;
@@ -304,15 +484,16 @@ fn query_accepts(query: &ParsedQuery, path: &Path, md: &fs::Metadata) -> bool {
     } else {
         fsearch::walk::KIND_FILE
     };
-    query
-        .engine
-        .match_path(
-            path.as_os_str().as_bytes(),
-            kind,
-            md.len(),
-            (mtime_of(md) / 1000.0) as u32,
-        )
-        .is_some()
+    query.engines().any(|engine| {
+        engine
+            .match_path(
+                path.as_os_str().as_bytes(),
+                kind,
+                md.len(),
+                (mtime_of(md) / 1000.0) as u32,
+            )
+            .is_some()
+    })
 }
 
 // Fixed-size reads, one bounded line and three bounded snippets: never read_to_end/read_line.
@@ -560,6 +741,186 @@ fn local_scan(
     Ok(response)
 }
 
+// One persistent worker contains opaque upstream calls. There is no pending
+// request queue: while busy, newer searches use the complementary system source.
+struct IndexWorker {
+    sender: std::sync::mpsc::SyncSender<Box<dyn FnOnce() + Send>>,
+    busy: Arc<AtomicBool>,
+}
+impl Default for IndexWorker {
+    fn default() -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Box<dyn FnOnce() + Send>>(1);
+        let busy = Arc::new(AtomicBool::new(false));
+        let running = busy.clone();
+        let _ = std::thread::Builder::new()
+            .name("bento-name-index".into())
+            .spawn(move || {
+                while let Ok(job) = receiver.recv() {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                    running.store(false, Ordering::Release);
+                }
+            });
+        Self { sender, busy }
+    }
+}
+impl IndexWorker {
+    fn run<T: Send + 'static>(
+        &self,
+        cancel: &AtomicBool,
+        deadline: Duration,
+        job: impl FnOnce(Arc<AtomicBool>) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        use std::sync::mpsc::{RecvTimeoutError, TrySendError};
+        cancelled(cancel)?;
+        if self
+            .busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(SearchError::new(
+                "indexBusy",
+                "名称索引仍在处理上次查询，已使用其他搜索源",
+            ));
+        }
+        let start = Instant::now();
+        let job_cancel = Arc::new(AtomicBool::new(false));
+        let stop = job_cancel.clone();
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let task = Box::new(move || {
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
+            let result = job(stop.clone());
+            // A deadline/cancelled request never publishes late output.
+            if !stop.load(Ordering::Relaxed) {
+                let _ = send.send(result);
+            }
+        });
+        if let Err(error) = self.sender.try_send(task) {
+            self.busy.store(false, Ordering::Release);
+            return Err(SearchError::new(
+                "unavailable",
+                match error {
+                    TrySendError::Full(_) => "索引工作通道繁忙",
+                    TrySendError::Disconnected(_) => "索引工作通道不可用",
+                },
+            ));
+        }
+        loop {
+            if let Err(error) = cancelled(cancel) {
+                job_cancel.store(true, Ordering::Relaxed);
+                return Err(error);
+            }
+            let Some(left) = deadline.checked_sub(start.elapsed()) else {
+                job_cancel.store(true, Ordering::Relaxed);
+                return Err(SearchError::new(
+                    "indexTimeout",
+                    "索引查询达到时间预算，已使用其他搜索源",
+                ));
+            };
+            match receive.recv_timeout(left.min(Duration::from_millis(10))) {
+                Ok(result) => {
+                    cancelled(cancel)?;
+                    if start.elapsed() >= deadline {
+                        job_cancel.store(true, Ordering::Relaxed);
+                        return Err(SearchError::new(
+                            "indexTimeout",
+                            "索引查询达到时间预算，已使用其他搜索源",
+                        ));
+                    }
+                    return result;
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(SearchError::new("unavailable", "索引查询工作通道已关闭"))
+                }
+            }
+        }
+    }
+}
+fn index_worker() -> &'static IndexWorker {
+    static WORKER: OnceLock<IndexWorker> = OnceLock::new();
+    WORKER.get_or_init(IndexWorker::default)
+}
+struct IndexReply {
+    response: SearchResponse,
+    remaining: usize,
+    result: Result<()>,
+}
+fn merge_index_reply(
+    reply: IndexReply,
+    response: &mut SearchResponse,
+    remaining: &mut usize,
+    limit: usize,
+) -> Result<()> {
+    *remaining += reply.remaining;
+    response.truncated |= reply.response.truncated;
+    response.incomplete |= reply.response.incomplete;
+    for warning in reply.response.warnings {
+        response.warn(warning.code, warning.message);
+    }
+    for hit in reply.response.items {
+        if admit(response, hit, limit) {
+            break;
+        }
+    }
+    reply.result
+}
+fn reserved_indexed(
+    worker: &IndexWorker,
+    request: &Request,
+    cancel: &AtomicBool,
+    remaining: &mut usize,
+    response: &mut SearchResponse,
+    deadline: Duration,
+    job: impl FnOnce(usize, Arc<AtomicBool>) -> Result<IndexReply> + Send + 'static,
+) -> Result<()> {
+    let reserved = if request.mode == "content" {
+        *remaining
+    } else {
+        *remaining / 2
+    };
+    *remaining -= reserved;
+    match worker.run(cancel, deadline, move |stop| job(reserved, stop)) {
+        Ok(reply) => merge_index_reply(reply, response, remaining, request.limit),
+        Err(error) => {
+            // Busy did not enqueue an operation for this request. A timed-out
+            // opaque call keeps its reservation until the request is discarded.
+            if error.code == "indexBusy" {
+                *remaining += reserved;
+            }
+            Err(error)
+        }
+    }
+}
+fn bounded_indexed(
+    request: &Request,
+    roots: &[PathBuf],
+    cancel: &AtomicBool,
+    remaining: &mut usize,
+    response: &mut SearchResponse,
+) -> Result<()> {
+    let owned = request.clone();
+    let roots = roots.to_vec();
+    reserved_indexed(
+        index_worker(),
+        request,
+        cancel,
+        remaining,
+        response,
+        Duration::from_secs(2),
+        move |reserved, stop| {
+            let mut response = SearchResponse::new("fsearch");
+            let mut remaining = reserved;
+            let result = indexed(&owned, &roots, &stop, &mut remaining, &mut response);
+            Ok(IndexReply {
+                response,
+                remaining,
+                result,
+            })
+        },
+    )
+}
 const CANDIDATE_BUDGET: usize = 10000;
 fn eligible(path: &Path, roots: &[PathBuf], request: &Request) -> bool {
     if !visible(path, request.show_hidden) {
@@ -614,8 +975,14 @@ fn indexed(
         roots.iter().map(Some).collect()
     };
     let start = Instant::now();
-    let mut source_remaining = if content { *remaining } else { *remaining / 2 };
-    for scope in scopes {
+    let mut source_remaining = *remaining;
+    original.warn_coverage(response);
+    let plans: Vec<_> = scopes
+        .into_iter()
+        .flat_map(|scope| original.engines().map(move |engine| (scope, engine)))
+        .collect();
+    let mut seen = HashSet::new();
+    for (scope, engine) in plans {
         cancelled(cancel)?;
         if start.elapsed() >= Duration::from_secs(2) {
             response.warn("timeBudget", "索引达到本轮时间预算");
@@ -625,7 +992,7 @@ fn indexed(
             response.warn("sourceBudget", "搜索源达到候选预算，结果可能不完整");
             break;
         }
-        let mut query = original.engine.clone();
+        let mut query = engine.clone();
         if !apply_format(&mut query, &request.format) {
             return Ok(());
         }
@@ -636,7 +1003,7 @@ fn indexed(
                 Some(scope.as_os_str().as_bytes().to_vec())
             };
         }
-        // Reserve half of the single request budget for the complementary system source.
+        // The bounded worker owns only this request's reserved source budget.
         query.limit = (*remaining).min(source_remaining);
         if content {
             let pattern = content_pattern(&request.query);
@@ -651,6 +1018,7 @@ fn indexed(
             let (found, _) = eng.grep(&query, &grep).map_err(|e| {
                 SearchError::new("unavailable", format!("内容搜索索引尚不可用: {e}"))
             })?;
+            super::FSEARCH_READY.store(true, Ordering::Relaxed);
             cancelled(cancel)?;
             if !found.complete || found.next.is_some() {
                 response.warn("sourceBudget", "内容索引尚有未扫描候选项");
@@ -695,12 +1063,16 @@ fn indexed(
             let found = eng
                 .search(&query)
                 .map_err(|e| SearchError::new("unavailable", format!("名称索引尚不可用: {e}")))?;
+            super::FSEARCH_READY.store(true, Ordering::Relaxed);
             cancelled(cancel)?;
             if found.len() >= query.limit {
                 response.warn("sourceBudget", "名称索引达到候选上限");
             }
             for hit in found {
                 cancelled(cancel)?;
+                if !seen.insert(hit.path.clone()) {
+                    continue;
+                }
                 if *remaining == 0 {
                     response.warn("sourceBudget", "搜索源达到候选预算，结果可能不完整");
                     break;
@@ -731,16 +1103,34 @@ fn indexed(
     }
     Ok(())
 }
-// fsearch terms may be fuzzy, negated, or satisfied by ancestors. They cannot safely
-// narrow a filename-only source. Keep Spotlight candidates broad and admit them below
-// with the actual parsed query, literal names, scope, visibility and format filters.
-fn spotlight_command(root: Option<&Path>) -> std::process::Command {
+// Only positive ordinary filename substrings can safely narrow this filename source.
+// Explicit path/regex/glob queries retain a broad fallback and full admission below.
+fn spotlight_predicate(query: &ParsedQuery) -> String {
+    let terms: Vec<_> = query
+        .spotlight_terms
+        .iter()
+        .filter_map(|term| {
+            // Control characters have no portable metadata-query literal spelling.
+            if term.chars().any(char::is_control) {
+                return None;
+            }
+            let escaped = term.replace('\\', "\\\\").replace('"', "\\\"");
+            Some(format!("kMDItemFSName == \"*{escaped}*\"cd"))
+        })
+        .collect();
+    if terms.is_empty() {
+        "kMDItemFSName == \"*\"".into()
+    } else {
+        terms.join(" && ")
+    }
+}
+fn spotlight_command(root: Option<&Path>, query: &ParsedQuery) -> std::process::Command {
     let mut cmd = std::process::Command::new("mdfind");
     cmd.arg("-0");
     if let Some(root) = root {
         cmd.arg("-onlyin").arg(root);
     }
-    cmd.arg("kMDItemFSName == \"*\"");
+    cmd.arg(spotlight_predicate(query));
     cmd
 }
 // Kill and reap even on read error/cancellation. No detached subprocess or reader thread.
@@ -772,7 +1162,7 @@ fn spotlight(
             response.warn("sourceBudget", "系统索引达到共享候选预算");
             break;
         }
-        let mut cmd = spotlight_command(root.map(PathBuf::as_path));
+        let mut cmd = spotlight_command(root.map(PathBuf::as_path), &query);
         let mut child = Child(
             cmd.stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -791,7 +1181,7 @@ fn spotlight(
         let mut oversized = false;
         loop {
             cancelled(cancel)?;
-            if start.elapsed() >= Duration::from_secs(2) {
+            if start.elapsed() >= Duration::from_secs(4) {
                 response.warn("timeBudget", "系统索引达到时间预算");
                 return Ok(());
             }
@@ -857,6 +1247,250 @@ fn spotlight(
     }
     Ok(())
 }
+// Verify only siblings of already admitted hits. This never descends into children,
+// follows an entry symlink, or reads file contents; network filesystem time is soft.
+fn verify_siblings(
+    request: &Request,
+    roots: &[PathBuf],
+    cancel: &AtomicBool,
+    remaining: &mut usize,
+    response: &mut SearchResponse,
+    budget: &Budget,
+) -> Result<()> {
+    cancelled(cancel)?;
+    let query = parse_query(&request.query, false)?;
+    if request.mode != "name" || query.spotlight_terms.is_empty() || response.truncated {
+        return Ok(());
+    }
+    let start = Instant::now();
+    let mut parents = vec![];
+    let mut seen = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    let mut parent_overflow = false;
+    for hit in &response.items {
+        cancelled(cancel)?;
+        if start.elapsed() >= budget.duration {
+            response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
+            return Ok(());
+        }
+        let Some(parent) = Path::new(&hit.path).parent() else {
+            continue;
+        };
+        if !seen_paths.insert(parent.to_path_buf()) || !eligible(parent, roots, request) {
+            continue;
+        }
+        let Ok(parent) = fs::canonicalize(parent) else {
+            continue;
+        };
+        if query
+            .engine
+            .scope
+            .as_ref()
+            .is_some_and(|scope| !parent.starts_with(Path::new(std::ffi::OsStr::from_bytes(scope))))
+        {
+            continue;
+        }
+        if seen.insert(parent.clone()) {
+            if parents.len() == 32 {
+                parent_overflow = true;
+                break;
+            }
+            parents.push(parent);
+        }
+    }
+    if parent_overflow {
+        response.warn("siblingBudget", "同级目录核验达到目录预算，结果可能不完整");
+    }
+    let mut visited = 0;
+    for parent in parents {
+        cancelled(cancel)?;
+        if start.elapsed() >= budget.duration || visited >= budget.entries {
+            response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
+            return Ok(());
+        }
+        let entries = match fs::read_dir(&parent) {
+            Ok(entries) => entries,
+            Err(e) => {
+                response.warn("readError", format!("部分同级目录无法读取: {e}"));
+                continue;
+            }
+        };
+        for entry in entries {
+            cancelled(cancel)?;
+            if start.elapsed() >= budget.duration || visited >= budget.entries {
+                response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
+                return Ok(());
+            }
+            visited += 1;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    response.warn("readError", format!("部分同级目录项无法读取: {e}"));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            // Cheap name/visibility/dedup gates precede metadata and canonicalization.
+            if !visible(&path, request.show_hidden)
+                || !query.literal_names_accept(&path)
+                || response
+                    .items
+                    .iter()
+                    .any(|hit| Path::new(&hit.path) == path)
+            {
+                continue;
+            }
+            if *remaining == 0 {
+                response.warn("sourceBudget", "同级目录核验达到共享候选预算");
+                return Ok(());
+            }
+            *remaining -= 1;
+            let md = match fs::symlink_metadata(&path) {
+                Ok(md) => md,
+                Err(e) => {
+                    response.warn("readError", format!("部分同级目录项无法读取: {e}"));
+                    continue;
+                }
+            };
+            if (!md.is_file() && !md.is_dir())
+                || !eligible(&path, roots, request)
+                || !format_ok(&path, md.is_dir(), &request.format)
+                || !query_accepts(&query, &path, &md)
+            {
+                continue;
+            }
+            if admit(response, item(&path, &md, None, None), request.limit) {
+                return Ok(());
+            }
+        }
+    }
+    cancelled(cancel)
+}
+// Each source owns half the candidate budget. Publish admitted results as soon as
+// either finishes, without making a cold opaque index delay the system source.
+fn parallel_name_sources(
+    request: &Request,
+    cancel: &AtomicBool,
+    publish: &(dyn Fn(&SearchResponse) + Sync),
+    index: impl FnOnce(usize) -> IndexReply + Send,
+    system: impl FnOnce(usize) -> IndexReply + Send,
+) -> Result<(SearchResponse, usize)> {
+    std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::channel();
+        let index_send = send.clone();
+        scope.spawn(move || {
+            let _ = index_send.send((true, index(CANDIDATE_BUDGET / 2)));
+        });
+        scope.spawn(move || {
+            let _ = send.send((false, system(CANDIDATE_BUDGET / 2)));
+        });
+        let mut response = SearchResponse::new("fsearch+spotlight");
+        response.warn("indexCoverage", "索引覆盖范围有限，结果可能不完整");
+        let mut remaining = 0;
+        let mut failures = vec![];
+        let mut sources = vec![];
+        for (is_index, reply) in receive {
+            cancelled(cancel)?;
+            match merge_index_reply(reply, &mut response, &mut remaining, request.limit) {
+                Ok(()) => sources.push(if is_index { "fsearch" } else { "spotlight" }),
+                Err(error) => {
+                    if error.code == "cancelled" {
+                        return Err(error);
+                    }
+                    response.warn(
+                        if is_index {
+                            "engineUnavailable"
+                        } else {
+                            "systemUnavailable"
+                        },
+                        error.message.clone(),
+                    );
+                    failures.push(error.message);
+                }
+            }
+            if !response.items.is_empty() {
+                let mut snapshot = response.clone();
+                snapshot.warn("sourcesPending", "正在补充其他搜索来源");
+                publish(&snapshot);
+            }
+        }
+        cancelled(cancel)?;
+        if failures.len() == 2 && response.items.is_empty() {
+            return Err(SearchError::new("unavailable", failures.join("；")));
+        }
+        response.source = sources.join("+");
+        Ok((response, remaining))
+    })
+}
+fn progressive_global_names(
+    request: &Request,
+    cancel: &AtomicBool,
+    publish: &(dyn Fn(&SearchResponse) + Sync),
+) -> Result<SearchResponse> {
+    let roots = request
+        .roots
+        .iter()
+        .map(|root| directory(root))
+        .collect::<Result<Vec<_>>>()?;
+    let index_request = request.clone();
+    let index_roots = roots.clone();
+    let (mut response, mut remaining) = parallel_name_sources(
+        request,
+        cancel,
+        publish,
+        move |reserved| match index_worker().run(cancel, Duration::from_secs(2), move |stop| {
+            let mut response = SearchResponse::new("fsearch");
+            let mut remaining = reserved;
+            let result = indexed(
+                &index_request,
+                &index_roots,
+                &stop,
+                &mut remaining,
+                &mut response,
+            );
+            Ok(IndexReply {
+                response,
+                remaining,
+                result,
+            })
+        }) {
+            Ok(reply) => reply,
+            Err(error) => IndexReply {
+                response: SearchResponse::new("fsearch"),
+                remaining: if error.code == "indexBusy" {
+                    reserved
+                } else {
+                    0
+                },
+                result: Err(error),
+            },
+        },
+        |reserved| {
+            let mut response = SearchResponse::new("spotlight");
+            let mut remaining = reserved;
+            let result = spotlight(request, &roots, cancel, &mut remaining, &mut response);
+            IndexReply {
+                response,
+                remaining,
+                result,
+            }
+        },
+    )?;
+    verify_siblings(
+        request,
+        &roots,
+        cancel,
+        &mut remaining,
+        &mut response,
+        &Budget {
+            entries: 20_000,
+            duration: Duration::from_millis(180),
+            ..Budget::default()
+        },
+    )?;
+    cancelled(cancel)?;
+    Ok(response)
+}
 fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchResponse> {
     let roots = request
         .roots
@@ -866,7 +1500,7 @@ fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchRespons
     let mut response = SearchResponse::new("fsearch");
     response.warn("indexCoverage", "索引覆盖范围有限，结果可能不完整");
     let mut remaining = CANDIDATE_BUDGET;
-    let primary = indexed(request, &roots, cancel, &mut remaining, &mut response);
+    let primary = bounded_indexed(request, &roots, cancel, &mut remaining, &mut response);
     if let Err(error) = &primary {
         if error.code == "cancelled" {
             return primary.map(|_| response);
@@ -903,6 +1537,18 @@ fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchRespons
             }
         }
     }
+    verify_siblings(
+        request,
+        &roots,
+        cancel,
+        &mut remaining,
+        &mut response,
+        &Budget {
+            entries: 20_000,
+            duration: Duration::from_millis(180),
+            ..Budget::default()
+        },
+    )?;
     cancelled(cancel)?;
     Ok(response)
 }
@@ -1041,6 +1687,59 @@ pub async fn search_query(
     request_id: String,
     format: Option<String>,
 ) -> Result<SearchResponse> {
+    execute_search(
+        query,
+        scope,
+        root,
+        show_hidden,
+        limit,
+        roots,
+        mode,
+        request_id,
+        format,
+        None,
+    )
+    .await
+}
+#[tauri::command]
+pub async fn search_query_stream(
+    query: String,
+    scope: String,
+    root: Option<String>,
+    show_hidden: bool,
+    limit: Option<usize>,
+    roots: Option<Vec<String>>,
+    mode: Option<String>,
+    request_id: String,
+    format: Option<String>,
+    on_progress: tauri::ipc::Channel<SearchResponse>,
+) -> Result<SearchResponse> {
+    execute_search(
+        query,
+        scope,
+        root,
+        show_hidden,
+        limit,
+        roots,
+        mode,
+        request_id,
+        format,
+        Some(on_progress),
+    )
+    .await
+}
+async fn execute_search(
+    query: String,
+    scope: String,
+    root: Option<String>,
+    show_hidden: bool,
+    limit: Option<usize>,
+    roots: Option<Vec<String>>,
+    mode: Option<String>,
+    request_id: String,
+    format: Option<String>,
+    on_progress: Option<tauri::ipc::Channel<SearchResponse>>,
+) -> Result<SearchResponse> {
     let active = Active::new(request_id)?;
     let request = Request {
         query: query.trim().into(),
@@ -1088,6 +1787,13 @@ pub async fn search_query(
         }
         if request.scope == "global" {
             let _slot = GlobalSlot::acquire(&active)?;
+            if request.mode == "name" {
+                if let Some(channel) = on_progress {
+                    return progressive_global_names(&request, &active.cancel, &|response| {
+                        let _ = channel.send(response.clone());
+                    });
+                }
+            }
             global_search(&request, &active.cancel)
         } else {
             let root = local_root(&request, &std::env::var("HOME").unwrap_or_default())?;
@@ -1103,6 +1809,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicU64;
     static NEXT: AtomicU64 = AtomicU64::new(1);
+    static GATE_TEST_LOCK: Mutex<()> = Mutex::new(());
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
@@ -1141,6 +1848,182 @@ mod tests {
     fn run(f: &Fixture, r: &Request, b: &Budget) -> SearchResponse {
         local_scan(r, &f.0, &AtomicBool::new(false), b).unwrap()
     }
+    #[test]
+    fn opaque_index_deadline_returns_while_provider_is_still_blocked() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            let worker = IndexWorker::default();
+            let result = worker.run(
+                &AtomicBool::new(false),
+                Duration::from_millis(20),
+                move |_| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(7)
+                },
+            );
+            done_tx.send(result.map_err(|error| error.code)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let timed = done_rx.recv_timeout(Duration::from_millis(100));
+        // Always release the controlled provider before asserting, including red.
+        release_tx.send(()).unwrap();
+        caller.join().unwrap();
+        assert_eq!(timed.unwrap(), Err("indexTimeout"));
+    }
+
+    fn wait_worker_idle(worker: &IndexWorker) {
+        let start = Instant::now();
+        while worker.busy.load(Ordering::Acquire) && start.elapsed() < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!worker.busy.load(Ordering::Acquire));
+    }
+    #[test]
+    fn opaque_worker_busy_cancel_and_status_never_wait_for_blocked_provider() {
+        let worker = Arc::new(IndexWorker::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let calls = Arc::new(AtomicU64::new(0));
+        let owned = worker.clone();
+        let cancel = stop.clone();
+        let counter = calls.clone();
+        let caller = std::thread::spawn(move || {
+            let result = owned.run(&cancel, Duration::from_secs(1), move |_| {
+                counter.fetch_add(1, Ordering::Relaxed);
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(7)
+            });
+            done_tx.send(result.map_err(|error| error.code)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        // The real app status command probes FDA off-thread but never initializes
+        // the engine or enters its opaque name/content locks.
+        let initialized = super::super::FSEARCH.get().is_some();
+        let status_start = Instant::now();
+        for _ in 0..10 {
+            let snapshot = tauri::async_runtime::block_on(super::super::fsearch_status()).unwrap();
+            assert_eq!(snapshot.entries, 0);
+        }
+        let status_elapsed = status_start.elapsed();
+        let busy = worker.run(&AtomicBool::new(false), Duration::from_secs(1), |_| Ok(99));
+        stop.store(true, Ordering::Relaxed);
+        let cancelled_result = done_rx.recv_timeout(Duration::from_millis(250));
+        release_tx.send(()).unwrap();
+        caller.join().unwrap();
+        wait_worker_idle(&worker);
+        assert_eq!(busy.unwrap_err().code, "indexBusy");
+        assert_eq!(cancelled_result.unwrap(), Err("cancelled"));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(super::super::FSEARCH.get().is_some(), initialized);
+        assert!(status_elapsed < Duration::from_secs(1));
+        assert_eq!(
+            worker
+                .run(&AtomicBool::new(false), Duration::from_secs(1), |_| Ok(11))
+                .unwrap(),
+            11
+        );
+        wait_worker_idle(&worker);
+    }
+    #[test]
+    fn opaque_deadline_releases_global_slot_and_keeps_candidate_reservation() {
+        let _serial = GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let worker = Arc::new(IndexWorker::default());
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let owned = worker.clone();
+        let caller = std::thread::spawn(move || {
+            let active = Active::new("opaque_slot_deadline".into()).unwrap();
+            let slot = GlobalSlot::acquire(&active).unwrap();
+            let mut request = req();
+            request.mode = "name".into();
+            let mut remaining = CANDIDATE_BUDGET;
+            let mut response = SearchResponse::new("fsearch");
+            let result = reserved_indexed(
+                &owned,
+                &request,
+                &active.cancel,
+                &mut remaining,
+                &mut response,
+                Duration::from_millis(20),
+                move |reserved, _| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(IndexReply {
+                        remaining: reserved,
+                        response: SearchResponse::new("fsearch"),
+                        result: Ok(()),
+                    })
+                },
+            );
+            drop(slot);
+            done_tx
+                .send((result.map_err(|error| error.code), remaining))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let result = done_rx.recv_timeout(Duration::from_millis(250));
+        let successor = Active::new("opaque_slot_successor".into()).unwrap();
+        let slot = if result.is_ok() {
+            Some(GlobalSlot::acquire(&successor).unwrap())
+        } else {
+            None
+        };
+        release_tx.send(()).unwrap();
+        caller.join().unwrap();
+        wait_worker_idle(&worker);
+        assert_eq!(result.unwrap(), (Err("indexTimeout"), CANDIDATE_BUDGET / 2));
+        assert!(slot.is_some());
+        drop(slot);
+    }
+    #[test]
+    fn completed_index_reply_refunds_unused_candidates_and_merges_bounded_results() {
+        let f = Fixture::new();
+        let path = f.file("needle.txt", "value");
+        let mut request = req();
+        request.mode = "name".into();
+        request.limit = 1;
+        let worker = IndexWorker::default();
+        let mut remaining = CANDIDATE_BUDGET;
+        let mut response = SearchResponse::new("fsearch");
+        reserved_indexed(
+            &worker,
+            &request,
+            &AtomicBool::new(false),
+            &mut remaining,
+            &mut response,
+            Duration::from_secs(1),
+            move |reserved, _| {
+                let mut response = SearchResponse::new("fsearch");
+                response.warn("sourceBudget", "partial source");
+                let md = fs::metadata(&path).unwrap();
+                response.items.push(item(&path, &md, None, None));
+                Ok(IndexReply {
+                    remaining: reserved - 3,
+                    response,
+                    result: Ok(()),
+                })
+            },
+        )
+        .unwrap();
+        wait_worker_idle(&worker);
+        assert_eq!(remaining, CANDIDATE_BUDGET - 3);
+        assert_eq!(response.items.len(), 1);
+        assert!(response.incomplete);
+        assert!(response
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "sourceBudget"));
+    }
+
     #[test]
     fn current_content_finds_unindexed_files_and_honors_smart_case() {
         let f = Fixture::new();
@@ -1398,6 +2281,235 @@ mod tests {
     }
 
     #[test]
+    fn global_plain_names_reject_subsequences_typos_and_ancestor_only_terms() {
+        for (text, path, wanted) in [
+            ("id1234567890", "/reports/ID1234567890 copy.txt", true),
+            (
+                "id1234567890",
+                "/reports/abid1c2d3e4f5a6b7c8d9e0.txt",
+                false,
+            ),
+            ("report", "/reports/reprot.txt", false),
+            ("reports invoice", "/reports/invoice.pdf", false),
+            ("reports invoice", "/elsewhere/Invoice REPORTS.pdf", true),
+            ("\"project report\"", "/elsewhere/project report.txt", true),
+            (
+                "\"project report\"",
+                "/elsewhere/project other report.txt",
+                false,
+            ),
+        ] {
+            let parsed = parse_query(text, false).unwrap();
+            // Exercise the source query before top-k, independently of final admission.
+            assert_eq!(
+                parsed
+                    .engine
+                    .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                    .is_some(),
+                wanted,
+                "source candidate {text}: {path}"
+            );
+            assert_eq!(
+                parsed.literal_names_accept(Path::new(path)),
+                wanted,
+                "literal admission {text}: {path}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn global_unicode_names_preserve_canonical_equivalence_and_case() {
+        let f = Fixture::new();
+        for text in ["café", "cafe\u{301}"] {
+            let parsed = parse_query(text, false).unwrap();
+            for name in ["café.txt", "cafe\u{301}.txt", "CAFÉ.txt", "CAFE\u{301}.txt"] {
+                let path = f.file(name, "wanted");
+                assert!(
+                    parsed.engines().any(|engine| engine
+                        .match_path(path.as_os_str().as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                        .is_some()),
+                    "source {text}: {name}"
+                );
+                assert!(
+                    query_accepts(&parsed, &path, &fs::metadata(&path).unwrap()),
+                    "{text}: {name}"
+                );
+            }
+            let decoy = f.file("cafe-other.txt", "decoy");
+            assert!(!query_accepts(
+                &parsed,
+                &decoy,
+                &fs::metadata(&decoy).unwrap()
+            ));
+        }
+    }
+    #[test]
+    fn global_adapted_literals_reject_pre_top_k_decoys_with_multiple_or_explicit_regex() {
+        for (text, wanted, decoy) in [
+            (
+                "[2026] [final]",
+                "/review/[2026] [final].txt",
+                "/review/[2026] final-0001.txt",
+            ),
+            (
+                "re:report [2026]",
+                "/review/report [2026].txt",
+                "/review/report2026-0001.txt",
+            ),
+        ] {
+            let parsed = parse_query(text, false).unwrap();
+            assert!(parsed
+                .engine
+                .match_path(wanted.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                .is_some());
+            assert!(
+                !parsed
+                    .engine
+                    .match_path(decoy.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                    .is_some(),
+                "source decoy {text}: {decoy}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_added_literal_guards_never_evict_explicit_user_tokens() {
+        for (conditions, limited) in [("[2026]", false), ("[2026] [final] [copy]", true)] {
+            let parsed = parse_query(
+                &format!(
+                    "'first 'second 'third 'fourth 'fifth 'sixth 'seventh 'eighth {conditions}"
+                ),
+                false,
+            )
+            .unwrap();
+            let wanted = format!(
+                "/review/first second third fourth fifth sixth seventh eighth {conditions}.txt"
+            );
+            let missing_first =
+                format!("/review/second third fourth fifth sixth seventh eighth {conditions}.txt");
+            assert!(parsed
+                .engine
+                .match_path(wanted.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                .is_some());
+            assert!(!parsed
+                .engine
+                .match_path(missing_first.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                .is_some());
+            assert_eq!(parsed.limited_names, limited);
+        }
+    }
+
+    #[test]
+    fn global_extra_adapted_conjunction_warns_and_keeps_exact_source_tokens() {
+        let parsed = parse_query("[2026] [final] [copy]", false).unwrap();
+        let mut response = SearchResponse::new("fsearch");
+        parsed.warn_coverage(&mut response);
+        assert!(response.incomplete);
+        assert!(response
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "queryCoverage"));
+        for n in 0..=CANDIDATE_BUDGET {
+            let path = format!("/review/[2026] [final] copy-{n}.txt");
+            assert!(!parsed.engines().any(|engine| engine
+                .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                .is_some()));
+        }
+        // Native exact tokens may inherit a matching ancestor. Final basename
+        // admission rejects that case; the specific warning keeps this limit visible.
+        let inherited = Path::new("/[copy]/[2026] [final] copy.txt");
+        assert!(!parsed.literal_names_accept(inherited));
+        let supported = parse_query("[2026] [final]", false).unwrap();
+        let mut supported_response = SearchResponse::new("fsearch");
+        supported.warn_coverage(&mut supported_response);
+        assert!(!supported_response.incomplete);
+    }
+
+    #[test]
+    fn global_unicode_plain_bracket_and_glob_names_do_not_panic_or_match_decoys() {
+        let f = Fixture::new();
+        for (text, wanted_name, decoy_name) in [
+            ("报告", "报告一.txt", "报其他告.txt"),
+            ("\"报告 [2026]\"", "报告 [2026].txt", "报告 x2026x.txt"),
+            ("*报告?.txt", "报告一.txt", "报告.txt"),
+            ("报告 !*草稿?*", "报告定稿.txt", "报告草稿一.txt"),
+        ] {
+            let wanted = f.file(wanted_name, "wanted");
+            let decoy = f.file(decoy_name, "decoy");
+            let parsed = parse_query(text, false).unwrap();
+            assert!(
+                query_accepts(&parsed, &wanted, &fs::metadata(&wanted).unwrap()),
+                "{text}"
+            );
+            assert!(
+                !query_accepts(&parsed, &decoy, &fs::metadata(&decoy).unwrap()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_literal_adapter_preserves_explicit_modifiers_paths_and_filters() {
+        for (text, path, size, wanted) in [
+            ("^report", "/review/report.txt", 3, true),
+            ("^report", "/review/other-report.txt", 3, false),
+            ("txt$", "/review/report.txt", 3, true),
+            ("txt$", "/review/report.txt.bak", 3, false),
+            ("'report", "/review/report.txt", 3, true),
+            ("!draft *.pdf", "/review/report.pdf", 3, true),
+            ("!draft *.pdf", "/draft/report.pdf", 3, false),
+            ("reports/invoice", "/review/reports/invoice.pdf", 3, true),
+            (
+                "report ext:txt kind:file size:>=2",
+                "/review/report.txt",
+                3,
+                true,
+            ),
+            (
+                "report ext:txt kind:file size:>=2",
+                "/review/report.txt",
+                1,
+                false,
+            ),
+            ("report type:doc", "/review/report.pdf", 3, true),
+            ("report type:doc", "/review/report.png", 3, false),
+            (
+                "report path:archive in:/review",
+                "/review/archive/report.txt",
+                3,
+                true,
+            ),
+            (
+                "report path:archive in:/review",
+                "/elsewhere/archive/report.txt",
+                3,
+                false,
+            ),
+            ("report mtime:<7d", "/review/report.txt", 3, false),
+        ] {
+            let parsed = parse_query(text, false).unwrap();
+            assert_eq!(
+                parsed
+                    .engine
+                    .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, size, 0)
+                    .is_some(),
+                wanted,
+                "{text}: {path}"
+            );
+        }
+        assert_eq!(
+            parse_query("report limit:4", false).unwrap().engine.limit,
+            4
+        );
+        let content = parse_query("report invoice ext:txt", true).unwrap();
+        assert!(content.engine.tokens.is_empty());
+        assert!(content.literals.is_empty());
+        assert!(content.spotlight_terms.is_empty());
+        assert_eq!(content.engine.exts, [b"txt".to_vec()]);
+    }
+
+    #[test]
     fn global_name_parser_keeps_date_and_wildcard_brackets_literal() {
         let f = Fixture::new();
         let literal = f.file("report [2026-11-01].txt", "fixture");
@@ -1462,56 +2574,9 @@ mod tests {
     }
 
     #[test]
-    fn spotlight_bracket_candidates_are_broad_and_literal_admission_rejects_decoys() {
-        let f = Fixture::new();
-        let wanted = f.file("report [2026-11-01].txt", "fixture");
-        let decoy = f.file("report x2026-11-01x.txt", "decoy");
-        for text in ["*[2026-11-01]*", "\"report [2026-11-01]\""] {
-            let command = spotlight_command(None);
-            assert_eq!(
-                command.get_args().collect::<Vec<_>>(),
-                ["-0", "kMDItemFSName == \"*\""]
-            );
-            let parsed = parse_query(text, false).unwrap();
-            assert!(query_accepts(
-                &parsed,
-                &wanted,
-                &fs::metadata(&wanted).unwrap()
-            ));
-            assert!(!query_accepts(
-                &parsed,
-                &decoy,
-                &fs::metadata(&decoy).unwrap()
-            ));
-        }
-    }
-    #[test]
-    fn spotlight_candidates_preserve_negative_modifier_ancestor_and_fuzzy_matches() {
-        for (text, path) in [
-            ("!draft *.pdf", "/review/report.pdf"),
-            ("^report", "/review/report.pdf"),
-            ("reports invoice", "/review/reports/invoice.pdf"),
-            ("rprt", "/review/report.pdf"),
-        ] {
-            let parsed = fsearch::Query::parse(text, "/review").unwrap();
-            assert!(
-                parsed
-                    .match_path(path.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
-                    .is_some(),
-                "{text}: {path}"
-            );
-            let command = spotlight_command(None);
-            assert_eq!(command.get_program(), "mdfind");
-            assert_eq!(
-                command.get_args().collect::<Vec<_>>(),
-                ["-0", "kMDItemFSName == \"*\""]
-            );
-        }
-    }
-
-    #[test]
-    fn spotlight_candidates_preserve_exact_root_argument_and_broad_predicate() {
-        let command = spotlight_command(Some(Path::new("/review roots/[2026]")));
+    fn spotlight_predicate_narrows_all_plain_terms_and_preserves_root_argument() {
+        let query = parse_query("report id1234567890 ext:txt", false).unwrap();
+        let command = spotlight_command(Some(Path::new("/review roots/[2026]")), &query);
         assert_eq!(command.get_program(), "mdfind");
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
@@ -1519,8 +2584,328 @@ mod tests {
                 "-0",
                 "-onlyin",
                 "/review roots/[2026]",
-                "kMDItemFSName == \"*\"",
+                "kMDItemFSName == \"*report*\"cd && kMDItemFSName == \"*id1234567890*\"cd",
             ]
+        );
+        // Narrowing happens at the producer, so unrelated names cannot exhaust its
+        // shared candidate budget before the first matching name is delivered.
+        assert_ne!(spotlight_predicate(&query), "kMDItemFSName == \"*\"");
+    }
+    #[test]
+    fn spotlight_predicate_escapes_literals_and_does_not_narrow_explicit_grammar() {
+        for (text, expected) in [
+            ("\"报告 [2026]\"", "kMDItemFSName == \"*报告 [2026]*\"cd"),
+            (r"report\copy", r#"kMDItemFSName == "*report\\copy*"cd"#),
+            ("!draft *.pdf", "kMDItemFSName == \"*\""),
+            ("^report", "kMDItemFSName == \"*\""),
+            ("report$", "kMDItemFSName == \"*\""),
+            ("re:report path:archive", "kMDItemFSName == \"*\""),
+            ("reports/invoice", "kMDItemFSName == \"*\""),
+            ("*report*", "kMDItemFSName == \"*\""),
+        ] {
+            assert_eq!(
+                spotlight_predicate(&parse_query(text, false).unwrap()),
+                expected,
+                "{text}"
+            );
+        }
+        // Quotes have the same grouping semantics as the locked query parser.
+        let mut parsed = parse_query("report", false).unwrap();
+        parsed.spotlight_terms = vec!["a\"b\\c".into()];
+        assert_eq!(
+            spotlight_predicate(&parsed),
+            r#"kMDItemFSName == "*a\"b\\c*"cd"#
+        );
+    }
+
+    fn sibling_request(f: &Fixture) -> (Request, Vec<PathBuf>, SearchResponse) {
+        let hit = f.file("inside/id1234567890.txt", "seed");
+        let hit = fs::canonicalize(hit).unwrap();
+        let mut request = req();
+        request.query = "id1234567890".into();
+        request.scope = "global".into();
+        request.mode = "name".into();
+        let root = fs::canonicalize(f.0.join("inside")).unwrap();
+        let mut response = SearchResponse::new("fsearch+spotlight");
+        admit(
+            &mut response,
+            item(&hit, &fs::metadata(&hit).unwrap(), None, None),
+            request.limit,
+        );
+        (request, vec![root], response)
+    }
+    #[test]
+    fn sibling_verification_finds_unindexed_copies_without_recursion_or_symlinks() {
+        let f = Fixture::new();
+        let (request, roots, mut response) = sibling_request(&f);
+        f.file("inside/id1234567890 copy 2.txt", "copy");
+        f.file("inside/subdir/id1234567890 nested.txt", "nested");
+        f.file("outside/id1234567890 outside.txt", "outside");
+        f.file("inside/.id1234567890.txt", "hidden");
+        std::os::unix::fs::symlink(
+            &roots[0].join("id1234567890.txt"),
+            roots[0].join("id1234567890 alias.txt"),
+        )
+        .unwrap();
+        let mut remaining = 100;
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut remaining,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        let mut names: Vec<_> = response.items.iter().map(|hit| hit.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["id1234567890 copy 2.txt", "id1234567890.txt"]);
+        assert!(!response.incomplete);
+        let entries = fs::read_dir(&roots[0]).unwrap().count();
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut remaining,
+            &mut response,
+            &Budget {
+                entries,
+                ..Budget::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), 2);
+        assert!(
+            !response.incomplete,
+            "one shared parent is scanned only once"
+        );
+    }
+    #[test]
+    fn sibling_verification_honors_explicit_scope_format_hidden_and_result_limit() {
+        let f = Fixture::new();
+        let (mut request, roots, seed) = sibling_request(&f);
+        f.file("inside/id1234567890.png", "wrong format");
+        f.file("inside/.id1234567890.txt", "hidden");
+        f.file("inside/id1234567890 copy.txt", "copy");
+        request.format = "document".into();
+        request.limit = 1;
+        let mut response = seed;
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut 100,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), 1);
+        assert!(response.truncated);
+        response.truncated = false;
+        request.limit = 200;
+        request.show_hidden = true;
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut 100,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), 3);
+        assert!(response.items.iter().all(|hit| !hit.path.ends_with(".png")));
+        let excluded = f.0.join("other");
+        fs::create_dir(&excluded).unwrap();
+        request.query = format!("id1234567890 in:{}", excluded.display());
+        let before = response.items.len();
+        f.file("inside/id1234567890 new copy.txt", "new copy");
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut 100,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), before);
+    }
+    #[test]
+    fn sibling_verification_bounds_parents_and_rejects_out_of_scope_seed_parents() {
+        let f = Fixture::new();
+        let mut request = req();
+        request.query = "id1234567890".into();
+        request.mode = "name".into();
+        let mut response = SearchResponse::new("fsearch");
+        for n in 0..34 {
+            let seed = f.file(&format!("inside/{n}/id1234567890.txt"), "seed");
+            let seed = fs::canonicalize(seed).unwrap();
+            f.file(&format!("inside/{n}/id1234567890 copy.txt"), "copy");
+            admit(
+                &mut response,
+                item(&seed, &fs::metadata(&seed).unwrap(), None, None),
+                200,
+            );
+        }
+        let outside = f.file("outside/id1234567890.txt", "seed");
+        let outside = fs::canonicalize(outside).unwrap();
+        f.file("outside/id1234567890 copy.txt", "copy");
+        // A stale/out-of-scope source hit must never authorize scanning its parent.
+        response.items.insert(
+            0,
+            item(&outside, &fs::metadata(&outside).unwrap(), None, None),
+        );
+        let roots = vec![fs::canonicalize(f.0.join("inside")).unwrap()];
+        verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut 200,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap();
+        assert_eq!(response.items.len(), 35 + 32);
+        assert!(response.warnings.iter().any(|w| w.code == "siblingBudget"));
+        assert!(!response
+            .items
+            .iter()
+            .any(|hit| hit.path.ends_with("outside/id1234567890 copy.txt")));
+    }
+
+    #[test]
+    fn sibling_verification_honors_cancellation_and_budgets() {
+        let f = Fixture::new();
+        let (request, roots, seed) = sibling_request(&f);
+        f.file("inside/id1234567890 copy.txt", "copy");
+        let mut response = seed;
+        let error = verify_siblings(
+            &request,
+            &roots,
+            &AtomicBool::new(true),
+            &mut 100,
+            &mut response,
+            &Budget::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        for (entries, duration, remaining, warning) in [
+            (0, Duration::from_secs(2), 100, "siblingBudget"),
+            (100, Duration::ZERO, 100, "siblingBudget"),
+            (100, Duration::from_secs(2), 0, "sourceBudget"),
+        ] {
+            response.warnings.clear();
+            verify_siblings(
+                &request,
+                &roots,
+                &AtomicBool::new(false),
+                &mut { remaining },
+                &mut response,
+                &Budget {
+                    entries,
+                    duration,
+                    ..Budget::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(response.items.len(), 1);
+            assert!(response.warnings.iter().any(|w| w.code == warning));
+        }
+    }
+
+    #[test]
+    fn fast_system_results_publish_before_a_cold_index_finishes_without_losing_either_source() {
+        let fixture = Fixture::new();
+        let a = fixture.file("RCS-index.txt", "index");
+        let b = fixture.file("RCS-system.txt", "system");
+        let mut request = req();
+        request.mode = "name".into();
+        let (release, wait) = std::sync::mpsc::sync_channel(1);
+        let published = Mutex::new(Vec::new());
+        let cancel = AtomicBool::new(false);
+        let (response, remaining) = parallel_name_sources(
+            &request,
+            &cancel,
+            &|snapshot| {
+                published.lock().unwrap().push(
+                    snapshot
+                        .items
+                        .iter()
+                        .map(|i| i.name.clone())
+                        .collect::<Vec<_>>(),
+                );
+                let _ = release.try_send(());
+            },
+            move |budget| {
+                // The slower index cannot finish until the system snapshot is delivered.
+                wait.recv_timeout(Duration::from_secs(2))
+                    .expect("system publication must not wait for index");
+                let mut response = SearchResponse::new("fsearch");
+                response
+                    .items
+                    .push(item(&a, &fs::metadata(&a).unwrap(), None, None));
+                IndexReply {
+                    response,
+                    remaining: budget - 1,
+                    result: Ok(()),
+                }
+            },
+            |budget| {
+                let mut response = SearchResponse::new("spotlight");
+                response
+                    .items
+                    .push(item(&b, &fs::metadata(&b).unwrap(), None, None));
+                IndexReply {
+                    response,
+                    remaining: budget - 1,
+                    result: Ok(()),
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(published.lock().unwrap()[0], vec!["RCS-system.txt"]);
+        assert_eq!(response.items.len(), 2);
+        assert_eq!(remaining, CANDIDATE_BUDGET - 2);
+        assert!(!response.warnings.iter().any(|w| w.code == "sourcesPending"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    #[ignore = "manual system index probe; set BENTO_QA_SEARCH and optionally BENTO_QA_ROOTS"]
+    fn manual_global_name_search_probe() {
+        let mut request = req();
+        request.query = std::env::var("BENTO_QA_SEARCH").expect("set BENTO_QA_SEARCH");
+        request.scope = "global".into();
+        request.mode = "name".into();
+        request.limit = 1000;
+        request.roots = std::env::var_os("BENTO_QA_ROOTS")
+            .map(|roots| {
+                std::env::split_paths(&roots)
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let start = Instant::now();
+        let response = if std::env::var_os("BENTO_QA_PROGRESSIVE").is_some() {
+            let first = AtomicBool::new(false);
+            progressive_global_names(&request, &AtomicBool::new(false), &|snapshot| {
+                if !first.swap(true, Ordering::Relaxed) {
+                    println!(
+                        "BENTO_QA_FIRST_MS={} ITEMS={}",
+                        start.elapsed().as_millis(),
+                        snapshot.items.len()
+                    );
+                }
+            })
+            .unwrap()
+        } else {
+            global_search(&request, &AtomicBool::new(false)).unwrap()
+        };
+        println!("BENTO_QA_TOTAL_MS={}", start.elapsed().as_millis());
+        println!(
+            "BENTO_QA_RESPONSE={}",
+            serde_json::to_string(&response).unwrap()
         );
     }
 
@@ -1556,6 +2941,9 @@ mod tests {
     }
     #[test]
     fn global_slot_coalesces_latest_without_parallel_execution() {
+        let _serial = GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let first = Active::new("gate_first".into()).unwrap();
         let held = GlobalSlot::acquire(&first).unwrap();
         let spawn = |id: &str| {

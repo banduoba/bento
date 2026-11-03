@@ -30,3 +30,16 @@ test('browser api uses typed response and rejects missing pane directory and bad
   await assert.rejects(api.searchQuery('x','pane','/missing',false,[],'name','demo_2'),e=>e.code==='invalidRoot')
   await assert.rejects(api.searchQuery('re:[','global',null,false,[],'name','demo_3'),e=>e.code==='invalidQuery')
 })
+
+test('streaming adapter wires one request-owned channel and keeps legacy calls unchanged', async () => {
+  const channel = {}, calls = [], snapshots = []
+  const adapter = searchApi(async (command, args) => { calls.push([command, args]); return { items: [] } }, () => channel)
+  await adapter.searchQuery('RCS','global',null,false,[],'name','progress_1','all',r=>snapshots.push(r))
+  assert.equal(calls[0][0], 'search_query_stream')
+  assert.equal(calls[0][1].onProgress, channel)
+  channel.onmessage({ items: [{ path:'/work/RCS.txt' }] })
+  assert.equal(snapshots[0].items[0].path, '/work/RCS.txt')
+  await adapter.searchQuery('RCS','global',null,false,[],'name','legacy_1')
+  assert.equal(calls[1][0], 'search_query')
+  assert.ok(!('onProgress' in calls[1][1]))
+})
