@@ -88,7 +88,8 @@ export default function AboutSection({ analyticsEnabled, onAnalyticsEnabledChang
     <section id="settings-about" className="settings-group" aria-labelledby="settings-about-title">
       <h2 id="settings-about-title">关于</h2>
       <div className="settings-card">
-        <div className="settings-option">
+        <div className="settings-option settings-about-product">
+          <img src="/bento-icon.png" width="52" height="52" alt="" draggable={false} />
           <div className="settings-label">
             <div className="settings-option-title">Bento</div>
             <p>轻量多窗格文件管理器，为 macOS 而设计。</p>

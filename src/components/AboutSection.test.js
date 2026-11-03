@@ -62,7 +62,7 @@ async function mount(t, { native = true, getVersion = async () => '0.2.1', fetch
   const unmount = async () => { if (mounted) { await act(async () => renderer.unmount()); mounted = false } }
   t.after(async () => { await unmount(); for (const key of keys) { if (previous[key] === undefined) delete globalThis[key]; else globalThis[key] = previous[key] } })
   const text = () => JSON.stringify(renderer.toJSON())
-  const button = label => renderer.root.findAllByType('button').find(node => node.children.join('') === label)
+  const button = label => renderer.root.findAllByType('button').find(node => (node.props['aria-label'] || node.children.join('')) === label)
   const click = async label => { assert.ok(button(label), `button ${label} exists`); await act(async () => { button(label).props.onClick() }) }
   return { requests, opened, button, click, text, unmount,
     get closed() { return closed }, get analyticsEnabled() { return analyticsEnabled },

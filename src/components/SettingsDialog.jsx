@@ -3,8 +3,19 @@ import { open, save } from '@tauri-apps/plugin-dialog'
 import { api, hasTauri } from '../api'
 import AboutSection from './AboutSection'
 import ShortcutSettings from './ShortcutSettings'
+import SettingsIcon from './SettingsIcon'
+import { IconLayout1, IconLayout2, IconLayout4 } from '../icons'
 import { shortcutLabel } from '../keyBindings'
 import useDialogFocus, { isComposingKey } from './useDialogFocus'
+
+const SECTIONS = [
+  { id: 'search', label: '搜索', description: '选择搜索范围，让结果更贴近你正在处理的文件。' },
+  { id: 'general', label: '通用', description: '调整文件显示、目录刷新和日常操作方式。' },
+  { id: 'shortcuts', label: '快捷键', description: '为常用操作设置顺手的按键，也可以从预设开始。' },
+  { id: 'backup', label: '备份', description: '保存偏好设置，或从已有备份中恢复。' },
+  { id: 'permission', label: '权限', description: '管理 Bento 访问文件和搜索受保护位置所需的权限。' },
+  { id: 'about', label: '关于', description: '版本、更新和反馈，以及你的使用统计偏好。' },
+]
 
 /**
  * 设置面板：搜索范围与通用偏好
@@ -41,6 +52,7 @@ export default function SettingsDialog({
   }, [visible, onClose])
 
   if (!visible) return null
+  const currentSection = SECTIONS.find(item => item.id === section)
 
   // 系统目录选择器
   const pick = async () => {
@@ -81,21 +93,32 @@ export default function SettingsDialog({
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
+    <div className="modal-backdrop settings-backdrop" onMouseDown={onClose}>
       <div ref={dialogRef} tabIndex={-1} className="modal settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title"
         onMouseDown={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
-        <div className="modal-title" id="settings-title">设置</div>
         <div className="settings-body">
-          <nav className="settings-nav" aria-label="设置分组">
-            {[['search', '搜索'], ['general', '通用'], ['shortcuts', '快捷键'], ['backup', '备份'], ['permission', '权限'], ['about', '关于']].map(([id, label]) => (
-              <button key={id} className={`settings-nav-item${section === id ? ' on' : ''}`}
-                aria-current={section === id ? 'page' : undefined} aria-controls={`settings-${id}`}
-                onClick={() => setSection(id)}>
-                {label}
-              </button>
-            ))}
-          </nav>
-          <div className="settings-content">
+          <aside className="settings-sidebar">
+            <div className="settings-brand">
+              <img src="/bento-icon.png" width="34" height="34" alt="" draggable={false} />
+              <div><strong>Bento</strong><span id="settings-title">设置</span></div>
+            </div>
+            <nav className="settings-nav" aria-label="设置分组">
+              {SECTIONS.map(({ id, label }) => (
+                <button key={id} type="button" className={`settings-nav-item${section === id ? ' on' : ''}`}
+                  aria-label={label} aria-current={section === id ? 'page' : undefined} aria-controls={`settings-${id}`}
+                  onClick={() => setSection(id)}>
+                  <SettingsIcon kind={id} />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </nav>
+          </aside>
+          <div className="settings-main">
+            <header className="settings-header">
+              <h2 className="settings-section-title">{currentSection.label}</h2>
+              <p>{currentSection.description}</p>
+            </header>
+          <div key={section} className="settings-content">
             {section === 'shortcuts' && <ShortcutSettings value={shortcuts} onChange={onShortcutsChange} />}
             {section === 'about' && <AboutSection analyticsPersistenceError={analyticsPersistenceError} analyticsEnabled={analyticsEnabled} onAnalyticsEnabledChange={onAnalyticsEnabledChange} />}
             {section === 'backup' && <section id="settings-backup" className="settings-group" aria-labelledby="settings-backup-title" aria-busy={backupBusy}>
@@ -134,7 +157,7 @@ export default function SettingsDialog({
                   </button>
                 </div>
                 <div className="settings-list">
-                  {searchPaths.length === 0 && <div className="settings-empty">全部位置</div>}
+                  {searchPaths.length === 0 && <div className="settings-empty"><SettingsIcon kind="search" size={23} /><div><strong>全部已索引位置</strong><span>添加文件夹，可缩小全局搜索的范围。</span></div></div>}
                   {searchPaths.map((p) => (
                     <div key={p} className="settings-row">
                       <span className="settings-path" title={p}>{p}</span>
@@ -153,6 +176,7 @@ export default function SettingsDialog({
             </section>}
             {section === 'general' && <section id="settings-general" className="settings-group" aria-labelledby="settings-general-title">
               <h2 id="settings-general-title">通用</h2>
+              <h3 className="settings-group-label">文件与目录</h3>
               <div className="settings-card">
                 <div className="settings-option">
                   <div className="settings-label">
@@ -176,6 +200,9 @@ export default function SettingsDialog({
                     <span />
                   </button>
                 </div>
+              </div>
+              <h3 className="settings-group-label">操作习惯</h3>
+              <div className="settings-card">
                 <div className="settings-option">
                   <div className="settings-label">
                     <div className="settings-option-title" id="settings-enter-title">回车键</div>
@@ -198,10 +225,10 @@ export default function SettingsDialog({
                     <p>立即应用，自动保存当前工作区布局。</p>
                   </div>
                   <div className="settings-segments" role="group" aria-labelledby="settings-layout-title">
-                    {[['1', '1', '单窗格'], ['2c', '2×1', '左右双窗格'], ['4', '2×2', '四窗格']].map(([id, label, title]) => (
+                    {[['1', '单窗格', '单窗格', IconLayout1], ['2c', '双窗格', '左右双窗格', IconLayout2], ['4', '四窗格', '四窗格', IconLayout4]].map(([id, label, title, LayoutIcon]) => (
                       <button key={id} className="seg-btn" aria-pressed={layout === id} title={title}
-                        aria-label={`${label}，${title}`} onClick={() => onLayoutChange(id)}>
-                        {label}
+                        aria-label={`${id === '1' ? '1' : id === '2c' ? '2×1' : '2×2'}，${title}`} onClick={() => onLayoutChange(id)}>
+                        <LayoutIcon size={14} /><span>{label}</span>
                       </button>
                     ))}
                   </div>
@@ -233,12 +260,12 @@ export default function SettingsDialog({
                 ) : <p className="settings-hint">请在 Bento 桌面应用中查看并管理完全磁盘访问权限。</p>}
               </section>
             )}
+            </div>
+            <div className="modal-footer settings-footer">
+              <span className="settings-save-note">偏好设置会在更改后自动保存</span>
+              <button className="btn primary" onClick={onClose} autoFocus>完成</button>
+            </div>
           </div>
-        </div>
-        <div className="modal-footer settings-footer">
-          <button className="btn primary" onClick={onClose} autoFocus>
-            完成
-          </button>
         </div>
       </div>
     </div>
