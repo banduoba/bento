@@ -776,8 +776,10 @@ export default function App() {
         highlightRow(plan?.el || null, plan?.text)
         // Track any list row, including files, so entering an expanded subtree
         // keeps its parents open even when the actual drop target is the pane.
-        const row = plan?.hit?.closest('.row[data-path]')
-        const pane = plan?.hit?.closest('.panes > .pane')
+        const hit = position && Number.isFinite(position.x) && Number.isFinite(position.y)
+          ? document.elementFromPoint(position.x, position.y) : null
+        const row = hit?.closest('.row[data-path]')
+        const pane = hit?.closest('.panes > .pane')
         const hover = dragPaths.length && pane
           ? { tabId: pane.dataset.tabId, root: paneDestination(pane), path: row?.dataset.path || null }
           : { tabId: null, root: null, path: null }

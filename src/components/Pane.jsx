@@ -105,6 +105,7 @@ export default function Pane({
   const [copyToast, setCopyToast] = useState(null) // { path, x, y, placeLeft } 锚定按钮的提示条
   const [expandedDirs, setExpandedDirs] = useState(() => new Set()) // 树形展开的文件夹
   const springOwned = useRef(new Set()) // only folders opened by the current drag
+  const springCloseTimers = useRef(new Map())
   const [kidsVersion, setKidsVersion] = useState(0)
   const [activity, setActivity] = useState({}) // dirPath -> 递归活动时间(ms)，后台懒加载
   const kidsRef = useRef({}) // dirPath -> 子条目数组（null=载入中）
@@ -642,6 +643,8 @@ export default function Pane({
     previousVisibility.current = { tabId: tab.id, path: tab.path, showHidden: cfg.showHidden }
     setExpandedDirs(new Set())
     springOwned.current.clear()
+    springCloseTimers.current.forEach(clearTimeout)
+    springCloseTimers.current.clear()
     kidsRef.current = {}
     kidsLoadsRef.current = {}
   }, [tab.id, tab.path, cfg.showHidden])
@@ -827,6 +830,8 @@ export default function Pane({
     e.stopPropagation()
     const p = entry.path
     springOwned.current.delete(p) // explicit clicks take ownership away from the drag
+    clearTimeout(springCloseTimers.current.get(p))
+    springCloseTimers.current.delete(p)
     setExpandedDirs((prev) => {
       const next = new Set(prev)
       if (next.has(p)) next.delete(p)
@@ -1084,24 +1089,37 @@ export default function Pane({
     if (kidsRef.current[path] === undefined) loadKids(path)
   }, [springOpen, tab.id, tab.path, viewMode, renamingHere, rows, expandedDirs])
 
+  useEffect(() => () => {
+    springCloseTimers.current.forEach(clearTimeout)
+    springCloseTimers.current.clear()
+  }, [])
   useEffect(() => {
     const hoverPath = viewMode === 'list' && springHover?.tabId === tab.id && springHover?.root === tab.path
       ? springHover.path : null
-    const leaving = [...springOwned.current].filter(path => !hoverPath || (hoverPath !== path && !hoverPath.startsWith(path + '/')))
-    if (!leaving.length) return
-    const close = () => {
-      const owned = leaving.filter(path => springOwned.current.delete(path))
-      if (!owned.length) return
-      setExpandedDirs(previous => {
-        const next = new Set(previous)
-        owned.forEach(path => next.delete(path))
-        return next
-      })
+    for (const path of springOwned.current) {
+      const staysInside = hoverPath && (hoverPath === path || hoverPath.startsWith(path + '/'))
+      if (staysInside) {
+        clearTimeout(springCloseTimers.current.get(path))
+        springCloseTimers.current.delete(path)
+        continue
+      }
+      const close = () => {
+        springCloseTimers.current.delete(path)
+        if (!springOwned.current.delete(path)) return
+        setExpandedDirs(previous => {
+          const next = new Set(previous)
+          next.delete(path)
+          return next
+        })
+      }
+      // An existing leave deadline survives movement across other rows.
+      if (!springHover || viewMode !== 'list') {
+        clearTimeout(springCloseTimers.current.get(path))
+        close()
+      } else if (!springCloseTimers.current.has(path)) {
+        springCloseTimers.current.set(path, setTimeout(close, 250))
+      }
     }
-    // Brief tolerance while crossing row boundaries; end/cancel closes immediately.
-    if (!springHover || viewMode !== 'list') { close(); return }
-    const timer = setTimeout(close, 250)
-    return () => clearTimeout(timer)
   }, [springHover?.tabId, springHover?.root, springHover?.path, tab.id, tab.path, viewMode])
 
   useEffect(() => {

@@ -6,13 +6,13 @@ async function mount(t) {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const h = await mountApp(t, { transfer: async () => [] })
   const tabId = h.panes[0].props.pane.tabs[0].id
-  const pane = { dataset: { tabId }, closest: () => pane }
+  const pane = { dataset: { tabId }, closest: () => pane, classList:{add(){},remove(){},contains:c=>c==='pane'},getBoundingClientRect:()=>({left:0,top:0,width:180,height:300}) }
   const row = {
-    dataset: { path: '/home/destination', springFolder: '/home/destination' }, isConnected: true,
+    dataset: { path: '/home/destination', springFolder: '/home/destination', dir:'1' }, isConnected: true,
     classList: { add() {}, remove() {}, contains: c => c === 'row' },
     getBoundingClientRect: () => ({ left:0,top:30,width:180,height:21 }),
     querySelector: () => ({ textContent:'destination' }),
-    closest: selector => selector.includes('.sb-item') ? null : selector.includes('.panes') ? pane : selector.includes('[data-dir]') || selector === '.row[data-path]' ? row : null,
+    closest: selector => selector.includes('.sb-item') ? null : selector.includes('.panes') ? pane : selector.includes('[data-dir]') ? (row.dataset.dir ? row : null) : selector === '.row[data-path]' ? row : null,
   }
   let hit = row
   document.elementFromPoint = () => hit
@@ -83,6 +83,7 @@ test('native hover follows ordinary child rows and ends on cancel without reopen
  await h.run(()=>h.drop(payload('enter')));await advance(650)
  row.dataset.path='/home/destination/file.txt'
  row.dataset.springFolder=undefined
+ row.dataset.dir=undefined
  await h.run(()=>h.drop(payload('over')))
  assert.equal(h.panes[0].props.springHover.path,'/home/destination/file.txt')
  assert.equal(h.panes[1].props.springHover,null)
@@ -91,4 +92,12 @@ test('native hover follows ordinary child rows and ends on cancel without reopen
  assert.equal(h.panes[0].props.springOpen,null)
  await advance(1000)
  assert.equal(h.panes[0].props.springOpen,null)
+})
+
+test('same-pane source keeps drag-opened ancestry while hovering a file whose pane-root drop would be a no-op', async t => {
+ const {h,row,payload,advance}=await mount(t)
+ await h.run(()=>h.drop({...payload('enter'),paths:['/home/source.txt']}));await advance(650)
+ row.dataset.path='/home/destination/file.txt';row.dataset.dir=undefined;row.dataset.springFolder=undefined
+ await h.run(()=>h.drop(payload('over')))
+ assert.equal(h.panes[0].props.springHover.path,'/home/destination/file.txt')
 })
