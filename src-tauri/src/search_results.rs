@@ -398,7 +398,7 @@ fn parse_query(query: &str, content: bool) -> Result<ParsedQuery> {
                         .filter(|run| run.contains(['[', ']']))
                     {
                         if !unicode_case(run) {
-                            exact[i].push(format!("'{run}"));
+                            exact[i].push((source_patterns.len() - 1, format!("'{run}")));
                         }
                     }
                 }
@@ -428,17 +428,6 @@ fn parse_query(query: &str, content: bool) -> Result<ParsedQuery> {
             break;
         }
         let mut engine = fsearch::Query::parse(&inputs[i], &home).map_err(invalid)?;
-        for token in &exact[i] {
-            engine.push_token(token);
-            // Query.alt replaces only tokens. Preserve every appended constraint
-            // there too, otherwise a normalized alternate could drop the guard.
-            if let Some(alt) = &mut engine.alt {
-                let mut other = fsearch::Query::default();
-                other.tokens = std::mem::take(alt);
-                other.push_token(token);
-                *alt = other.tokens;
-            }
-        }
         let mut assigned = 0;
         for (name, path) in &source_patterns {
             if engine.name_re.is_none() {
@@ -449,6 +438,28 @@ fn parse_query(query: &str, content: bool) -> Result<ParsedQuery> {
                 break;
             }
             assigned += 1;
+        }
+        for (pattern, token) in &exact[i] {
+            // Native basename regexes already enforce these conditions. The locked
+            // parser evicts its first positive token beyond eight: an internal
+            // fallback guard must never replace an explicit user constraint.
+            if *pattern < assigned
+                || engine.tokens.iter().filter(|t| !t.negate).count() >= 8
+                || engine
+                    .alt
+                    .as_ref()
+                    .is_some_and(|alt| alt.iter().filter(|t| !t.negate).count() >= 8)
+            {
+                continue;
+            }
+            engine.push_token(token);
+            // Query.alt replaces only tokens; retain appended fallback guards too.
+            if let Some(alt) = &mut engine.alt {
+                let mut other = fsearch::Query::default();
+                other.tokens = std::mem::take(alt);
+                other.push_token(token);
+                *alt = other.tokens;
+            }
         }
         limited_names |= assigned < source_patterns.len();
         engines.push(engine);
@@ -1814,6 +1825,33 @@ mod tests {
                     .is_some(),
                 "source decoy {text}: {decoy}"
             );
+        }
+    }
+
+    #[test]
+    fn global_added_literal_guards_never_evict_explicit_user_tokens() {
+        for (conditions, limited) in [("[2026]", false), ("[2026] [final] [copy]", true)] {
+            let parsed = parse_query(
+                &format!(
+                    "'first 'second 'third 'fourth 'fifth 'sixth 'seventh 'eighth {conditions}"
+                ),
+                false,
+            )
+            .unwrap();
+            let wanted = format!(
+                "/review/first second third fourth fifth sixth seventh eighth {conditions}.txt"
+            );
+            let missing_first =
+                format!("/review/second third fourth fifth sixth seventh eighth {conditions}.txt");
+            assert!(parsed
+                .engine
+                .match_path(wanted.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                .is_some());
+            assert!(!parsed
+                .engine
+                .match_path(missing_first.as_bytes(), fsearch::walk::KIND_FILE, 1, 0)
+                .is_some());
+            assert_eq!(parsed.limited_names, limited);
         }
     }
 
