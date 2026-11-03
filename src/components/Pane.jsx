@@ -52,6 +52,8 @@ export default function Pane({
   flash,
   reveal,
   onRevealDone,
+  springOpen = null,
+  springHover = null,
   onFocus,
   onNav,
   onBack,
@@ -102,6 +104,8 @@ export default function Pane({
   const [copiedPath, setCopiedPath] = useState(null) // 行内复制路径反馈
   const [copyToast, setCopyToast] = useState(null) // { path, x, y, placeLeft } 锚定按钮的提示条
   const [expandedDirs, setExpandedDirs] = useState(() => new Set()) // 树形展开的文件夹
+  const springOwned = useRef(new Set()) // only folders opened by the current drag
+  const springCloseTimers = useRef(new Map())
   const [kidsVersion, setKidsVersion] = useState(0)
   const [activity, setActivity] = useState({}) // dirPath -> 递归活动时间(ms)，后台懒加载
   const kidsRef = useRef({}) // dirPath -> 子条目数组（null=载入中）
@@ -638,6 +642,9 @@ export default function Pane({
     }
     previousVisibility.current = { tabId: tab.id, path: tab.path, showHidden: cfg.showHidden }
     setExpandedDirs(new Set())
+    springOwned.current.clear()
+    springCloseTimers.current.forEach(clearTimeout)
+    springCloseTimers.current.clear()
     kidsRef.current = {}
     kidsLoadsRef.current = {}
   }, [tab.id, tab.path, cfg.showHidden])
@@ -822,6 +829,9 @@ export default function Pane({
   const toggleExpand = (e, entry) => {
     e.stopPropagation()
     const p = entry.path
+    springOwned.current.delete(p) // explicit clicks take ownership away from the drag
+    clearTimeout(springCloseTimers.current.get(p))
+    springCloseTimers.current.delete(p)
     setExpandedDirs((prev) => {
       const next = new Set(prev)
       if (next.has(p)) next.delete(p)
@@ -1065,6 +1075,53 @@ export default function Pane({
   }
 
   const renamingHere = renaming && renaming.tabId === tab.id ? renaming : null
+  const appliedSpring = useRef(null)
+  useEffect(() => {
+    if (!springOpen || appliedSpring.current === springOpen) return
+    appliedSpring.current = springOpen
+    if (springOpen.tabId !== tab.id || springOpen.root !== tab.path || viewMode !== 'list' || renamingHere) return
+    const { element, path } = springOpen
+    if (!element?.isConnected || element.dataset?.path !== path || element.dataset?.springFolder !== path) return
+    const entry = rows.find(row => row.path === path)
+    if (!entry?.is_dir || entry.isPseudo || expandedDirs.has(path)) return
+    springOwned.current.add(path)
+    setExpandedDirs(previous => new Set(previous).add(path))
+    if (kidsRef.current[path] === undefined) loadKids(path)
+  }, [springOpen, tab.id, tab.path, viewMode, renamingHere, rows, expandedDirs])
+
+  useEffect(() => () => {
+    springCloseTimers.current.forEach(clearTimeout)
+    springCloseTimers.current.clear()
+  }, [])
+  useEffect(() => {
+    const hoverPath = viewMode === 'list' && springHover?.tabId === tab.id && springHover?.root === tab.path
+      ? springHover.path : null
+    for (const path of springOwned.current) {
+      const staysInside = hoverPath && (hoverPath === path || hoverPath.startsWith(path + '/'))
+      if (staysInside) {
+        clearTimeout(springCloseTimers.current.get(path))
+        springCloseTimers.current.delete(path)
+        continue
+      }
+      const close = () => {
+        springCloseTimers.current.delete(path)
+        if (!springOwned.current.delete(path)) return
+        setExpandedDirs(previous => {
+          const next = new Set(previous)
+          next.delete(path)
+          return next
+        })
+      }
+      // An existing leave deadline survives movement across other rows.
+      if (!springHover || viewMode !== 'list') {
+        clearTimeout(springCloseTimers.current.get(path))
+        close()
+      } else if (!springCloseTimers.current.has(path)) {
+        springCloseTimers.current.set(path, setTimeout(close, 250))
+      }
+    }
+  }, [springHover?.tabId, springHover?.root, springHover?.path, tab.id, tab.path, viewMode])
+
   useEffect(() => {
     if (!renamingHere || !marqueeRef.current) return
     window.removeEventListener('mousemove', marqueeRef.current.onMove)
@@ -1575,6 +1632,7 @@ export default function Pane({
                   key={vi.key}
                   data-path={entry.isPseudo ? undefined : entry.path}
                   data-dir={entry.is_dir && !entry.isPseudo ? '1' : undefined}
+                  data-spring-folder={entry.is_dir && !entry.isPseudo && !isRenaming && !expandedDirs.has(entry.path) ? entry.path : undefined}
                   className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${focused && kbdCurrent === entry.path ? ' kbd-current' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${
                     dropTarget === entry.path ? ' drop-target' : ''
                   }`}

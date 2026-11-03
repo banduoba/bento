@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added Copy Names in selection and Edit menus, with Shift-Command-C for newline-separated names; native file copy/paste and Option-Command-C path copying remain unchanged.
+- Added delayed drag-hover expansion for collapsed folders in list view, with cancellation and stale-target checks. Drag-opened folders collapse after leaving their subtree or ending/cancelling the drag, while manual expansions remain open.
 
 ## 0.4.0 — 2026-11-03
 

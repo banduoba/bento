@@ -16,6 +16,7 @@ import { createQuickLookNavigation } from './quickLookNavigation'
 import { clearCut, getClip, retainCut, setClip, subscribeClip } from './clipboard'
 import { basename, parentPath, labelOf, copyText, folderTitle, makeMatcher } from './format'
 import { dragState, isInternalDrag } from './nativeDrag'
+import { createSpringLoader } from './springFolders'
 import { normalizeCols, normalizeVis, COL_LABELS } from './columns'
 import {
   applyToAllFolders,
@@ -160,6 +161,8 @@ export default function App() {
   const revealReqRef = useRef(null)
   revealReqRef.current = revealReq
   const transferRevealSequence = useRef(0)
+  const [springOpen, setSpringOpen] = useState(null)
+  const [springHover, setSpringHover] = useState(null)
   const [hoverTip, setHoverTip] = useState(null) // { x, y, text } 原生拖拽目标提示
   const undoStackRef = useRef([]) // identified inverse callbacks, kept in memory only
   const [undoRevision, setUndoRevision] = useState(0)
@@ -664,6 +667,11 @@ export default function App() {
     let highlightedRow = null
     let live = true
     const doneTimers = new Map()
+    const spring = createSpringLoader()
+    const cancelSpring = () => { spring.cancel(); setSpringOpen(null); setSpringHover(null) }
+    const cancelKey = e => { if (e.key === 'Escape') cancelSpring() }
+    window.addEventListener('keydown', cancelKey, true)
+    window.addEventListener('blur', cancelSpring)
     const paneDestination = (el) => {
       const paneEl = el.closest('.pane')
       if (!paneEl) return null
@@ -721,6 +729,7 @@ export default function App() {
       return {
         kind: row ? 'folder' : 'pane',
         tabId: paneEl.dataset.tabId,
+        root: base,
         el: row || paneEl,
         dest,
         mode,
@@ -757,6 +766,7 @@ export default function App() {
         )
       }
       if (type === 'leave' || type === 'cancelled') {
+        cancelSpring()
         highlightRow(null)
         return
       }
@@ -764,9 +774,28 @@ export default function App() {
       if (type === 'enter' || type === 'over') {
         const plan = planDrop(position, dragPaths)
         highlightRow(plan?.el || null, plan?.text)
+        // Track any list row, including files, so entering an expanded subtree
+        // keeps its parents open even when the actual drop target is the pane.
+        const hit = position && Number.isFinite(position.x) && Number.isFinite(position.y)
+          ? document.elementFromPoint(position.x, position.y) : null
+        const row = hit?.closest('.row[data-path]')
+        const pane = hit?.closest('.panes > .pane')
+        const hover = dragPaths.length && pane
+          ? { tabId: pane.dataset.tabId, root: paneDestination(pane), path: row?.dataset.path || null }
+          : { tabId: null, root: null, path: null }
+        setSpringHover(current => current?.tabId === hover.tabId && current?.root === hover.root && current?.path === hover.path ? current : hover)
+        const canSpring = dragPaths.length && plan?.kind === 'folder' && plan.el.dataset.springFolder === plan.dest
+        spring.hover(canSpring ? `${plan.tabId}\0${plan.dest}` : null, () => {
+          if (!live || !plan.el.isConnected) return false
+          const current = planDrop(position, dragPaths)
+          return current?.el === plan.el && current.tabId === plan.tabId && current.root === plan.root
+            && current.dest === plan.dest && current.el.dataset.springFolder === plan.dest
+        }, () => setSpringOpen({ tabId: plan.tabId, path: plan.dest, root: plan.root, element: plan.el }))
         return
       }
       if (type !== 'drop') return
+      const dropPlan = planDrop(position, paths?.length ? paths : dragPaths)
+      cancelSpring()
       highlightRow(null)
       const dropped = paths?.length ? paths : dragPaths
       dragPaths = []
@@ -776,7 +805,7 @@ export default function App() {
       const now = Date.now()
       if (sig === lastDrop.sig && now - lastDrop.t < 800) return
       lastDrop = { sig, t: now }
-      const plan = planDrop(position, dropped)
+      const plan = dropPlan
       if (!plan) return
       // 命中侧边栏条目 → 添加书签
       if (plan.kind === 'bookmark') {
@@ -795,6 +824,9 @@ export default function App() {
     })
     return () => {
       live = false
+      spring.cancel()
+      window.removeEventListener('keydown', cancelKey, true)
+      window.removeEventListener('blur', cancelSpring)
       highlightRow(null)
       for (const [row, timer] of doneTimers) {
         clearTimeout(timer)
@@ -2206,6 +2238,8 @@ export default function App() {
               selection={sel[p.tabs[p.active]?.id] || EMPTY_SELECTION}
               filter={filters[p.tabs[p.active]?.id] || ''}
               renaming={renaming}
+              springOpen={springOpen?.tabId === p.tabs[p.active]?.id ? springOpen : null}
+              springHover={springHover?.tabId === p.tabs[p.active]?.id ? springHover : null}
               tick={rootRefreshKey(tick, directoryVersions, directoryKeyFor(p.tabs[p.active]?.path), manualRefreshTicks[p.tabs[p.active]?.id] || 0)}
               directoryVersions={directoryVersions}
               directoryKeyFor={directoryKeyFor}
