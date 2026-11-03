@@ -12,7 +12,7 @@ async function mount(t) {
     classList: { add() {}, remove() {}, contains: c => c === 'row' },
     getBoundingClientRect: () => ({ left:0,top:30,width:180,height:21 }),
     querySelector: () => ({ textContent:'destination' }),
-    closest: selector => selector.includes('.sb-item') ? null : selector.includes('.panes') ? pane : selector.includes('[data-dir]') ? row : null,
+    closest: selector => selector.includes('.sb-item') ? null : selector.includes('.panes') ? pane : selector.includes('[data-dir]') || selector === '.row[data-path]' ? row : null,
   }
   let hit = row
   document.elementFromPoint = () => hit
@@ -75,5 +75,20 @@ test('drop still recomputes the actual child destination instead of using the sp
  row.dataset.path='/home/destination/child';row.dataset.springFolder='/home/destination/child'
  await h.run(()=>h.drop(payload('drop')))
  assert.deepEqual(calls,[[['/source/file.txt'],'/home/destination/child','copy']])
+ assert.equal(h.panes[0].props.springOpen,null)
+})
+
+test('native hover follows ordinary child rows and ends on cancel without reopening', async t => {
+ const {h,row,payload,advance}=await mount(t)
+ await h.run(()=>h.drop(payload('enter')));await advance(650)
+ row.dataset.path='/home/destination/file.txt'
+ row.dataset.springFolder=undefined
+ await h.run(()=>h.drop(payload('over')))
+ assert.equal(h.panes[0].props.springHover.path,'/home/destination/file.txt')
+ assert.equal(h.panes[1].props.springHover,null)
+ await h.run(()=>h.drop(payload('cancelled')))
+ assert.equal(h.panes[0].props.springHover,null)
+ assert.equal(h.panes[0].props.springOpen,null)
+ await advance(1000)
  assert.equal(h.panes[0].props.springOpen,null)
 })
