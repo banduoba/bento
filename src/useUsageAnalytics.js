@@ -5,6 +5,7 @@ import { createUsageAnalytics, readAnalyticsEnabled, writeAnalyticsEnabled } fro
 
 export default function useUsageAnalytics() {
   const [enabled, setEnabled] = useState(readAnalyticsEnabled)
+  const [persistenceError, setPersistenceError] = useState(false)
   const stop = useRef(() => {})
   const revision = useRef(0)
   useEffect(() => {
@@ -23,8 +24,8 @@ export default function useUsageAnalytics() {
   const changeEnabled = value => {
     // Cancel before waiting for React's effect cleanup or a storage write.
     if (!value) { revision.current++; stop.current() }
-    writeAnalyticsEnabled(value)
+    setPersistenceError(!writeAnalyticsEnabled(value))
     setEnabled(value)
   }
-  return [enabled, changeEnabled]
+  return [enabled, changeEnabled, persistenceError]
 }

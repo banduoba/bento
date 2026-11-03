@@ -133,7 +133,7 @@ function MiniGrid({ preset }) {
 }
 
 export default function App() {
-  const [analyticsEnabled, onAnalyticsEnabledChange] = useUsageAnalytics()
+  const [analyticsEnabled, onAnalyticsEnabledChange, analyticsPersistenceError] = useUsageAnalytics()
   const [cfg, setCfg] = useState(null)
   const [home, setHome] = useState('/')
   const [recoveryNotice, setRecoveryNotice] = useState(null)
@@ -2263,6 +2263,7 @@ export default function App() {
       <SettingsDialog
         open={settingsOpen}
         analyticsEnabled={analyticsEnabled}
+        analyticsPersistenceError={analyticsPersistenceError}
         onAnalyticsEnabledChange={onAnalyticsEnabledChange}
         onExportSettings={() => createSettingsBackup(cfgRef.current)}
         onImportSettings={importSettings}

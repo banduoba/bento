@@ -182,3 +182,13 @@ test('About discloses counters, offers an accessible opt-out switch, and sends n
   assert.equal(h.switchButton.props['aria-checked'], false)
   assert.equal(h.requests.length, 0)
 })
+
+
+test('Settings forwards a preference save failure to an About alert', async t => {
+  const h = await mount(t)
+  await h.update({ analyticsEnabled: false, analyticsPersistenceError: true })
+  await h.click('关于')
+  assert.match(h.text(), /stopped for this session/)
+  await h.update({ analyticsPersistenceError: false })
+  assert.ok(!h.text().includes('stopped for this session'))
+})

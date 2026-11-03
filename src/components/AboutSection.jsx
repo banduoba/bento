@@ -8,19 +8,28 @@ function analyticsCopy() {
   const language = (globalThis.navigator?.languages?.[0] || globalThis.navigator?.language || 'en').toLowerCase()
   if (/^zh-(hant|tw|hk|mo)/.test(language)) return {
     title: '分享使用統計',
+    saveOffError: '無法儲存偏好。本次執行已停止傳送；下次啟動可能重新開啟。',
+    saveOnError: '無法儲存偏好。本次執行已開啟；下次啟動會使用原設定。',
+    retry: '重試儲存',
     description: '預設開啟。透過 Cloudflare 統計每日活躍安裝量與版本：僅傳送隨機安裝識別碼、Bento 版本、macOS 與處理器架構。啟動時與持續執行期間每日最多計數一次；不傳送檔案、路徑或搜尋內容。隨時關閉即可停止傳送。',
   }
   if (language.startsWith('zh')) return {
     title: '分享使用统计',
+    saveOffError: '无法保存偏好。本次运行已停止发送；下次启动可能重新开启。',
+    saveOnError: '无法保存偏好。本次运行已开启；下次启动会使用原设置。',
+    retry: '重试保存',
     description: '默认开启。通过 Cloudflare 统计每日活跃安装量与版本：仅发送随机安装标识、Bento 版本、macOS 与处理器架构。启动时与持续运行期间每日最多计数一次；不发送文件、路径或搜索内容。随时关闭即可停止发送。',
   }
   return {
     title: 'Share usage counts',
+    saveOffError: 'Could not save this choice. Sending is stopped for this session; the next launch may enable it again.',
+    saveOnError: 'Could not save this choice. Sending is enabled for this session; the next launch will use the previous setting.',
+    retry: 'Retry saving',
     description: 'On by default. Cloudflare counts daily active installations and versions using only a random installation ID, Bento version, macOS and processor architecture. Launches and daily activity while running count at most once per day. No files, paths or searches are sent. Turn this off at any time to stop sending.',
   }
 }
 
-export default function AboutSection({ analyticsEnabled, onAnalyticsEnabledChange }) {
+export default function AboutSection({ analyticsEnabled, onAnalyticsEnabledChange, analyticsPersistenceError }) {
   const analytics = analyticsCopy()
   const [version, setVersion] = useState(null)
   const [versionError, setVersionError] = useState(false)
@@ -125,6 +134,10 @@ export default function AboutSection({ analyticsEnabled, onAnalyticsEnabledChang
           </button>
         </div>
       </div>
+      {analyticsPersistenceError && <div className="settings-option">
+        <p className="settings-hint" role="alert">{analyticsEnabled ? analytics.saveOnError : analytics.saveOffError}</p>
+        <button className="btn small" onClick={() => onAnalyticsEnabledChange?.(analyticsEnabled)}>{analytics.retry}</button>
+      </div>}
       {linkError && <p className="settings-hint" role="alert">{linkError}</p>}
     </section>
   )
