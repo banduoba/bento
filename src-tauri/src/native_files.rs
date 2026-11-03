@@ -69,6 +69,37 @@ fn finder_event(event_id: u32) -> Retained<Descriptor> {
     )
 }
 
+// Finder.sdef: information window ('iwnd') is a property of an item;
+// window.visible ('pvis') is set through the standard core/setd event.
+fn property_specifier(object: &Descriptor, property: u32) -> Result<Retained<Descriptor>, String> {
+    let record = Descriptor::recordDescriptor();
+    for (key, value) in [
+        (*b"want", Descriptor::descriptorWithTypeCode(u32::from_be_bytes(*b"prop"))),
+        (*b"form", Descriptor::descriptorWithEnumCode(u32::from_be_bytes(*b"prop"))),
+        (*b"seld", Descriptor::descriptorWithTypeCode(property)),
+    ] { record.setDescriptor_forKeyword(&value, u32::from_be_bytes(key)); }
+    record.setDescriptor_forKeyword(object, u32::from_be_bytes(*b"from"));
+    record.coerceToDescriptorType(u32::from_be_bytes(*b"obj ")).ok_or_else(|| "无法构造 Finder 项目描述".into())
+}
+fn get_info_event(path: &str) -> Result<Retained<Descriptor>, String> {
+    let file = Descriptor::descriptorWithFileURL(&file_url(path));
+    let info = property_specifier(&file, u32::from_be_bytes(*b"iwnd"))?;
+    let visible = property_specifier(&info, u32::from_be_bytes(*b"pvis"))?;
+    let event = finder_event(u32::from_be_bytes(*b"setd"));
+    event.setParamDescriptor_forKeyword(&visible, DIRECT);
+    event.setParamDescriptor_forKeyword(&Descriptor::descriptorWithBoolean(1), u32::from_be_bytes(*b"data"));
+    Ok(event)
+}
+pub fn show_get_info(paths: &[String]) -> Result<(), String> {
+    autoreleasepool(|_| {
+        for path in paths {
+            let event = get_info_event(path)?;
+            send(&event).map_err(|error| error.error.unwrap_or_else(|| "Finder 未完成显示简介".into()))?;
+        }
+        Ok(())
+    })
+}
+
 fn transfer_event(source: &str, dest: &str, mode: &str) -> Retained<Descriptor> {
     let event = finder_event(u32::from_be_bytes(if mode == "move" {
         *b"move"
@@ -1497,6 +1528,20 @@ mod tests {
     }
 
     // Construction only: never send events, create Workspace, or modify Finder files.
+    #[test]
+    fn get_info_event_addresses_each_file_without_script_interpolation() {
+        let event = get_info_event("/tmp/汉字 ' $;\nfile.txt").unwrap();
+        assert_eq!(event.eventClass(), CORE);
+        assert_eq!(event.eventID(), u32::from_be_bytes(*b"setd"));
+        let visible = event.paramDescriptorForKeyword(DIRECT).unwrap();
+        assert_eq!(visible.descriptorForKeyword(u32::from_be_bytes(*b"seld")).unwrap().typeCodeValue(), u32::from_be_bytes(*b"pvis"));
+        let info = visible.descriptorForKeyword(u32::from_be_bytes(*b"from")).unwrap();
+        assert_eq!(info.descriptorForKeyword(u32::from_be_bytes(*b"seld")).unwrap().typeCodeValue(), u32::from_be_bytes(*b"iwnd"));
+        let file = info.descriptorForKeyword(u32::from_be_bytes(*b"from")).unwrap();
+        assert_eq!(file.fileURLValue().unwrap().path().unwrap().to_string(), "/tmp/汉字 ' $;\nfile.txt");
+        assert!(event.paramDescriptorForKeyword(u32::from_be_bytes(*b"data")).unwrap().booleanValue() != 0);
+    }
+
     #[test]
     fn finder_request_preserves_path_characters_and_leaves_conflicts_to_finder() {
         let event = transfer_event("/tmp/汉字 ' $;\nfile.txt", "/tmp/destination", "move");

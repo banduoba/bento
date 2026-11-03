@@ -21,6 +21,7 @@ mod session_exit;
 mod list_stream;
 mod native_icons;
 mod native_menu;
+mod native_actions;
 mod search_results;
 use native_icons::file_icons;
 
@@ -840,11 +841,7 @@ async fn rename_with_receipt(old_path: String, new_name: String) -> Result<Write
 
 #[tauri::command]
 async fn open_path(path: String) -> Result<(), String> {
-    std::process::Command::new("open")
-        .arg(&path)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    native_actions::open_path(path).await
 }
 
 #[tauri::command]
@@ -3168,6 +3165,11 @@ pub fn run() {
             rename_with_receipt,
             regex_rename_preview,
             open_path,
+            native_actions::list_open_with,
+            native_actions::open_with,
+            native_actions::choose_application_and_open,
+            native_actions::show_get_info,
+            native_actions::extract_archive,
             reveal_in_finder,
             open_terminal,
             zip_paths,
