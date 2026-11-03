@@ -135,6 +135,7 @@ The native macOS menu bar includes Bento, File, Edit, View, Go, Window and Help 
 | <kbd>⌘L</kbd> or <kbd>⇧⌘G</kbd> | Edit the path |
 | <kbd>Tab</kbd> · <kbd>⇧Tab</kbd> | Move focus between visible panes (no switch in single-pane). While the address bar is editing, Tab still completes the path |
 | <kbd>F5</kbd> · <kbd>F6</kbd> | Copy / move the selection into the other pane's current folder (no-op in single-pane) |
+| <kbd>⇧⌘C</kbd> | Copy selected file/folder names including extensions (one name per line) |
 | <kbd>⌥⌘C</kbd> | Copy the full path of the selection (one path per line) |
 | <kbd>⌘[</kbd> · <kbd>⌘]</kbd> | Back · forward |
 | <kbd>⌘C</kbd> · <kbd>⌘X</kbd> · <kbd>⌘V</kbd> · <kbd>⌘D</kbd> | Copy · cut · paste · duplicate |
