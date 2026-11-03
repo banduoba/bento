@@ -33,7 +33,7 @@ const bundle = await build({
           : path.endsWith('nativeDrag')
             ? 'export const makeDragPreview=async()=>""; export const runNativeDrag=(...args)=>globalThis.__searchTest.drag(...args)'
             : path.endsWith('format')
-              ? 'export const fmtDate=()=>""; export const fmtSize=()=>""; export const copyText=path=>globalThis.__searchTest.copyText(path)'
+              ? 'export const fmtDate=value=>`date:${value}`; export const fmtSize=value=>`${value} B`; export const copyText=path=>globalThis.__searchTest.copyText(path)'
             : 'export default function Stub(){return null}',
       }))
     },
@@ -155,6 +155,7 @@ async function mount(t, extra = {}) {
     get root() { return renderer.root },
     text: () => JSON.stringify(renderer.toJSON()),
     input: () => renderer.root.findByType('input'),
+    select: label => renderer.root.findAllByType('select').find(n => n.props['aria-label'] === label),
     button: label => renderer.root.findAllByType('button').find(n => n.children.join('') === label),
     async type(q) {
       await run(() => renderer.root.findByType('input').props.onChange({ target: { value: q } }))
@@ -183,7 +184,7 @@ test('content preserves pane scope/root and scope controls remain enabled', asyn
   await h.flush()
   assert.equal(h.requests.length, 1)
   assert.deepEqual(h.requests[0].args.slice(0, 6), ['needle', 'pane', '/work', false, [], 'content'])
-  assert.ok(!h.button('当前文件夹').props.disabled)
+  assert.ok(!h.select('搜索范围').props.disabled)
 })
 
 test('new input, scope and close cancel old request; stale response cannot clear new busy/results', async t => {
@@ -239,7 +240,7 @@ test('format change reissues backend query before limit; keyboard and preview st
   await h.run(() => h.input().props.onKeyDown({ key: 'Enter', preventDefault() {} }))
   assert.deepEqual(h.located, [['/work', '/work/two.txt']])
   assert.deepEqual(h.opened, [])
-  await h.run(() => h.button('文档').props.onClick())
+  await h.run(() => h.select('结果格式过滤').props.onChange({ target: { value: 'document' } }))
   await h.flush()
   assert.equal(h.requests[1].args[7], 'document')
 })
@@ -366,4 +367,61 @@ test('native drag suppresses the following click and double click; a later gestu
   await h.flush()
   await h.run(() => h.rows()[0].props.onDoubleClick?.(rowEvent()))
   assert.deepEqual(h.located, [[entry.dir, entry.path]])
+})
+
+
+test('compact selectors keep every scope, mode, format and sort reachable', async t => {
+  const scopes = [], modes = [], sorts = []
+  const h = await mount(t, {
+    mode: 'name',
+    onScopeChange: value => scopes.push(value),
+    onModeChange: value => modes.push(value),
+    onSortChange: value => sorts.push(value),
+  })
+  const selectValue = (label, value) => h.run(() => h.select(label).props.onChange({ target: { value } }))
+  assert.deepEqual(h.select('搜索范围').findAllByType('option').map(n => n.props.value), ['global', 'pane', 'home'])
+  for (const value of ['global', 'pane', 'home']) await selectValue('搜索范围', value)
+  assert.deepEqual(scopes, ['global', 'pane', 'home'])
+  for (const label of ['内容', '名称']) await h.run(() => h.button(label).props.onClick())
+  assert.deepEqual(modes, ['content', 'name'])
+  assert.deepEqual(h.select('结果排序').findAllByType('option').map(n => n.props.value), ['btime', 'mtime', 'size', 'name', 'score'])
+  for (const value of ['btime', 'mtime', 'size', 'name', 'score']) await selectValue('结果排序', value)
+  assert.deepEqual(sorts, ['btime', 'mtime', 'size', 'name', 'score'])
+  assert.deepEqual(h.select('结果格式过滤').findAllByType('option').map(n => n.props.value), ['all', 'folder', 'image', 'document', 'spreadsheet', 'presentation', 'video', 'archive'])
+  await h.type('needle')
+  await h.flush()
+  await selectValue('结果格式过滤', 'image')
+  await h.flush()
+  assert.equal(h.requests[1].args[7], 'image')
+  await selectValue('结果格式过滤', 'all')
+  await h.flush()
+  assert.equal(h.requests[2].args[7], 'all')
+})
+
+test('name table date heading and values follow the selected date sort', async t => {
+  const h = await showResults(t, [{ ...item(), btime_ms: 101, mtime_ms: 202 }], { mode: 'name', sortBy: 'btime' })
+  const dateHeading = () => h.root.findAll(n => n.props.role === 'columnheader').at(-1).children.join('')
+  const dateValue = () => h.rows()[0].find(n => n.props.className === 'search-date').children.join('')
+  assert.equal(dateHeading(), '创建日期')
+  assert.equal(dateValue(), 'date:101')
+  for (const sortBy of ['mtime', 'size', 'name', 'score']) {
+    await h.update({ sortBy })
+    assert.equal(dateHeading(), '修改日期')
+    assert.equal(dateValue(), 'date:202')
+  }
+})
+
+test('coverage disclosure preserves full warnings without repeating the summary in separate rows', async t => {
+  const h = await mount(t, { mode: 'name' })
+  await h.type('needle')
+  await h.flush()
+  await h.resolve(0, result([item()], {
+    incomplete: true,
+    truncated: true,
+    warnings: [{ code: 'coverage', message: '索引覆盖范围有限，结果可能不完整' }],
+  }))
+  const notices = h.root.findAllByType('details').filter(n => n.props.className === 'search-coverage')
+  assert.equal(notices.length, 1)
+  assert.ok(notices[0].findByType('summary').children.join('').includes('截断'))
+  assert.equal(h.root.findAll(n => n.type === 'div' && n.children.join('') === '索引覆盖范围有限，结果可能不完整').length, 1)
 })

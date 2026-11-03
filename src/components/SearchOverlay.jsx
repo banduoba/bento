@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, fileSrc } from '../api'
 import { fmtDate, fmtSize, copyText } from '../format'
-import { IconSearch } from '../icons'
+import { IconCopy, IconSearch } from '../icons'
 import FileIcon from './FileIcon'
 import ContextMenu from './ContextMenu'
 import { makeDragPreview, runNativeDrag } from '../nativeDrag'
@@ -342,36 +342,54 @@ export default function SearchOverlay({
     { label: '在访达中显示', action: () => onReveal(item.path) },
   ]
 
-  const resultActions = (item) => (
-    <span className="search-actions">
-      <button
-        className="search-reveal search-copy"
-        title="复制路径"
-        aria-label={`复制路径：${item.path}`}
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation()
-          copyText(item.path)
-        }}
-      >
-        复制路径
-      </button>
-      <button
-        className="search-reveal"
-        title="在访达中显示"
-        onMouseDown={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => e.stopPropagation()}
-        onClick={(e) => {
-          e.stopPropagation()
-          onReveal(item.path)
-        }}
-      >
-        访达
-      </button>
-    </span>
+  const copyAction = (item) => (
+    <button
+      className="search-reveal search-copy"
+      title="复制路径"
+      aria-label={`复制路径：${item.path}`}
+      draggable={false}
+      onMouseDown={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation()
+        copyText(item.path)
+      }}
+    >
+      <IconCopy size={13} />
+    </button>
   )
+
+  const revealAction = (item) => (
+    <button
+      className="search-reveal search-finder"
+      title="在访达中显示"
+      aria-label={`在访达中显示：${item.path}`}
+      draggable={false}
+      onMouseDown={(e) => e.stopPropagation()}
+      onKeyDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation()
+        onReveal(item.path)
+      }}
+    >
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3"
+        strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M6.5 3.5h-3v9h9v-3M8.5 2.5h5v5M13 3 7 9" />
+      </svg>
+    </button>
+  )
+
+  const createdDate = sortBy === 'btime'
+  const dateLabel = createdDate ? '创建日期' : '修改日期'
+  const indexBuilding = scope === 'global' && idxStatus && !idxStatus.ready
+  const needsDiskAccess = scope === 'global' && idxStatus?.ready && idxStatus.full_disk_access === false
+  const warnings = [...new Set((response?.warnings || []).map(w => w.message).filter(Boolean))]
+  const hasCoverageNotice = !busy && (response?.incomplete || response?.truncated || warnings.length > 0)
+  const coverageSummary = response?.truncated ? '结果已截断，建议收窄范围'
+    : hasCoverageNotice ? '结果可能不完整' : indexBuilding ? '全局索引建立中' : '部分目录未获访问权限'
+  const selectedItem = query.trim() ? sorted[selIdx] : null
 
   return (
     <div className={`search-overlay${open ? '' : ' hidden'}`} aria-hidden={!open} inert={!open} onMouseDown={onClose}>
@@ -387,92 +405,72 @@ export default function SearchOverlay({
             onKeyDown={onKeyDown}
             spellCheck={false}
           />
-          {busy && <span className="search-busy">搜索中…</span>}
+          <select className="search-scope" aria-label="搜索范围" value={scope}
+            onChange={(e) => onScopeChange(e.target.value)}>
+            {SCOPES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+          </select>
         </div>
         <div className="search-toolbar">
-          <div className="tb-group">
-            <span className="tb-label">范围</span>
-            {SCOPES.map((s) => (
-              <button
-                key={s.id}
-                className={`seg-btn${scope === s.id ? ' on' : ''}`}
-                onClick={() => onScopeChange(s.id)}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-          <div className="tb-group">
-            <span className="tb-label">搜索</span>
+          <div className="search-modes" role="group" aria-label="搜索方式">
             {[{ id: 'name', label: '名称' }, { id: 'content', label: '内容' }].map((m) => (
-              <button
-                key={m.id}
-                className={`seg-btn${mode === m.id ? ' on' : ''}`}
-                onClick={() => onModeChange(m.id)}
-              >
+              <button key={m.id} className={`seg-btn${mode === m.id ? ' on' : ''}`}
+                aria-pressed={mode === m.id} onClick={() => onModeChange(m.id)}>
                 {m.label}
               </button>
             ))}
           </div>
-          <div className="tb-group">
-            <span className="tb-label">排序</span>
-            {SORTS.map((s) => (
-              <button key={s.id} className={`seg-btn${sortBy === s.id ? ' on' : ''}`} onClick={() => onSortChange(s.id)}>
-                {s.label}
-              </button>
-            ))}
-          </div>
+          <label className="search-select-label">
+            <span>种类</span>
+            <select aria-label="结果格式过滤" value={format} onChange={(e) => {
+              setFormat(e.target.value)
+              setSelIdx(0)
+              setMenu(null)
+            }}>
+              {FORMATS.map(f => <option key={f.id} value={f.id} title={f.extensions?.join(' · ')}>{f.label}</option>)}
+            </select>
+          </label>
+          <label className="search-select-label search-sort">
+            <span>排序</span>
+            <select aria-label="结果排序" value={sortBy} onChange={(e) => onSortChange(e.target.value)}>
+              {SORTS.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+          </label>
+          <details className="search-help">
+            <summary>搜索语法</summary>
+            <div className="search-help-content"><code>* ?</code> 通配符 · <code>ext:</code> 后缀 · <code>re:</code> 正则 · 空格 = 且</div>
+          </details>
         </div>
-        <div className="search-meta">
-          <div className="search-status" aria-live="polite">
-            <span className="search-count">
-            {!query.trim()
-              ? '最近搜索'
-              : busy
-                ? '搜索中…'
-                : error ? '搜索失败' : `${sorted.length} 个结果${elapsed != null ? ` · ${elapsed} ms` : ''}`}
-          </span>
-            {scope === 'global' && idxStatus && !idxStatus.ready && (
-              <span className="search-idx-hint">
-                {' '}· 全局索引建立中（已收录 {idxStatus.entries.toLocaleString()} 条），{response?.source.includes('spotlight') ? '当前结果来自系统索引' : '等待索引就绪'}
-              </span>
-            )}
-            {scope === 'global' && idxStatus && idxStatus.ready && idxStatus.full_disk_access === false && (
-              <span className="search-idx-hint">
-                {' '}· 未授予「完全磁盘访问权限」，其他用户/资源库目录不在索引内（系统设置 → 隐私与安全性）{' '}
+        {error && <div className="search-notice search-error" role="alert"><span>{error}</span><button onClick={() => setRetry(n => n + 1)}>重试</button></div>}
+        {(hasCoverageNotice || indexBuilding || needsDiskAccess) && (
+          <details className="search-coverage">
+            <summary>{coverageSummary}<span className="search-coverage-more">详情</span></summary>
+            <div className="search-coverage-details">
+              {hasCoverageNotice && <>
+                {response?.truncated && <div>结果已截断，请收窄搜索范围或关键词。</div>}
+                {response?.incomplete && <div>搜索未穷尽，当前结果可能不完整。</div>}
+                {warnings.map(message => <div key={message}>{message}</div>)}
+              </>}
+              {indexBuilding && <div>全局索引建立中（已收录 {(idxStatus.entries || 0).toLocaleString()} 条），{response?.source?.includes('spotlight') ? '当前结果来自系统索引' : '等待索引就绪'}。</div>}
+              {needsDiskAccess && <div>
+                未授予「完全磁盘访问权限」，其他用户/资源库目录不在索引内（系统设置 → 隐私与安全性）。{' '}
                 <button className="search-idx-settings-link" onClick={() => api.openPrivacySettings().catch((e) => alert(String(e)))}>
                   打开系统设置
                 </button>
-              </span>
-            )}
-          </div>
-          <span className="search-syntax"><code>* ?</code> 通配 · <code>ext:</code> 后缀 · <code>re:</code> 正则 · 空格 = 且</span>
-        </div>
-        {error && <div className="search-notice search-error" role="alert"><span>{error}</span><button onClick={() => setRetry(n => n + 1)}>重试</button></div>}
-        {!busy && response && (response.incomplete || response.truncated) && <div className="search-notice" role="status">
-          {response.truncated && <div>结果已截断，请收窄搜索范围或关键词。</div>}
-          {response.incomplete && <div>搜索未穷尽，当前结果可能不完整。</div>}
-          {response.warnings.map(w => <div key={w.code}>{w.message}</div>)}
-        </div>}
-        <div className="search-formats" role="group" aria-label="结果格式过滤">
-          {FORMATS.map((f) => (
-            <button
-              key={f.id}
-              className={`seg-btn${format === f.id ? ' on' : ''}`}
-              aria-pressed={format === f.id}
-              title={f.extensions?.join(' · ')}
-              onClick={() => {
-                setFormat((current) => current === f.id ? 'all' : f.id)
-                setSelIdx(0)
-                setMenu(null)
-              }}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
+              </div>}
+            </div>
+          </details>
+        )}
         <div className={`search-body${mode === 'content' ? ' two-col' : ''}`}>
-        <div className="search-results">
+        <div className={`search-list-pane${mode === 'name' ? ' search-name-table' : ''}`}>
+        <div className="search-results" aria-label="搜索结果">
+          {mode === 'name' && query.trim() && (
+            <div className="search-columns" role="row">
+              <span className="search-column-name" role="columnheader">名称</span>
+              <span className="search-column-dir" role="columnheader">位置</span>
+              <span className="search-column-size" role="columnheader">大小</span>
+              <span className="search-column-date" role="columnheader">{dateLabel}</span>
+            </div>
+          )}
           {!query.trim() ? (
             history.length ? history.map((term, i) => (
               <button key={term} className={`search-history-item${i === selIdx ? ' on' : ''}`}
@@ -510,36 +508,40 @@ export default function SearchOverlay({
                   setMenu({ x: e.clientX, y: e.clientY, item })
                 }}
               >
-                <span className="search-file">
-                  <span className="fileicon">
-                    <FileIcon path={item.path} name={item.name} isDir={item.is_dir} />
-                  </span>
+                {copyAction(item)}
+                <span className="fileicon">
+                  <FileIcon path={item.path} name={item.name} isDir={item.is_dir} />
+                </span>
+                {mode === 'name' ? (
+                  <>
+                    <span className="search-name" title={item.name}><Highlight text={item.name} query={query} /></span>
+                    <span className="search-dir" title={item.dir}>{item.dir}</span>
+                    <span className="search-size">{item.is_dir ? '--' : fmtSize(item.size)}</span>
+                    <span className="search-date">{fmtDate(createdDate ? item.btime_ms : item.mtime_ms)}</span>
+                  </>
+                ) : (
                   <span className="search-main">
                     <span className="search-heading">
-                      <span className="search-name" title={item.name}>
-                        {mode === 'content' ? (
-                          item.name
-                        ) : (
-                          <Highlight text={item.name} query={query} />
-                        )}
-                      </span>
-                      <span className="search-date">{fmtDate(item.btime_ms)}</span>
+                      <span className="search-name" title={item.name}>{item.name}</span>
+                      <span className="search-date" title={dateLabel}>{fmtDate(createdDate ? item.btime_ms : item.mtime_ms)}</span>
                     </span>
                     <span className="search-details">
-                      <span className="search-dir" title={item.dir}>
-                        {item.dir}
-                      </span>
-                      {mode === 'content' && item.matches != null && (
-                        <span className="search-matches">{item.matches >= 20 ? '20+' : item.matches} 行命中</span>
-                      )}
+                      <span className="search-dir" title={item.dir}>{item.dir}</span>
+                      {item.matches != null && <span className="search-matches">{item.matches >= 20 ? '20+' : item.matches} 行命中</span>}
                     </span>
+                    {item.lines?.slice(0, 2).map(line => (
+                      <span className="search-content-line" key={line.no}>
+                        <span className="line-no">{line.no}</span>
+                        <span className="line-text"><Highlight text={line.text} query={query} literal /></span>
+                      </span>
+                    ))}
                   </span>
-                </span>
-                <span className="search-size">{item.is_dir ? '--' : fmtSize(item.size)}</span>
-                {resultActions(item)}
+                )}
+                {revealAction(item)}
               </div>
             ))
           )}
+        </div>
         </div>
         {mode === 'content' && (
           <div className="search-preview-pane" ref={previewRef}>
@@ -605,8 +607,15 @@ export default function SearchOverlay({
           </div>
         )}
         </div>
-        <div className="search-hint">
-          ↑↓ 选择预览 · {query.trim() ? '单击 / ↩ 定位 · 右键 打开与更多操作 · ' : '↩ 搜索 · '}Esc 关闭 · 范围：{SCOPES.find((s) => s.id === scope)?.label}
+        <div className="search-footer">
+          <span className="search-count" role="status" aria-live="polite">
+            {!query.trim() ? '最近搜索' : busy ? '搜索中…' : error ? '搜索失败'
+              : `${sorted.length} 个结果${elapsed != null ? ` · ${elapsed} ms` : ''}`}
+          </span>
+          {selectedItem && <span className="search-selected-path" title={selectedItem.path}>{selectedItem.path}</span>}
+          <span className="search-hint" title="↑↓ 选择 · 单击 / ↩ 定位 · 右键打开与更多操作 · Esc 关闭">
+            ↑↓ 选择 · ↩ {query.trim() ? '定位' : '搜索'} · Esc 关闭
+          </span>
         </div>
       </div>
       {menu && (
