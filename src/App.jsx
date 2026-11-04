@@ -513,7 +513,29 @@ export default function App() {
     })
   }
 
-  const extraction = useExtractionFeedback(job => refreshDirectories(job.results.map(result => parentPath(result.source))))
+  const archiveOrigins = useRef(new Map())
+  const [archiveCompleted, setArchiveCompleted] = useState(null)
+  const extraction = useExtractionFeedback(job => {
+    refreshDirectories(job.results.flatMap(result => [parentPath(result.source), result.output && parentPath(result.output)]))
+    const origin = archiveOrigins.current.get(job.id)
+    archiveOrigins.current.delete(job.id)
+    setArchiveCompleted({ job, origin })
+  }, (job, context) => archiveOrigins.current.set(job.id, context?.tabId || null))
+  useEffect(() => {
+    if (!cfg || !archiveCompleted) return
+    const { job, origin } = archiveCompleted
+    const outputs = job.results.filter(r => r.state === 'completed' && r.output).map(r => r.output)
+    const tabs = cfg.panes.flatMap(p => p.tabs)
+    const tab = origin !== undefined ? tabs.find(t => t.id === origin) : tabs.find(t => t.path === parentPath(job.results[0]?.source || job.source || '/'))
+    if (tab && outputs.length) {
+      const parent = parentPath(outputs[0]), selected = outputs.filter(path => parentPath(path) === parent)
+      nav(tab.id, parent)
+      setFilters(filters => ({ ...filters, [tab.id]: '' }))
+      setSel(previous => ({ ...previous, [tab.id]: new Set(selected) }))
+      setRevealReq({ tabId: tab.id, path: selected[0], selectionPaths: selected, nonce: Date.now() })
+    }
+    setArchiveCompleted(null)
+  }, [cfg, archiveCompleted])
 
   // ---------- 窗口拖动（标题栏空白处按下即拖，双击最大化） ----------
   const titlebarMouseDown = (e) => {
@@ -1341,18 +1363,18 @@ export default function App() {
   }
 
   // ---------- 压缩（QSpace 风格「创建归档」）----------
-  const runZip = async (paths, dir, o) => {
+  const runZip = async (paths, dir, o, tabId) => {
     const boundary = undoBoundary()
     beginFileOperation()
     try {
-      const result = await api.zipPathsWithReceipt(paths, dir, {
+      const result = await extraction.compress(paths, dir, {
         name: o.name, level: o.level, password: o.password || undefined, separate: o.separate,
-      })
+      }, { tabId })
+      if (!result) return
       const entries = result?.entries || []
       const known = entries.map(r => ({ dest: r.path, identity: r.identity })).filter(identified)
       if (!Array.isArray(result?.entries) || result?.error || known.length !== entries.length) invalidateUndo(boundary)
       if (known.length) pushUndo(trashUndo(known), [dir])
-      if (result?.error) alert(result.error)
     } catch (e) {
       invalidateUndo(boundary)
       alert(String(e))
@@ -1531,7 +1553,7 @@ export default function App() {
         : nativeMenuAction(() => Promise.all(paths.map(path => api.openPath(path)))) },
       filesOnly ? { label: '打开方式', children: openWithItems(paths, discovered, appsError) } : null,
       paneOpenItems.length ? { label: '在其他窗格打开', children: paneOpenItems } : null,
-      canExtract ? { label: '解压缩', action: () => extraction.start(paths) } : null,
+      canExtract ? { label: '解压缩', action: () => extraction.start(paths, { tabId }) } : null,
       previewPath ? { label: '快速查看', shortcut: shortcutLabel(cfg.shortcuts, 'quick-look'), action: () => previewNavigation.current.open(tabId, previewDir, previewPath, paths) } : null,
       { label: '显示简介', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
       { sep: true },

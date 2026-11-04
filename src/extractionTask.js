@@ -2,15 +2,26 @@ export const extractionActive = job => !!job && ['running', 'cancelling'].includ
 
 // Native work survives UI remounts. Polls are serialized and replies are scoped
 // to the current start generation, so an old completion cannot hide a new job.
-export function createExtractionTask({ api, onChange, onTerminal, schedule = cb => setTimeout(cb, 350), unschedule = clearTimeout }) {
- let state = { job: null, starting: false, cancelling: false, error: null }
+export function createExtractionTask({ api, onChange, onTerminal, onStarted = () => {}, schedule = cb => setTimeout(cb, 350), unschedule = clearTimeout }) {
+ let state = { operation: 'extract', job: null, starting: false, cancelling: false, error: null }
  let live = true, timer = null, starting = false, cancellation = null
- let terminalId = null, epoch = 0, polling = false, statusUnknown = true, operationError = null
+ let terminalId = null, epoch = 0, polling = false, statusUnknown = true, operationError = null, dismissTimer = null
+ const completions = new Map()
+ const clearDismiss = () => { if (dismissTimer !== null) clearTimeout(dismissTimer); dismissTimer = null }
  const publish = patch => {
   if (!live) return
   state = { ...state, ...patch }; onChange(state)
+  if (state.job && !extractionActive(state.job)) { completions.get(state.job.id)?.(state.job); completions.delete(state.job.id) }
   if (state.job && !extractionActive(state.job) && terminalId !== state.job.id) {
    terminalId = state.job.id; onTerminal(state.job)
+   clearDismiss()
+   if (state.job?.state === 'completed' && !state.error) {
+    const id = state.job.id
+    dismissTimer = setTimeout(() => {
+     dismissTimer = null
+     if (live && !starting && state.job?.id === id && state.job.state === 'completed' && !state.error) publish({ job: null, error: null })
+    }, 4000)
+   }
   }
  }
  const clear = () => { if (timer !== null) unschedule(timer); timer = null }
@@ -31,26 +42,42 @@ export function createExtractionTask({ api, onChange, onTerminal, schedule = cb 
     publish({ job: previousResult ? null : job, error: operationError })
    }
   } catch (error) {
-   if (generation === epoch) { statusUnknown = true; publish({ error: `无法读取解压状态，将自动重试：${error}` }) }
+   if (generation === epoch) { statusUnknown = true; publish({ error: `无法读取归档任务状态，将自动重试：${error}` }) }
   } finally { polling = false; later() }
  }
  const ready = poll()
+ async function start(paths, compression, context) {
+  if (!live || starting) return null
+  starting = true
+  try {
+   await ready
+   if (!live || statusUnknown || extractionActive(state.job)) return null
+   epoch++; const generation = epoch; cancellation = null; operationError = null
+   clear(); clearDismiss(); publish({ job: null, operation: compression ? 'compress' : 'extract', starting: true, cancelling: false, error: null })
+   const job = compression ? await api.startCompression(paths, compression.dir, compression.options) : await api.startExtraction(paths)
+   if (!live || generation !== epoch) return null
+   if (!job || typeof job.id !== 'string' || !Array.isArray(job.results)) throw new Error('无法确认归档任务结果，请检查输出目录')
+   let completion
+   if (compression) completion = new Promise(resolve => completions.set(job.id, resolve))
+   onStarted(job, context)
+   publish({ job, error: null })
+   return compression ? { job, completion } : job
+  } catch (error) {
+   operationError = String(error); statusUnknown = true; publish({ error: operationError }); return null
+  } finally { starting = false; publish({ starting: false }); later() }
+ }
  return {
   ready,
   get snapshot() { return state },
-  async start(paths) {
-   if (!live || starting) return
-   starting = true
-   try {
-    await ready
-    if (!live || statusUnknown || extractionActive(state.job)) return
-    epoch++; cancellation = null; operationError = null
-    clear(); publish({ job: null, starting: true, cancelling: false, error: null })
-    const job = await api.startExtraction(paths)
-    publish({ job, error: null })
-   } catch (error) {
-    operationError = String(error); statusUnknown = true; publish({ error: operationError })
-   } finally { starting = false; publish({ starting: false }); later() }
+  start: (paths, context) => start(paths, null, context),
+  async compress(paths, dir, options, context) {
+   const accepted = await start(paths, { dir, options }, context)
+   if (!accepted) return state.error ? { entries: [], error: state.error } : null
+   const job = await accepted.completion
+   if (!job) return null
+   const entries = job.results.filter(r => r.state === 'completed' && r.output).map(r => ({ path: r.output, identity: r.identity }))
+   const errors = job.results.map(r => r.error).filter(Boolean).join('\n')
+   return { entries, error: job.state === 'completed' ? null : job.error || errors || (job.state === 'cancelled' ? '已取消压缩' : '压缩未完成'), cancelled: job.state === 'cancelled' }
   },
   async cancel() {
    if (!live || cancellation || !extractionActive(state.job)) return
@@ -69,10 +96,11 @@ export function createExtractionTask({ api, onChange, onTerminal, schedule = cb 
   dismiss() {
    if (!extractionActive(state.job) && !starting) {
     operationError = null
+    clearDismiss()
     if (!statusUnknown) clear()
     publish({ job: null, error: null })
    }
   },
-  dispose() { live = false; epoch++; clear() },
+  dispose() { live = false; epoch++; clear(); clearDismiss(); for (const resolve of completions.values()) resolve(null); completions.clear() },
  }
 }

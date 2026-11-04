@@ -20,6 +20,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Outcome {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<super::FileIdentity>,
     pub source: String,
     pub output: Option<String>,
     pub state: String,
@@ -29,6 +31,8 @@ pub struct Outcome {
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub id: String,
+    pub operation: String,
+    pub output_bytes: u64,
     pub state: String,
     pub source: Option<String>,
     pub current_entry: Option<String>,
@@ -41,9 +45,9 @@ pub struct Snapshot {
 fn active(state: &str) -> bool {
     matches!(state, "running" | "cancelling")
 }
-struct Job {
-    status: Mutex<Snapshot>,
-    cancel: AtomicBool,
+pub(super) struct Job {
+    pub(super) status: Mutex<Snapshot>,
+    pub(super) cancel: AtomicBool,
     started: Instant,
 }
 impl Job {
@@ -95,24 +99,37 @@ impl Manager {
                 paths.push(p)
             }
         }
+        self.begin("extract", paths.len(), generation, move |job| {
+            run_batch(job, paths)
+        })
+    }
+    fn begin(
+        &self,
+        operation: &str,
+        total: usize,
+        generation: u64,
+        run: impl FnOnce(&Arc<Job>) + Send + 'static,
+    ) -> Result<Snapshot, String> {
         let mut slot = lock(&self.current);
         if self.closing.load(Ordering::Acquire)
             || generation != self.generation.load(Ordering::Acquire)
         {
-            return Err("解压启动已取消".into());
+            return Err("归档任务启动已取消".into());
         }
         if slot.as_ref().is_some_and(|j| active(&j.snapshot().state)) {
-            return Err("已有解压任务正在进行，请先等待完成或取消".into());
+            return Err("已有压缩或解压任务正在进行，请先等待完成或取消".into());
         }
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let job = Arc::new(Job {
             status: Mutex::new(Snapshot {
-                id: format!("extract-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+                id: format!("archive-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+                operation: operation.into(),
+                output_bytes: 0,
                 state: "running".into(),
                 source: None,
                 current_entry: None,
                 elapsed_ms: 0,
-                total: paths.len(),
+                total,
                 processed: 0,
                 results: vec![],
                 error: None,
@@ -123,16 +140,17 @@ impl Manager {
         *slot = Some(job.clone());
         let worker = job.clone();
         if let Err(e) = thread::Builder::new()
-            .name("bento-extract".into())
+            .name("bento-archive".into())
             .spawn(move || {
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_batch(&worker, paths)
+                    run(&worker);
+                    finish_batch(&worker)
                 }))
                 .is_err()
                 {
                     let mut s = lock(&worker.status);
                     s.state = "failed".into();
-                    s.error = Some("解压任务意外停止；请检查输出目录中的部分文件".into());
+                    s.error = Some("归档任务意外停止；请检查输出目录".into());
                 }
             })
         {
@@ -191,6 +209,8 @@ fn run_batch(job: &Arc<Job>, paths: Vec<PathBuf>) {
             break;
         }
     }
+}
+fn finish_batch(job: &Arc<Job>) {
     let mut s = lock(&job.status);
     let complete = s.results.iter().filter(|r| r.state == "completed").count();
     s.state = if job.cancel.load(Ordering::Acquire) && complete < s.total {
@@ -250,10 +270,56 @@ impl Drop for OwnedChild {
         let _ = self.0.wait();
     }
 }
+fn read_diagnostic(mut pipe: impl Read, entry: impl Fn(String)) -> String {
+    let mut buf = [0u8; 1024];
+    let mut tail = std::collections::VecDeque::with_capacity(MAX_DIAGNOSTIC);
+    let mut line = Vec::new();
+    let mut updated = Instant::now() - Duration::from_secs(1);
+    loop {
+        let n = match pipe.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        for &b in &buf[..n] {
+            if tail.len() == MAX_DIAGNOSTIC {
+                tail.pop_front();
+            }
+            tail.push_back(b);
+            if b == b'\n' {
+                line.clear()
+            } else if line.len() < 2048 {
+                line.push(b)
+            }
+        }
+        if updated.elapsed() >= Duration::from_millis(200) {
+            let text = String::from_utf8_lossy(&line);
+            if let Some(name) = text.strip_prefix("x ") {
+                entry(
+                    name.chars()
+                        .take(400)
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect(),
+                );
+                updated = Instant::now();
+            }
+        }
+    }
+    String::from_utf8_lossy(&tail.into_iter().collect::<Vec<_>>()).into_owned()
+}
 fn run_child(
+    command: Command,
+    cancel: &AtomicBool,
+    entry: impl Fn(String) + Send + 'static,
+) -> Result<(), String> {
+    run_child_observed(command, cancel, entry, || {})
+}
+pub(super) fn run_child_observed(
     mut command: Command,
     cancel: &AtomicBool,
     entry: impl Fn(String) + Send + 'static,
+    mut tick: impl FnMut(),
 ) -> Result<(), String> {
     if cancel.load(Ordering::Acquire) {
         return Err("cancelled".into());
@@ -261,54 +327,17 @@ fn run_child(
     let mut child = OwnedChild(
         command
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|e| format!("无法启动系统解压程序：{e}"))?,
+            .map_err(|e| format!("无法启动系统归档程序：{e}"))?,
     );
-    let stderr = child.0.stderr.take().ok_or("无法读取解压反馈")?;
-    let reader = thread::spawn(move || {
-        let mut pipe = stderr;
-        let mut buf = [0u8; 1024];
-        let mut tail = std::collections::VecDeque::with_capacity(MAX_DIAGNOSTIC);
-        let mut line = Vec::new();
-        let mut updated = Instant::now() - Duration::from_secs(1);
-        loop {
-            let n = match pipe.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            };
-            for &b in &buf[..n] {
-                if tail.len() == MAX_DIAGNOSTIC {
-                    tail.pop_front();
-                }
-                tail.push_back(b);
-                if b == b'\n' {
-                    line.clear()
-                } else {
-                    if line.len() < 2048 {
-                        line.push(b)
-                    };
-                }
-            }
-            if updated.elapsed() >= Duration::from_millis(200) {
-                let text = String::from_utf8_lossy(&line);
-                if let Some(name) = text.strip_prefix("x ") {
-                    entry(
-                        name.chars()
-                            .take(400)
-                            .map(|c| if c.is_control() { ' ' } else { c })
-                            .collect(),
-                    );
-                    updated = Instant::now();
-                }
-            }
-        }
-        String::from_utf8_lossy(&tail.into_iter().collect::<Vec<_>>()).into_owned()
-    });
+    let stderr = child.0.stderr.take().ok_or("无法读取归档反馈")?;
+    let stdout = child.0.stdout.take().ok_or("无法读取归档反馈")?;
+    let errors = thread::spawn(move || read_diagnostic(stderr, entry));
+    let output = thread::spawn(move || read_diagnostic(stdout, |_| {}));
     let outcome = loop {
+        tick();
         if cancel.load(Ordering::Acquire) {
             let _ = child.0.kill();
             let _ = child.0.wait();
@@ -319,7 +348,7 @@ fn run_child(
                 break if status.success() {
                     Ok(())
                 } else {
-                    Err(format!("解压程序退出状态：{status}"))
+                    Err(format!("归档程序退出状态：{status}"))
                 }
             }
             Ok(None) => thread::sleep(Duration::from_millis(100)),
@@ -330,14 +359,25 @@ fn run_child(
             }
         }
     };
-    let diagnostic = reader.join().unwrap_or_default();
-    outcome.map_err(|error| {
-        if error == "cancelled" {
-            error
+    let diagnostic = errors.join().unwrap_or_default();
+    let stdout = output.join().unwrap_or_default();
+    outcome.map_err(|e| {
+        if e == "cancelled" {
+            e
         } else {
-            format!("{error}\n{}", diagnostic.trim())
+            format!("{e}\n{}\n{}", diagnostic.trim(), stdout.trim())
         }
     })
+}
+pub(super) fn generation() -> u64 {
+    manager().generation.load(Ordering::Acquire)
+}
+pub(super) fn begin_compression(
+    total: usize,
+    generation: u64,
+    run: impl FnOnce(&Arc<Job>) + Send + 'static,
+) -> Result<Snapshot, String> {
+    manager().begin("compress", total, generation, run)
 }
 #[cfg(target_os = "macos")]
 fn quarantine(source: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -497,6 +537,7 @@ fn extract_one(
     entry: impl Fn(String) + Send + 'static,
 ) -> Outcome {
     let mut result = Outcome {
+        identity: None,
         source: source.to_string_lossy().into(),
         output: None,
         state: "failed".into(),

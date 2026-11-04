@@ -4,7 +4,7 @@ import { searchApi, demoSearch, searchRequestId } from './search/model.js'
 
 export const hasTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__
 
-let demoExtraction = null, demoExtractionStart = 0, demoExtractionPaths = []
+let demoExtraction = null, demoExtractionStart = 0, demoExtractionPaths = [], demoCompression = null
 
 export const api = hasTauri
   ? {
@@ -38,6 +38,7 @@ export const api = hasTauri
       showGetInfo: paths => invoke('show_get_info', { paths }),
       extractArchive: paths => invoke('extract_archive', { paths }),
       startExtraction: paths => invoke('start_extraction', { paths }),
+      startCompression: (sources, destDir, options) => invoke('start_compression', { sources, destDir, options }),
       extractionStatus: () => invoke('extraction_status'),
       cancelExtraction: id => invoke('cancel_extraction', { id }),
       stopExtraction: () => invoke('stop_extraction'),
@@ -506,17 +507,28 @@ function mockApi() {
     startExtraction: paths => {
       if (demoExtraction && ['running', 'cancelling'].includes(demoExtraction.state)) return Promise.reject('已有解压任务正在进行')
       demoExtractionStart = Date.now()
-      demoExtraction = { id: `demo-${Date.now()}`, state: 'running', source: paths[0], currentEntry: null, elapsedMs: 0, total: paths.length, processed: 0, results: [], error: null }
+      demoCompression = null
+      demoExtraction = { operation: 'extract', id: `demo-${Date.now()}`, state: 'running', source: paths[0], currentEntry: null, elapsedMs: 0, total: paths.length, processed: 0, results: [], error: null }
       demoExtractionPaths = paths
       return Promise.resolve({ ...demoExtraction })
     },
-    extractionStatus: () => {
+    startCompression: (paths, dir, options) => {
+      if (demoExtraction && ['running', 'cancelling'].includes(demoExtraction.state)) return Promise.reject('已有归档任务正在进行')
+      demoExtractionStart = Date.now(); demoExtractionPaths = paths; demoCompression = { paths, dir, options }
+      demoExtraction = { operation: 'compress', outputBytes: 0, id: `demo-${Date.now()}`, state: 'running', source: options.name || 'Archive.zip', currentEntry: null, elapsedMs: 0, total: options.separate ? paths.length : 1, processed: 0, results: [], error: null }
+      return Promise.resolve({ ...demoExtraction })
+    },
+    extractionStatus: async () => {
       if (!demoExtraction) return Promise.resolve(null)
       demoExtraction.elapsedMs = Date.now() - demoExtractionStart
-      if (demoExtraction.state === 'cancelling') demoExtraction.state = 'cancelled'
+      if (demoExtraction.state === 'cancelling') { demoExtraction.state = 'cancelled'; demoCompression = null }
       if (demoExtraction.state === 'running' && demoExtraction.elapsedMs > 1800) {
         demoExtraction.state = 'completed'; demoExtraction.processed = demoExtraction.total
-        demoExtraction.results = demoExtractionPaths.map(source => {
+        if (demoCompression) {
+          const request = demoCompression; demoCompression = null
+          const receipt = await api.zipPathsWithReceipt(request.paths, request.dir, request.options)
+          demoExtraction.results = receipt.entries.map(entry => ({ source: request.paths[0], output: entry.path, state: 'completed', error: null, identity: entry.identity }))
+        } else demoExtraction.results = demoExtractionPaths.map(source => {
           const parent = source.slice(0, source.lastIndexOf('/')) || '/', base = source.slice(source.lastIndexOf('/') + 1).replace(/\.[^.]+$/, '') || 'Archive'
           const name = uniqueName(TREE[parent] || [], base)
           if (TREE[parent]) TREE[parent].push(E(name, true))
