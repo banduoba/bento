@@ -2144,3 +2144,25 @@ button:focus-visible, .tab:focus-visible, .sb-item:focus-visible {
   .shortcut-columns { grid-template-columns: minmax(0, 1fr) 100px 28px 28px; padding-left: 8px; padding-right: 8px; gap: 4px; }
   .shortcut-key kbd { font-size: 11px; }
 }
+
+/* Extraction stays visible while panes remain usable. */
+.extraction-feedback { position: fixed; z-index: 70; right: 16px; bottom: 38px; width: 400px; max-width: calc(100vw - 32px); max-height: min(440px, calc(100vh - 90px)); overflow-y: auto; padding: 14px; border-radius: 10px; background: var(--pane-bg); color: var(--text); box-shadow: 0 0 0 1px var(--inset-border), 0 8px 28px rgba(0,0,0,.18); }
+.extraction-feedback-header, .extraction-feedback-footer, .extraction-result-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.extraction-feedback h3 { font-size: 13px; font-weight: 600; }
+.extraction-count, .extraction-feedback-footer { color: var(--text-2); font-size: 11px; font-variant-numeric: tabular-nums; }
+.extraction-source { font-size: 12px; margin-top: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.extraction-detail { font-size: 11px; line-height: 1.5; color: var(--text-2); margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.extraction-indicator { height: 3px; margin-top: 10px; border-radius: 2px; overflow: hidden; background: var(--accent-soft); }
+.extraction-indicator::after { content: ''; display: block; width: 35%; height: 100%; background: var(--accent); animation: extraction-busy 1.4s ease-in-out infinite alternate; }
+@keyframes extraction-busy { from { transform: translateX(-100%); } to { transform: translateX(285%); } }
+@media (prefers-reduced-motion: reduce) { .extraction-indicator::after { animation: none; transform: translateX(100%); } }
+.extraction-results { list-style: none; padding: 0; margin: 8px 0 0; }
+.extraction-results li { padding: 9px 0; border-bottom: 1px solid var(--inset-border); }
+.extraction-result-heading { font-size: 12px; }
+.extraction-result-heading span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.extraction-result-heading span:last-child { flex: none; color: var(--text-2); font-size: 11px; }
+.extraction-error { color: var(--danger); font-size: 11px; line-height: 1.5; margin: 7px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 90px; overflow-y: auto; }
+.extraction-result-actions { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 3px; }
+.extraction-link { border: 0; padding: 5px 0; background: transparent; color: var(--accent); font: inherit; font-size: 11px; cursor: pointer; }
+.extraction-feedback-footer { margin-top: 10px; }
+.extraction-feedback .btn.small { min-height: 28px; border-radius: 5px; }

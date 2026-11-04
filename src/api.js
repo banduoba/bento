@@ -4,6 +4,8 @@ import { searchApi, demoSearch, searchRequestId } from './search/model.js'
 
 export const hasTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__
 
+let demoExtraction = null, demoExtractionStart = 0, demoExtractionPaths = []
+
 export const api = hasTauri
   ? {
       ...searchApi(invoke, () => new Channel()),
@@ -35,6 +37,10 @@ export const api = hasTauri
       chooseApplicationAndOpen: paths => invoke('choose_application_and_open', { paths }),
       showGetInfo: paths => invoke('show_get_info', { paths }),
       extractArchive: paths => invoke('extract_archive', { paths }),
+      startExtraction: paths => invoke('start_extraction', { paths }),
+      extractionStatus: () => invoke('extraction_status'),
+      cancelExtraction: id => invoke('cancel_extraction', { id }),
+      stopExtraction: () => invoke('stop_extraction'),
       reveal: (path) => invoke('reveal_in_finder', { path }),
       openTerminal: (path) => invoke('open_terminal', { path }),
       zipPathsWithReceipt: (sources, destDir, options) => invoke('zip_paths_with_receipt', { sources, destDir, options: options || null }),
@@ -497,6 +503,32 @@ function mockApi() {
     chooseApplicationAndOpen: () => Promise.resolve(false),
     showGetInfo: () => Promise.resolve(),
     extractArchive: () => Promise.resolve(),
+    startExtraction: paths => {
+      if (demoExtraction && ['running', 'cancelling'].includes(demoExtraction.state)) return Promise.reject('已有解压任务正在进行')
+      demoExtractionStart = Date.now()
+      demoExtraction = { id: `demo-${Date.now()}`, state: 'running', source: paths[0], currentEntry: null, elapsedMs: 0, total: paths.length, processed: 0, results: [], error: null }
+      demoExtractionPaths = paths
+      return Promise.resolve({ ...demoExtraction })
+    },
+    extractionStatus: () => {
+      if (!demoExtraction) return Promise.resolve(null)
+      demoExtraction.elapsedMs = Date.now() - demoExtractionStart
+      if (demoExtraction.state === 'cancelling') demoExtraction.state = 'cancelled'
+      if (demoExtraction.state === 'running' && demoExtraction.elapsedMs > 1800) {
+        demoExtraction.state = 'completed'; demoExtraction.processed = demoExtraction.total
+        demoExtraction.results = demoExtractionPaths.map(source => {
+          const parent = source.slice(0, source.lastIndexOf('/')) || '/', base = source.slice(source.lastIndexOf('/') + 1).replace(/\.[^.]+$/, '') || 'Archive'
+          const name = uniqueName(TREE[parent] || [], base)
+          if (TREE[parent]) TREE[parent].push(E(name, true))
+          const output = parent === '/' ? '/' + name : parent + '/' + name
+          TREE[output] = []
+          return { source, output, state: 'completed', error: null }
+        })
+      }
+      return Promise.resolve({ ...demoExtraction })
+    },
+    cancelExtraction: () => { if (demoExtraction?.state === 'running') demoExtraction.state = 'cancelling'; return Promise.resolve({ ...demoExtraction }) },
+    stopExtraction: () => { if (demoExtraction && ['running', 'cancelling'].includes(demoExtraction.state)) demoExtraction.state = 'cancelled'; return Promise.resolve() },
     reveal: () => Promise.resolve(),
     openTerminal: () => Promise.resolve(),
     zipPaths: (sources, dir, options = {}) => {
