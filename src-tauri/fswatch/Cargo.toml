@@ -2,6 +2,7 @@
 name = "bento-fswatch"
 version = "0.2.1"
 edition = "2021"
+license-file = "../../LICENSE"
 description = "Visible-folder FSEvents batching for Bento"
 publish = false
 

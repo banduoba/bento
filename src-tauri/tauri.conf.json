@@ -33,6 +33,13 @@
   },
   "bundle": {
     "active": true,
+    "license": "LicenseRef-Bento-Source-Available-1.0",
+    "licenseFile": "../LICENSE",
+    "resources": {
+      "../LICENSE": "legal/LICENSE",
+      "../LICENSING.md": "legal/LICENSING.md",
+      "../LICENSES/": "legal/LICENSES/"
+    },
     "macOS": { "entitlements": "Entitlements.plist" },
     "targets": "all",
     "icon": [

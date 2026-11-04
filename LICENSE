@@ -1,21 +1,134 @@
-MIT License
+Bento Source-Available License 1.0
+Copyright (c) 2026 banduoba and the respective contributors
 
-Copyright (c) 2026 banduoba
+This is a custom source-available software license. It is not the MIT,
+GNU GPL, GNU AGPL, or an OSI-approved open-source license.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Scope and existing rights
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+"Software" means the original Bento code and associated project materials
+that a rights holder offers under this license. "You" includes an individual
+or an organization exercising rights under this license. A "Modified Version"
+is a work containing changes to, or derivative code based on, the Software.
+Changing preferences, managing files with Bento, or producing ordinary user
+data does not by itself create a Modified Version.
+
+This license grants only rights the relevant licensor is entitled to grant.
+It does not replace independent third-party licenses, apply restrictions to
+unrelated user files or works, or withdraw permissions already granted under
+another license. In particular, code previously distributed under MIT may
+still be used under that grant. See LICENSING.md and LICENSES/ for the
+transition notice and retained notices. No historical grant is revoked.
+
+2. Permitted use
+
+Subject to all conditions below, each licensor grants you a worldwide,
+non-exclusive, royalty-free copyright license to use, reproduce, study,
+modify, and distribute the Software for permitted purposes.
+
+You may use the unmodified Software for personal purposes and as an ordinary
+internal tool at work, including in a business. You may use it to organize
+files and create your own work products for which you are paid. Those work
+products do not become subject to this license merely because Bento was used.
+Noncommercial development, use, and free distribution of Modified Versions
+are permitted only if you meet section 4, including for private modifications.
+All rights not expressly granted are reserved.
+
+3. Commercial exploitation requires separate permission
+
+Without separate written permission from the relevant rights holders, you
+must not:
+
+(a) sell, rent, sublicense for a fee, or otherwise charge for copies of the
+Software or a Modified Version, or condition access or downloads on payment;
+(b) offer paid hosting, managed services, or other paid services that provide
+users with the Software's functionality, including through a network;
+(c) bundle the Software or a Modified Version as a feature of a product or
+service supplied for payment, or monetize its distribution through mandatory
+advertisements or equivalent consideration; or
+(d) develop, commission, or supply a Modified Version as a commercial product,
+for a paying client, as a revenue-generating service, or for a business's
+internal operational purposes.
+
+The ordinary internal use expressly permitted by section 2 is not prohibited
+by this section. Using unmodified Bento as one of your own working tools is
+different from selling access to Bento or offering its functionality as a
+paid service. Voluntary donations that confer no exclusive access, features,
+or other consideration are permitted.
+
+Publishing source code does not remove these commercial restrictions.
+
+4. Every modification requires public corresponding source
+
+If you make any change to the Software, you must publish the complete
+corresponding source of the resulting Modified Version at the time you make
+that change. This obligation applies even if the change is only for your
+personal use, is experimental, or is never distributed. You must publish
+before running, testing, or otherwise using the Modified Version. Keeping
+source changes private, including in a private repository, is not permitted.
+
+Publish the source in a publicly accessible repository or download that
+anyone can access without payment, individual approval, or an account. Keep
+it available while you use, develop, offer, or distribute that Modified
+Version. State the exact source revision for each binary you distribute,
+and provide its public source URL with the binary and in its accompanying
+notices. A link to an unmodified upstream repository alone is insufficient.
+
+"Complete corresponding source" means the preferred editable form of all
+covered code in the Modified Version, including your changes and the scripts,
+configuration templates, and instructions necessary to build and install
+it. Include exact dependency versions and any publicly available source
+locations needed for independently licensed dependencies. Do not substitute
+obfuscated code, generated output, screenshots, or a binary for source.
+Independent third-party components retain their own licensing conditions.
+Private signing keys, passwords, personal files, and other user data are not
+required source; provide safe templates and build instructions instead.
+
+License your covered changes under this same license, without additional
+restrictions on the rights it grants. Mark your changes and preserve the
+copyright, license, attribution, and third-party notices. You must not
+relicense covered changes under terms that omit either section 3 or this
+section. Recipients receive the rights to covered contributions directly
+from their respective licensors under these terms.
+
+5. Distribution and identity
+
+Every distributed copy must include this license and applicable notices.
+Any binary distribution must also provide the complete corresponding source
+or a public, free, account-free URL to the matching source, including when
+the binary is unmodified. Modified distributions must clearly identify that
+they are modified and must not imply endorsement by the Bento project.
+
+No trademark, logo, or endorsement rights are granted. This does not prevent
+truthful attribution or ordinary identification of the original project.
+
+6. Contributions
+
+If you intentionally submit a contribution for inclusion in this project,
+you offer that contribution under this license unless you clearly state
+otherwise and the maintainers accept a separate written arrangement. You
+retain your copyright. This does not transfer another person's rights or
+replace the need to preserve notices for third-party material.
+
+7. Termination and statutory rights
+
+Permission under this license terminates if you violate its conditions.
+If this is your first violation and you fully remedy it within 30 days of
+written notice, your permission is reinstated. Otherwise, reinstatement
+requires written permission from the relevant licensor. Termination does
+not revoke rights recipients independently received in compliance with
+this license. Nothing here limits rights you have under applicable law
+without permission from a copyright holder.
+
+8. No warranty or liability
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. TO THE EXTENT PERMITTED
+BY APPLICABLE LAW, IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+The English text above is the governing text. LICENSING.md includes a Chinese
+explanation; that explanation does not replace these terms.

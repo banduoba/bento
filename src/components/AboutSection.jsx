@@ -93,7 +93,7 @@ export default function AboutSection({ analyticsEnabled, onAnalyticsEnabledChang
           <div className="settings-label">
             <div className="settings-option-title">Bento</div>
             <p>轻量多窗格文件管理器，为 macOS 而设计。</p>
-            <p>版本 {version ?? (versionError ? '读取失败' : '读取中…')} · MIT License · banduoba</p>
+            <p>版本 {version ?? (versionError ? '读取失败' : '读取中…')} · Bento Source-Available License 1.0 · banduoba</p>
           </div>
         </div>
         <div className="settings-option">
