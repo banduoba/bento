@@ -3,6 +3,7 @@ name = "bento"
 version = "0.4.0"
 description = "Bento — a lightweight multi-pane file manager for macOS"
 edition = "2021"
+license-file = "../LICENSE"
 
 [lib]
 name = "bento_lib"

@@ -75,7 +75,7 @@ async function mount(t, { native = true, getVersion = async () => '0.2.1', fetch
 test('settings About shows runtime metadata without networking and opens project/download/issue in the default browser', async t => {
   const h = await mount(t, { getVersion: async () => '1.2.3+running' })
   await h.click('关于')
-  for (const text of ['Bento', '1.2.3+running', 'MIT', 'banduoba', '轻量多窗格文件管理器']) assert.ok(h.text().includes(text), text)
+  for (const text of ['Bento', '1.2.3+running', 'Bento Source-Available License 1.0', 'banduoba', '轻量多窗格文件管理器']) assert.ok(h.text().includes(text), text)
   assert.equal(h.requests.length, 0)
   await h.click('项目主页')
   await h.click('下载页面')

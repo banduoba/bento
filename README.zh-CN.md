@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="#安装"><img alt="平台" src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%2B%20Intel-0A1530?style=flat-square&logo=apple&logoColor=white"></a>
-  <a href="./LICENSE"><img alt="许可证：MIT" src="https://img.shields.io/badge/license-MIT-4A9BF7?style=flat-square&labelColor=0A1530"></a>
+  <a href="./LICENSE"><img alt="许可证：Bento Source-Available 1.0" src="https://img.shields.io/badge/license-Source--Available-4A9BF7?style=flat-square&labelColor=0A1530"></a>
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8D8?style=flat-square&labelColor=0A1530&logo=tauri&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-backend-F0A050?style=flat-square&labelColor=0A1530&logo=rust&logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-4A9BF7?style=flat-square&labelColor=0A1530&logo=react&logoColor=white">
@@ -35,7 +35,7 @@
 
 后端使用 **Rust**（Tauri 2），界面使用 **React 19**。它保留你熟悉的 Finder 操作习惯，并补上进阶用户需要的能力：分屏布局、每个窗格独立的标签页、即时搜索、与其他应用互通的真实拖拽，以及 QSpace 风格的「创建归档」对话框。
 
-> Bento 的交互设计受 [QSpace](https://qspace.awehunt.com/) 启发，是独立的开源项目，与 QSpace 官方无关。
+> Bento 的交互设计受 [QSpace](https://qspace.awehunt.com/) 启发，是独立的源码可用项目，与 QSpace 官方无关。
 
 ## 功能
 
@@ -212,4 +212,11 @@ Bento 还很年轻（`0.4.0`），使用前请了解：
 
 ## 许可证
 
-[MIT](./LICENSE) © banduoba
+[Bento Source-Available License 1.0](./LICENSE) © banduoba。这是自定义的源码可用许可证，不是 OSI 认可的开源许可证。
+
+- 允许免费个人使用，以及使用未修改的软件进行日常内部办公。
+- 售卖软件、收费提供访问或基于软件的服务、商业捆绑，以及商业二次开发，需要相关权利人另行授权。
+- **任何修改都必须在作出修改时公开完整对应源码，并沿用相同条款，包括个人或私下修改；运行、测试前必须先公开。** 本许可不允许闭源私人修改。
+- 本次变更不收回早前已按 MIT 授予的权利；第三方组件继续适用各自许可证。
+
+详见[许可说明和新旧授权边界](./LICENSING.md)。

@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="#install"><img alt="Platform" src="https://img.shields.io/badge/macOS-Apple%20Silicon%20%2B%20Intel-0A1530?style=flat-square&logo=apple&logoColor=white"></a>
-  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4A9BF7?style=flat-square&labelColor=0A1530"></a>
+  <a href="./LICENSE"><img alt="License: Bento Source-Available 1.0" src="https://img.shields.io/badge/license-Source--Available-4A9BF7?style=flat-square&labelColor=0A1530"></a>
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8D8?style=flat-square&labelColor=0A1530&logo=tauri&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-backend-F0A050?style=flat-square&labelColor=0A1530&logo=rust&logoColor=white">
   <img alt="React 19" src="https://img.shields.io/badge/React-19-4A9BF7?style=flat-square&labelColor=0A1530&logo=react&logoColor=white">
@@ -35,7 +35,7 @@
 
 It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface, keeps the Finder conventions you already know, and adds the things power users miss: split layouts, per-pane tabs, file-name and content search, real drag & drop with other apps, and a QSpace-style archive dialog.
 
-> Bento is inspired by [QSpace](https://qspace.awehunt.com/). It is an independent open-source project and is not affiliated with QSpace.
+> Bento is inspired by [QSpace](https://qspace.awehunt.com/). It is an independent source-available project and is not affiliated with QSpace.
 
 ## Features
 
@@ -212,4 +212,11 @@ Issues and pull requests are welcome. Please run `npm run build` and, for Rust c
 
 ## License
 
-[MIT](./LICENSE) © banduoba
+[Bento Source-Available License 1.0](./LICENSE) © banduoba — a custom license, not an OSI-approved open-source license.
+
+- Free personal use and ordinary internal workplace use of the unmodified software are permitted.
+- Selling the software, charging for access or software-based services, commercial bundling, and commercial development of modified versions require separate permission from the relevant rights holders.
+- **Every modification, including private or personal changes, must be published with complete corresponding source under the same terms as soon as it is made, before it is run or tested.** Closed-source private modifications are not permitted under this license.
+- This change does not withdraw permissions already granted for earlier MIT-licensed code. Third-party components retain their own licenses.
+
+See [licensing details and the transition boundary](./LICENSING.md).

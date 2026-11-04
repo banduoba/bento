@@ -56,7 +56,7 @@ pub fn install(app: &App) -> tauri::Result<()> {
         .name(Some("Bento"))
         .version(Some(env!("CARGO_PKG_VERSION")))
         .copyright(Some(
-            "Copyright © 2026 banduoba. Released under the MIT License.",
+            "Copyright © 2026 banduoba. Licensed under Bento Source-Available License 1.0.",
         ))
         .comments(Some(label(
             language,
