@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Back and Forward restore each tab's per-visit selection after directory loading and scroll it into view. Missing or filtered items are skipped, new user selections cancel pending restores, and no-op navigation preserves selection.
+
 - Added native Finder color labels with batch assignment, removal by clicking the checked color again, preserved custom tags, and tinted backgrounds across file and search views. Mixed selections receive the clicked color uniformly. Fixed Get Info to open Finder’s real information windows instead of setting their read-only visibility property; paths are passed as arguments and failures/timeouts are reported.
 
 - Fixed live compression size tracking to include Info-ZIP temporary output before final rename. Successful compression and extraction select their outputs automatically and dismiss success feedback after four seconds; errors remain visible.

@@ -604,21 +604,47 @@ export default function App() {
     setRevealReq(request => request?.tabId === tabId && request.selectionPaths ? null : request)
   }
 
+  const selectionForNavigation = tabId => {
+    const pending = revealReqRef.current
+    return pending?.tabId === tabId && pending.kind === 'history'
+      ? pending.selectionPaths : sel[tabId] || EMPTY_SELECTION
+  }
+
   const nav = (tabId, path, isRefresh) => {
     if (isRefresh || !path) {
       refreshTab(tabId)
       return
     }
+    const current = locateTab(tabId)
+    if (!current || navigateTab(current, { path }) === current) return
+    const selection = selectionForNavigation(tabId)
     trace(`nav tab=${tabId} -> ${path}`)
     locationChanged(tabId)
-    updateTab(tabId, t => navigateTab(t, { path }))
+    updateTab(tabId, t => navigateTab(t, { path, selection }))
     setSel(s => ({ ...s, [tabId]: new Set() }))
   }
 
   const travel = (tabId, step) => {
+    const current = locateTab(tabId)
+    if (!current) return
+    const selection = selectionForNavigation(tabId)
+    const next = navigateTab(current, { step, selection })
+    if (next === current) return
     locationChanged(tabId)
-    updateTab(tabId, t => navigateTab(t, { step }))
+    updateTab(tabId, t => navigateTab(t, { step, selection }))
     setSel(s => ({ ...s, [tabId]: new Set() }))
+    const paths = next.historySelections[next.hi]
+    if (paths?.length) setRevealReq({ tabId, root: next.path, kind: 'history', path: paths[0], selectionPaths: paths, nonce: `history-${++transferRevealSequence.current}` })
+  }
+  const historyReady = (request, paths) => {
+    const pending = revealReqRef.current
+    if (pending?.nonce !== request.nonce || pending.kind !== 'history') return
+    const tab = cfgRef.current?.panes.flatMap(pane => pane.tabs).find(tab => tab.id === request.tabId)
+    if (tab?.path !== request.root) return
+    const existing = new Set(paths)
+    const selected = request.selectionPaths.filter(path => existing.has(path))
+    setSel(s => ({ ...s, [request.tabId]: new Set(selected) }))
+    setRevealReq(selected.length ? { ...request, kind: 'history-ready', path: selected[0], selectionPaths: selected } : null)
   }
   const navBack = tabId => travel(tabId, -1)
   const navForward = tabId => travel(tabId, 1)
@@ -2237,6 +2263,7 @@ export default function App() {
               editPathSignal={i === focusIdx ? pathEditTick : 0}
               flash={i === flashPane}
               reveal={revealReq && revealReq.tabId === p.tabs[p.active]?.id ? revealReq : null}
+              onHistoryReady={historyReady}
               onRevealDone={() => {
                 if (revealReqRef.current?.nonce !== revealReq?.nonce) return
                 // 虚拟行先由 Pane 挂载，再从原滚动位置按 nearest 对齐。

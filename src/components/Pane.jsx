@@ -55,6 +55,7 @@ export default function Pane({
   editPathSignal,
   flash,
   reveal,
+  onHistoryReady,
   onRevealDone,
   springOpen = null,
   springHover = null,
@@ -604,18 +605,29 @@ export default function Pane({
     }
   }, [entries, tick, loadProgress])
 
+  // History restores wait for the matching terminal snapshot so missing files
+  // cannot become phantom selections or scroll a later visit unexpectedly.
+  const visibleReveal = reveal?.kind === 'history' ? null : reveal
+  useEffect(() => {
+    if (reveal?.kind !== 'history' || reveal.tabId !== tab.id || reveal.root !== tab.path) return
+    const session = loadStateRef.current
+    if (!session?.settled || session.path !== tab.path || session.tabId !== tab.id || entries === null) return
+    const visible = new Set(session.done ? rows.map(row => row.path) : [])
+    onHistoryReady?.(reveal, reveal.selectionPaths.filter(path => visible.has(path)))
+  }, [reveal, rows, loadProgress, error, tab.id, tab.path])
+
   // 搜索定位：行就绪后选中目标并滚动到可见处
   useEffect(() => {
-    if (viewMode !== 'list' || !reveal || entries === null) return
-    const idx = rows.findIndex((r) => r.path === reveal.path)
+    if (viewMode !== 'list' || !visibleReveal || entries === null) return
+    const idx = rows.findIndex((r) => r.path === visibleReveal.path)
     if (idx === -1) return
-    if (!reveal.selectionPaths) onSelect(tab.id, new Set([reveal.path]))
+    if (!visibleReveal.selectionPaths) onSelect(tab.id, new Set([visibleReveal.path]))
     try {
       virt.scrollToIndex(idx, { align: 'center' })
     } catch {}
     onRevealDone()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reveal, rows, viewMode])
+  }, [visibleReveal, rows, viewMode])
 
   // 向上汇报统计
   useEffect(() => {
@@ -1305,7 +1317,7 @@ export default function Pane({
     },
     onColumnTrailChange, columnNavigate, sortKey: tab.sortKey, sortDir: tab.sortDir,
     childrenForPath: path => kidsRef.current[path], kidsVersion,
-    reveal, onRevealDone, sortEntries: list => sortEntries(list, tab.sortKey, tab.sortDir),
+    reveal: visibleReveal, onRevealDone, sortEntries: list => sortEntries(list, tab.sortKey, tab.sortDir),
   }
 
   return (

@@ -14,6 +14,29 @@ test('navigation truncates a forward branch, ignores same path and keeps tabs in
   assert.equal(navigateTab(t, { step: 1 }), t)
   assert.deepEqual(other.history, ['/other'])
 })
+test('each history visit remembers its own copied selection and discards an abandoned forward branch', () => {
+  const selected = new Set(['/A/first'])
+  let t = navigateTab(blankTab('/A'), { path: '/B', selection: selected })
+  selected.add('/A/later')
+  t = navigateTab(t, { path: '/A', selection: new Set(['/B/item']) })
+  t = navigateTab(t, { step: -1, selection: new Set(['/A/second']) })
+  assert.deepEqual(t.historySelections[t.hi], ['/B/item'])
+  t = navigateTab(t, { step: -1, selection: new Set() })
+  assert.deepEqual(t.historySelections[t.hi], ['/A/first'])
+  t = navigateTab(t, { step: 2, selection: new Set(['/A/changed']) })
+  assert.deepEqual(t.historySelections[t.hi], ['/A/second'])
+  t = navigateTab(t, { step: -1, selection: new Set() })
+  t = navigateTab(t, { path: '/C', selection: new Set(['/B/new']) })
+  assert.deepEqual(t.history, ['/A', '/B', '/C'])
+  assert.deepEqual(t.historySelections, [['/A/changed'], ['/B/new'], []])
+})
+
+test('remembered selection is transient and never added to the saved session schema', () => {
+  const tab = navigateTab(blankTab('/A'), { path: '/B', selection: new Set(['/A/private.txt']) })
+  const disk = sessionForDisk({ layout: '1', panes: [{ active: 0, tabs: [tab] }] })
+  assert.equal('historySelections' in disk.panes[0].tabs[0], false)
+  assert.deepEqual(disk.panes[0].tabs[0].history, ['/A', '/B'])
+})
 test('session roundtrip keeps hidden panes, every workspace, spaces and active live snapshot', () => {
   const cfg = { layout: '1', focusedIdx: 0, panes: [pane('/一 '), pane('/offline/盘 '), pane('/3'), pane('/4')], workspaces: [{ id: 'a', name: 'A', layout: '4', panes: [pane('/stale')] }, { id: 'b', name: 'B', layout: '2c', focusedIdx: 1, panes: [pane('/b'), pane('/bb')] }], activeWorkspace: 'a', autoRefresh: true }
   const disk = sessionForDisk(cfg)

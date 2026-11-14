@@ -272,7 +272,7 @@ export function ColumnView(props) {
     if (!props.reveal || props.reveal.tabId !== tabId || !rows.some(row => row.path === props.reveal.path)) return
     setActiveDepth(0)
     setTrail([])
-    props.onSelect(tabId, new Set([props.reveal.path]))
+    if (!props.reveal.selectionPaths) props.onSelect(tabId, new Set([props.reveal.path]))
     props.onRevealDone?.()
   }, [props.reveal, rows])
   useEffect(() => {
