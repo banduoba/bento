@@ -22,6 +22,9 @@ mod list_stream;
 mod native_icons;
 mod native_menu;
 mod native_actions;
+mod file_labels;
+#[cfg(target_os = "macos")]
+mod finder_info;
 mod extraction;
 mod compression;
 mod search_results;
@@ -3177,6 +3180,8 @@ pub fn run() {
             native_actions::open_with,
             native_actions::choose_application_and_open,
             native_actions::show_get_info,
+            file_labels::get_file_labels,
+            file_labels::set_file_label,
             native_actions::extract_archive,
             extraction::start_extraction,
             compression::start_compression,

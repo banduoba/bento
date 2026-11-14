@@ -1,3 +1,6 @@
+import useFileLabels from '../useFileLabels'
+import { fileLabelStyle, fileLabelMenuItem, applyFileLabel } from '../fileLabels'
+import FileLabelDot from './FileLabelDot'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { api, fileSrc } from '../api'
 import { fmtDate, fmtSize, copyText } from '../format'
@@ -133,6 +136,7 @@ export default function SearchOverlay({
   const [fallbackIdx, setFallbackIdx] = useState(0)
   const [selectedPath, setSelectedPath] = useState(null)
   const [idxStatus, setIdxStatus] = useState(null) // fsearch 引擎状态
+  const [actionError, setActionError] = useState(null)
   const [menu, setMenu] = useState(null) // { x, y, item }
   const dragRef = useRef(null) // 原生拖拽状态
   const suppressClickRef = useRef(false)
@@ -346,6 +350,11 @@ export default function SearchOverlay({
     else if (sortBy === 'name') arr.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true }))
     return arr // score：保持引擎返回的相关度顺序
   }, [results, sortBy])
+  const labels = useFileLabels(open ? sorted.map(item => item.path) : [], results)
+  const metadataAction = async action => {
+    try { await action(); setActionError(null) } catch (error) { setActionError(String(error)) }
+  }
+  useEffect(() => setActionError(null), [query, open])
   const selectedIndex = selectedPath ? sorted.findIndex(item => item.path === selectedPath) : -1
   const selIdx = query.trim() ? (selectedIndex >= 0 ? selectedIndex : Math.max(0, Math.min(fallbackIdx, sorted.length - 1))) : fallbackIdx
   const setSelIdx = update => {
@@ -385,6 +394,10 @@ export default function SearchOverlay({
         onClose()
       },
     },
+    { sep: true },
+    { label: '显示简介', action: () => metadataAction(() => api.showGetInfo([item.path])) },
+    { sep: true },
+    fileLabelMenuItem([item.path], [{ path: item.path, color: labels[item.path] }], color => metadataAction(() => applyFileLabel([item.path], color))),
     { sep: true },
     { label: '拷贝路径', action: () => copyText(item.path) },
     {
@@ -442,6 +455,7 @@ export default function SearchOverlay({
       <span className="search-name" title={item.name}>
         {mode === 'name' ? <Highlight text={item.name} query={query} /> : item.name}
       </span>
+      <FileLabelDot value={labels[item.path]} />
     </span>
   )
 
@@ -541,6 +555,7 @@ export default function SearchOverlay({
         )}
         <div className={`search-body${mode === 'content' ? ' two-col' : ''}`}>
         <div className={`search-list-pane${mode === 'name' ? ' search-name-table' : ''}`}>
+        {actionError && <div className="search-action-error" role="alert"><span>{actionError}</span><button className="btn small" onClick={() => setActionError(null)}>关闭</button></div>}
         <div className="search-results" aria-label="搜索结果">
           {mode === 'name' && query.trim() && (
             <div className="search-columns">
@@ -566,6 +581,8 @@ export default function SearchOverlay({
             sorted.map((item, i) => (
               <div
                 key={item.path + i}
+                data-label-color={labels[item.path] || undefined}
+                style={fileLabelStyle(labels[item.path])}
                 className={`search-item${mode === 'content' ? ' search-item-content' : ''}${i === selIdx ? ' on' : ''}`}
                 title={`${item.path}\n${item.is_dir ? '--' : fmtSize(item.size)}`}
                 onMouseEnter={() => setSelIdx(i)}

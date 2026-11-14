@@ -1,3 +1,6 @@
+import useFileLabels from '../useFileLabels'
+import { fileLabelStyle } from '../fileLabels'
+import FileLabelDot from './FileLabelDot'
 import { shortcutLabel } from '../keyBindings'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -1152,6 +1155,10 @@ export default function Pane({
     getItemKey: (index) => rows[index]?.path ?? index,
   })
 
+  const visibleItems = virt.getVirtualItems()
+  const labelRevision = useMemo(() => ({ entries, kidsVersion }), [entries, kidsVersion])
+  const labels = useFileLabels(viewMode === 'list' ? visibleItems.map(item => rows[item.index]).filter(entry => entry && !entry.isPseudo).map(entry => entry.path) : [], labelRevision)
+
   // Clear the one measured cache entry when the editor changes/ends. measure()
   // resets virtual estimates only; ordinary filenames never get DOM measurements.
   useLayoutEffect(() => { virt.measure() }, [renameKey])
@@ -1624,7 +1631,7 @@ export default function Pane({
           <div className="empty">{filter ? '没有匹配的项目' : '文件夹为空'}</div>
         ) : (
           <div className="rows-inner" ref={innerRef} style={{ height: virt.getTotalSize() }}>
-            {virt.getVirtualItems().map((vi) => {
+            {visibleItems.map((vi) => {
               const entry = rows[vi.index]
               if (!entry) return null
               const isRenaming = renamingHere?.path === entry.path
@@ -1632,12 +1639,13 @@ export default function Pane({
                 <div
                   key={vi.key}
                   data-path={entry.isPseudo ? undefined : entry.path}
+                  data-label-color={labels[entry.path] || undefined}
                   data-dir={entry.is_dir && !entry.isPseudo ? '1' : undefined}
                   data-spring-folder={entry.is_dir && !entry.isPseudo && !isRenaming && !expandedDirs.has(entry.path) ? entry.path : undefined}
                   className={`row${vi.index % 2 === 1 ? ' even' : ''}${selection?.has(entry.path) ? ' selected' : ''}${focused && kbdCurrent === entry.path ? ' kbd-current' : ''}${cutSet.has(entry.path) ? ' cut' : ''}${draggingPaths.has(entry.path) ? ' dragging' : ''}${
                     dropTarget === entry.path ? ' drop-target' : ''
                   }`}
-                  style={{ transform: `translateY(${vi.start}px)`, height: vi.size }}
+                  style={{ transform: `translateY(${vi.start}px)`, height: vi.size, ...fileLabelStyle(labels[entry.path]) }}
                   onDragStart={(e) => e.preventDefault()}
                   onMouseDown={(e) => {
                     if (e.button !== 0 || entry.isPseudo || e.target?.closest?.('input, textarea, button')) return
@@ -1725,6 +1733,7 @@ export default function Pane({
                         })()}
                       </>
                     )}
+                    {!isRenaming && <FileLabelDot value={labels[entry.path]} />}
                   </div>
                   {shownCols.includes('mtime') && <span className="row-date">{fmtDate(entry.mtime_ms)}</span>}
                   {shownCols.includes('btime') && <span className="row-date">{fmtDate(entry.btime_ms)}</span>}

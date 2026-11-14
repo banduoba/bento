@@ -4,6 +4,7 @@ import { searchApi, demoSearch, searchRequestId } from './search/model.js'
 
 export const hasTauri = typeof window !== 'undefined' && !!window.__TAURI_INTERNALS__
 
+const demoFileLabels = new Map()
 let demoExtraction = null, demoExtractionStart = 0, demoExtractionPaths = [], demoCompression = null
 
 export const api = hasTauri
@@ -36,6 +37,8 @@ export const api = hasTauri
       openWith: (paths, appPath) => invoke('open_with', { paths, appPath }),
       chooseApplicationAndOpen: paths => invoke('choose_application_and_open', { paths }),
       showGetInfo: paths => invoke('show_get_info', { paths }),
+      getFileLabels: paths => invoke('get_file_labels', { paths }),
+      setFileLabel: (paths, color) => invoke('set_file_label', { paths, color }),
       extractArchive: paths => invoke('extract_archive', { paths }),
       startExtraction: paths => invoke('start_extraction', { paths }),
       startCompression: (sources, destDir, options) => invoke('start_compression', { sources, destDir, options }),
@@ -503,6 +506,8 @@ function mockApi() {
     openWith: () => Promise.resolve(),
     chooseApplicationAndOpen: () => Promise.resolve(false),
     showGetInfo: () => Promise.resolve(),
+    getFileLabels: paths => Promise.resolve(paths.map(path => ({ path, color: demoFileLabels.get(path) || 0 }))),
+    setFileLabel: (paths, color) => { paths.forEach(path => demoFileLabels.set(path, color)); return Promise.resolve(paths.map(path => ({ path, color }))) },
     extractArchive: () => Promise.resolve(),
     startExtraction: paths => {
       if (demoExtraction && ['running', 'cancelling'].includes(demoExtraction.state)) return Promise.reject('已有解压任务正在进行')

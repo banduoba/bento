@@ -1,3 +1,5 @@
+import { applyFileLabel, fileLabelMenuItem } from './fileLabels'
+import useFileLabels from './useFileLabels'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -151,6 +153,15 @@ export default function App() {
   filtersRef.current = filters
   const [clip, setClipState] = useState(getClip) // { mode: 'copy' | 'cut', paths }
   const [menu, setMenu] = useState(null) // { x, y, items, kind? }
+  const menuLabels = useFileLabels(menu?.kind === 'file' ? menu.labelPaths : [], menu?.request)
+  const renderedMenu = useMemo(() => {
+    if (menu?.kind !== 'file') return menu
+    const labels = menu.labelPaths.map(path => ({ path, color: menuLabels[path] }))
+    return { ...menu, items: menu.items.map(item => item.colors
+      ? fileLabelMenuItem(menu.labelPaths, labels, color => item.colors.find(choice => choice.value === color)?.action())
+      : item) }
+  }, [menu, menuLabels])
+
   const [templates, setTemplates] = useState([]) // 应用支持目录 templates/ 里的文件
   const [renaming, setRenaming] = useState(null) // { tabId, path, value }
   const [batchRename, setBatchRename] = useState(null) // { tabId, items }
@@ -1555,7 +1566,7 @@ export default function App() {
       paneOpenItems.length ? { label: '在其他窗格打开', children: paneOpenItems } : null,
       canExtract ? { label: '解压缩', action: () => extraction.start(paths, { tabId }) } : null,
       previewPath ? { label: '快速查看', shortcut: shortcutLabel(cfg.shortcuts, 'quick-look'), action: () => previewNavigation.current.open(tabId, previewDir, previewPath, paths) } : null,
-      { label: '显示简介', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
+      { label: '显示简介', shortcut: '⌘I', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
       { sep: true },
       { label: '拷贝', shortcut: '⌘C', action: () => doCopyCut(tabId, 'copy', paths) },
       { label: '剪切', shortcut: '⌘X', action: () => doCopyCut(tabId, 'move', paths) },
@@ -1572,6 +1583,8 @@ export default function App() {
       { label: '新建', children: newFileItems(tabId, list, parentDir) },
       ...folderDisplayItems(parentDir),
       { sep: true },
+      fileLabelMenuItem(paths, null, color => nativeMenuAction(() => applyFileLabel(paths, color))),
+      { sep: true },
       { label: entry.is_dir ? '添加到书签' : '将所在文件夹添加到书签', action: () => addFavorite(entry.is_dir ? entry.path : parentDir) },
       { label: '在终端打开', action: () => nativeMenuAction(() => api.openTerminal(termDir)) },
       { label: '复制名称', shortcut: shortcutLabel(cfg.shortcuts, 'edit-copy-names'), action: () => copyPlainNames(tabId, paths) },
@@ -1584,7 +1597,7 @@ export default function App() {
       const next = { ...current, ...patch }
       return { ...next, items: buildItems(next.apps, next.fileTemplates, next.appsError) }
     })
-    setMenu({ kind: 'file', request, tabId, x, y, apps: null, fileTemplates: templates, items: buildItems(null, templates) })
+    setMenu({ kind: 'file', request, tabId, labelPaths: paths, x, y, apps: null, fileTemplates: templates, items: buildItems(null, templates) })
     if (filesOnly) Promise.resolve().then(() => api.listOpenWith(entry.path))
       .then(apps => update({ apps })).catch(error => update({ appsError: String(error) }))
     Promise.resolve().then(() => api.listTemplates()).then(list => {
@@ -2312,7 +2325,7 @@ export default function App() {
           nav(tab.id, parentPath(path))
           setRevealReq({ tabId: tab.id, path, nonce: Date.now() })
         }} />
-      {menu && <ContextMenu menu={menu} onClose={() => setMenu(null)} />}
+      {menu && <ContextMenu menu={renderedMenu} onClose={() => setMenu(null)} />}
       {hoverTip && (
         <div className="drag-tip" style={{ left: hoverTip.x, top: hoverTip.y }}>
           {hoverTip.text}

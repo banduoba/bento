@@ -160,3 +160,104 @@ test('application discovery errors stay visible while Other remains available an
   assert.equal(menu(h).kind, 'blank')
   assert.equal(find(menu(h).items, '打开方式'), undefined)
 })
+
+test('color labels apply to the captured selection without using the file clipboard', async t => {
+  const calls = [], a = entry('a.txt'), b = entry('folder', true)
+  const h = await mountApp(t, {
+    getFileLabels: async paths => paths.map(path => ({ path, color: 6 })),
+    setFileLabel: async (paths, color) => { calls.push([paths, color]); return paths.map(path => ({ path, color })) },
+    copyFilesToClipboard: async () => { throw new Error('Color labels must not write the file clipboard') },
+  })
+  const id = await show(h, b, [b.path, a.path], [a, b])
+  const palette = menu(h).items.find(item => item.colors)
+  assert.ok(palette, 'the file context menu includes a color palette')
+  assert.equal(h.root.findAll(node => node.props.role === 'menuitemcheckbox').length, 7)
+  assert.equal(palette.colors.find(item => item.value === 6).checked, true)
+  assert.equal(find(menu(h).items, '显示简介').shortcut, '⌘I')
+  await h.run(() => h.panes[0].props.onSelect(id, new Set(['/different/selection'])))
+  await pick(h, palette.colors.find(item => item.value === 4))
+  assert.deepEqual(calls, [[[a.path, b.path], 4]])
+  await show(h, a)
+  await pick(h, menu(h).items.find(item => item.colors).colors.find(item => item.value === 0))
+  assert.deepEqual(calls.at(-1), [[a.path], 0])
+  assert.deepEqual(h.alerts, [])
+})
+
+for (const { name, initial, checked, expected } of [
+  { name: 'single tagged file clears', initial: [6], checked: true, expected: 0 },
+  { name: 'uniform file and folder selection clears', initial: [6, 6], checked: true, expected: 0 },
+  { name: 'mixed file and folder selection becomes uniform', initial: [6, 4], checked: 'mixed', expected: 6 },
+]) {
+  test(`clicking the red swatch: ${name}`, async t => {
+    const rows = [entry('a.txt'), entry('folder', true)].slice(0, initial.length)
+    const colors = new Map(rows.map((row, i) => [row.path, initial[i]])), writes = []
+    const h = await mountApp(t, {
+      getFileLabels: async paths => paths.map(path => ({ path, color: colors.get(path) })),
+      setFileLabel: async (paths, color) => {
+        writes.push([paths, color]); paths.forEach(path => colors.set(path, color))
+        return paths.map(path => ({ path, color }))
+      },
+    })
+    const paths = rows.map(row => row.path)
+    const id = await show(h, rows[0], paths, rows)
+    const red = () => h.root.find(n => n.type === 'button' && n.props['aria-label'] === '红色')
+    assert.equal(red().props['aria-checked'], checked)
+    await h.run(() => h.panes[0].props.onSelect(id, new Set(['/different/selection'])))
+    await h.run(() => red().props.onClick())
+    assert.deepEqual(writes, [[paths, expected]])
+    assert.equal(menu(h), undefined)
+    await show(h, rows[0], paths, rows)
+    assert.equal(red().props['aria-checked'], expected === 6)
+  })
+}
+
+test('partial label failures remain visible and late metadata cannot reopen a closed menu', async t => {
+  const gate = deferred(), a = entry('a.txt'), b = entry('b.txt')
+  const h = await mountApp(t, {
+    getFileLabels: () => gate.promise,
+    setFileLabel: async () => [{ path: a.path, color: 2 }, { path: b.path, error: 'Read-only volume' }],
+  })
+  await show(h, a, [a.path, b.path], [a, b])
+  const palette = menu(h).items.find(item => item.colors)
+  assert.ok(palette)
+  await pick(h, palette.colors.find(item => item.value === 2))
+  assert.ok(h.alerts.some(message => message.includes('Read-only volume')))
+  await h.run(() => gate.resolve([{ path: a.path, color: 6 }]))
+  assert.equal(menu(h), undefined)
+})
+
+test('closing and replacing a large-selection menu stops old batches and keeps only one metadata read active', async t => {
+  const requests = []
+  const rows = Array.from({ length: 300 }, (_, i) => entry(`${i}.txt`))
+  const h = await mountApp(t, { getFileLabels: paths => { const request = { ...deferred(), paths }; requests.push(request); return request.promise } })
+  await show(h, rows[0], rows.map(item => item.path), rows)
+  assert.equal(requests[0].paths.length, 128)
+  await h.run(() => menuNode(h).props.onClose())
+  await h.run(() => requests[0].resolve(requests[0].paths.map(path => ({ path, color: 6 }))))
+  assert.equal(requests.length, 1)
+  await show(h, rows[0], rows.map(item => item.path), rows)
+  await show(h, rows[1])
+  await show(h, rows[2])
+  assert.equal(requests.length, 2)
+  await h.run(() => requests[1].resolve(requests[1].paths.map(path => ({ path, color: 6 }))))
+  assert.deepEqual(requests[2].paths, [rows[2].path])
+  await h.run(() => requests[2].resolve([{ path: rows[2].path, color: 4 }]))
+  assert.equal(menu(h).items.find(item => item.colors).colors.find(item => item.value === 4).checked, true)
+})
+
+test('a reopened menu receives successful color writes that started before it opened', async t => {
+  let color = 6
+  const gate = deferred(), a = entry('a.txt')
+  const h = await mountApp(t, {
+    getFileLabels: async paths => paths.map(path => ({ path, color })),
+    setFileLabel: async paths => { await gate.promise; color = 4; return paths.map(path => ({ path, color })) },
+  })
+  await show(h, a)
+  const blue = menu(h).items.find(item => item.colors).colors.find(item => item.value === 4)
+  let operation
+  await h.run(() => { menuNode(h).props.onClose(); operation = blue.action() })
+  await show(h, a)
+  assert.equal(menu(h).items.find(item => item.colors).colors.find(item => item.value === 6).checked, true)
+  await h.run(async () => { gate.resolve(); await operation })
+  assert.equal(menu(h).items.find(item => item.colors).colors.find(item => item.value === 4).checked, true)
+})

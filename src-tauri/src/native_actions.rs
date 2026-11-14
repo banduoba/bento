@@ -223,12 +223,7 @@ pub async fn show_get_info(paths: Vec<String>) -> Result<(), String> {
         let paths = selection(paths)?;
         #[cfg(target_os = "macos")]
         {
-            super::native_files::show_get_info(
-                &paths
-                    .iter()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>(),
-            )
+            super::finder_info::show(&paths)
         }
         #[cfg(not(target_os = "macos"))]
         {
