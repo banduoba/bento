@@ -86,3 +86,73 @@ test('rapid keyboard history travel preserves pending selection before rows arri
   assert.equal(pane(h).selection.size, 0)
   assert.equal(pane(h).reveal, null)
 })
+
+test('pending restores in different panes complete independently', async t => {
+  const h = await mountApp(t)
+  for (const i of [0, 1]) {
+    await select(h, [`/home/item-${i}`], i)
+    await nav(h, '/away', i)
+    await travel(h, 'onBack', i)
+  }
+  const requests = [pane(h, 0).reveal, pane(h, 1).reveal]
+  assert.ok(requests[0]); assert.ok(requests[1])
+  await h.run(() => pane(h, 1).onHistoryReady(requests[1], ['/home/item-1']))
+  await h.run(() => pane(h, 0).onHistoryReady(requests[0], ['/home/item-0']))
+  for (const i of [0, 1]) {
+    assert.deepEqual([...pane(h, i).selection], [`/home/item-${i}`])
+    assert.equal(pane(h, i).reveal.path, `/home/item-${i}`)
+  }
+  await h.run(() => pane(h, 0).onRevealDone())
+  assert.equal(pane(h, 0).reveal, null)
+  assert.ok(pane(h, 1).reveal)
+})
+
+test('creating a folder cancels history restoration before selecting its rename target', async t => {
+  const h = await mountApp(t, { makeDirWithReceipt: async () => ({ path: '/home/New Folder' }) })
+  await select(h, ['/home/old']); await nav(h, '/away'); await travel(h, 'onBack')
+  const pending = pane(h), request = pending.reveal
+  await key(h, 'N', { metaKey: true, shiftKey: true })
+  assert.deepEqual([...pane(h).selection], ['/home/New Folder'])
+  await h.run(() => pending.onHistoryReady(request, ['/home/old']))
+  assert.deepEqual([...pane(h).selection], ['/home/New Folder'])
+  assert.equal(pane(h).reveal, null)
+})
+
+test('a pending restore survives switching away from its tab and back', async t => {
+  const h = await mountApp(t)
+  await select(h, ['/home/remembered']); await nav(h, '/away'); await travel(h, 'onBack')
+  const request = pane(h).reveal
+  await h.run(() => pane(h).onNewTab(0))
+  await select(h, ['/home/other-tab'])
+  await h.run(() => pane(h).onSwitchTab(0, 0))
+  assert.equal(pane(h).reveal.nonce, request.nonce)
+  await h.run(() => pane(h).onHistoryReady(request, ['/home/remembered']))
+  assert.deepEqual([...pane(h).selection], ['/home/remembered'])
+})
+
+test('a completed file transfer takes precedence over an older history restore', async t => {
+  const h = await mountApp(t, {
+    transfer: async () => [{ source: '/src/new', dest: '/home/new', ok: true, identity: { dev: '1', ino: '2' } }],
+  })
+  await select(h, ['/home/old']); await nav(h, '/away'); await travel(h, 'onBack')
+  const before = pane(h), request = before.reveal
+  await h.run(() => pane(h).onDropTransfer('/home', ['/src/new'], 'copy'))
+  assert.deepEqual([...pane(h).selection], ['/home/new'])
+  await h.run(() => before.onHistoryReady(request, ['/home/old']))
+  assert.deepEqual([...pane(h).selection], ['/home/new'])
+  assert.equal(pane(h).reveal.path, '/home/new')
+})
+
+test('a concurrent move removes only the missing member of a pending history selection', async t => {
+  const h = await mountApp(t, {
+    transfer: async () => [{ source: '/home/moved', dest: '/away/moved', ok: true, identity: { dev: '1', ino: '2' } }],
+  })
+  await select(h, ['/home/moved', '/home/kept']); await nav(h, '/away'); await travel(h, 'onBack')
+  const old = pane(h), request = old.reveal
+  await h.run(() => pane(h, 1).onDropTransfer('/away', ['/home/moved'], 'move'))
+  assert.deepEqual(pane(h).reveal.selectionPaths, ['/home/kept'])
+  await h.run(() => old.onHistoryReady(request, ['/home/moved', '/home/kept']))
+  assert.equal(pane(h).selection.size, 0)
+  await h.run(() => pane(h).onHistoryReady(pane(h).reveal, ['/home/kept']))
+  assert.deepEqual([...pane(h).selection], ['/home/kept'])
+})
