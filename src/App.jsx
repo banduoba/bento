@@ -1,3 +1,4 @@
+import { applyFileLabel, fileLabelMenuItem, readFileLabels } from './fileLabels'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -1548,14 +1549,14 @@ export default function App() {
             } }] : []
           })
       : []
-    const buildItems = (discovered, list, appsError) => [
+    const buildItems = (discovered, list, appsError, labels) => [
       { label: '打开', shortcut: shortcutLabel(cfg.shortcuts, 'file-open'), action: () => paths.length === 1 ? openEntry(tabId, entry)
         : nativeMenuAction(() => Promise.all(paths.map(path => api.openPath(path)))) },
       filesOnly ? { label: '打开方式', children: openWithItems(paths, discovered, appsError) } : null,
       paneOpenItems.length ? { label: '在其他窗格打开', children: paneOpenItems } : null,
       canExtract ? { label: '解压缩', action: () => extraction.start(paths, { tabId }) } : null,
       previewPath ? { label: '快速查看', shortcut: shortcutLabel(cfg.shortcuts, 'quick-look'), action: () => previewNavigation.current.open(tabId, previewDir, previewPath, paths) } : null,
-      { label: '显示简介', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
+      { label: '显示简介', shortcut: '⌘I', action: () => nativeMenuAction(() => api.showGetInfo(paths)) },
       { sep: true },
       { label: '拷贝', shortcut: '⌘C', action: () => doCopyCut(tabId, 'copy', paths) },
       { label: '剪切', shortcut: '⌘X', action: () => doCopyCut(tabId, 'move', paths) },
@@ -1572,6 +1573,8 @@ export default function App() {
       { label: '新建', children: newFileItems(tabId, list, parentDir) },
       ...folderDisplayItems(parentDir),
       { sep: true },
+      fileLabelMenuItem(paths, labels, color => nativeMenuAction(() => applyFileLabel(paths, color))),
+      { sep: true },
       { label: entry.is_dir ? '添加到书签' : '将所在文件夹添加到书签', action: () => addFavorite(entry.is_dir ? entry.path : parentDir) },
       { label: '在终端打开', action: () => nativeMenuAction(() => api.openTerminal(termDir)) },
       { label: '复制名称', shortcut: shortcutLabel(cfg.shortcuts, 'edit-copy-names'), action: () => copyPlainNames(tabId, paths) },
@@ -1582,9 +1585,10 @@ export default function App() {
     const update = patch => setMenu(current => {
       if (current?.request !== request) return current
       const next = { ...current, ...patch }
-      return { ...next, items: buildItems(next.apps, next.fileTemplates, next.appsError) }
+      return { ...next, items: buildItems(next.apps, next.fileTemplates, next.appsError, next.fileLabels) }
     })
     setMenu({ kind: 'file', request, tabId, x, y, apps: null, fileTemplates: templates, items: buildItems(null, templates) })
+    Promise.resolve().then(() => readFileLabels(paths)).then(fileLabels => update({ fileLabels })).catch(() => {})
     if (filesOnly) Promise.resolve().then(() => api.listOpenWith(entry.path))
       .then(apps => update({ apps })).catch(error => update({ appsError: String(error) }))
     Promise.resolve().then(() => api.listTemplates()).then(list => {

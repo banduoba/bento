@@ -160,3 +160,40 @@ test('application discovery errors stay visible while Other remains available an
   assert.equal(menu(h).kind, 'blank')
   assert.equal(find(menu(h).items, '打开方式'), undefined)
 })
+
+test('color labels apply to the captured selection without using the file clipboard', async t => {
+  const calls = [], a = entry('a.txt'), b = entry('folder', true)
+  const h = await mountApp(t, {
+    getFileLabels: async paths => paths.map(path => ({ path, color: 6 })),
+    setFileLabel: async (paths, color) => { calls.push([paths, color]); return paths.map(path => ({ path, color })) },
+    copyFilesToClipboard: async () => { throw new Error('Color labels must not write the file clipboard') },
+  })
+  const id = await show(h, b, [b.path, a.path], [a, b])
+  const palette = menu(h).items.find(item => item.colors)
+  assert.ok(palette, 'the file context menu includes a color palette')
+  assert.equal(h.root.findAll(node => node.props.role === 'menuitemcheckbox').length, 7)
+  assert.equal(palette.colors.find(item => item.value === 6).checked, true)
+  assert.equal(find(menu(h).items, '显示简介').shortcut, '⌘I')
+  await h.run(() => h.panes[0].props.onSelect(id, new Set(['/different/selection'])))
+  await pick(h, palette.colors.find(item => item.value === 4))
+  assert.deepEqual(calls, [[[a.path, b.path], 4]])
+  await show(h, a)
+  await pick(h, menu(h).items.find(item => item.colors).colors.find(item => item.value === 0))
+  assert.deepEqual(calls.at(-1), [[a.path], 0])
+  assert.deepEqual(h.alerts, [])
+})
+
+test('partial label failures remain visible and late metadata cannot reopen a closed menu', async t => {
+  const gate = deferred(), a = entry('a.txt'), b = entry('b.txt')
+  const h = await mountApp(t, {
+    getFileLabels: () => gate.promise,
+    setFileLabel: async () => [{ path: a.path, color: 2 }, { path: b.path, error: 'Read-only volume' }],
+  })
+  await show(h, a, [a.path, b.path], [a, b])
+  const palette = menu(h).items.find(item => item.colors)
+  assert.ok(palette)
+  await pick(h, palette.colors.find(item => item.value === 2))
+  assert.ok(h.alerts.some(message => message.includes('Read-only volume')))
+  await h.run(() => gate.resolve([{ path: a.path, color: 6 }]))
+  assert.equal(menu(h), undefined)
+})

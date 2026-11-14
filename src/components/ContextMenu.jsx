@@ -93,10 +93,31 @@ function MenuBranch({ item, onPick, rootRef }) {
   )
 }
 
+function ColorPalette({ item, onPick }) {
+  return <div className="menu-color-palette" role="group" aria-label={item.label}>
+    {item.colors.map(color => <button
+      key={color.value}
+      type="button"
+      className={`menu-color${color.value === 0 ? ' remove-color' : ''}`}
+      role={color.value === 0 ? 'menuitem' : 'menuitemcheckbox'}
+      aria-label={color.label}
+      aria-checked={color.value === 0 ? undefined : color.checked}
+      title={color.label}
+      onClick={() => onPick(color)}
+    >
+      {color.value === 0 ? <span aria-hidden="true">×</span> : <span className={`menu-color-swatch${color.value === 5 ? ' yellow' : ''}`} style={{ background: color.color }} aria-hidden="true">
+        {color.checked === true ? '✓' : color.checked === 'mixed' ? '−' : ''}
+      </span>}
+    </button>)}
+  </div>
+}
+
 function MenuItems({ items, onPick, rootRef }) {
   return items.map((it, i) =>
     it.sep ? (
       <hr key={`sep-${i}`} />
+    ) : it.colors ? (
+      <ColorPalette key={`colors-${i}`} item={it} onPick={onPick} />
     ) : it.children ? (
       <MenuBranch key={`${it.label}-${i}`} item={it} onPick={onPick} rootRef={rootRef} />
     ) : (

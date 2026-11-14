@@ -648,3 +648,24 @@ test('selected file is preserved by path when later snapshots insert results bef
   await h.run(() => h.input().props.onKeyDown({ key:'Enter',preventDefault(){} }))
   assert.deepEqual(h.located, [['/work','/work/C.txt']])
 })
+
+test('search result labels and native Info preserve results and surface action failures', async t => {
+  const calls = [], color = new Map()
+  const h = await mount(t, { mode: 'name' })
+  globalThis.__searchTest.getFileLabels = async paths => paths.map(path => ({ path, color: color.get(path) || 0 }))
+  globalThis.__searchTest.showGetInfo = async paths => { calls.push(paths); throw new Error('Finder permission needed') }
+  globalThis.__searchTest.setFileLabel = async (paths, value) => { paths.forEach(path => color.set(path, value)); return paths.map(path => ({ path, color: value })) }
+  await h.type('needle')
+  await h.flush()
+  await h.resolve(0, result([item('one.txt')]))
+  const showMenu = () => h.run(() => h.rows()[0].props.onContextMenu({ preventDefault() {}, stopPropagation() {}, clientX: 2, clientY: 2 }))
+  const getMenu = () => h.root.findAll(node => node.props.menu?.items)[0]
+  await showMenu()
+  await h.run(() => { void getMenu().props.menu.items.find(entry => entry.label === '显示简介').action() })
+  assert.deepEqual(calls, [['/work/one.txt']])
+  assert.ok(h.text().includes('Finder permission needed'))
+  assert.equal(h.rows().length, 1)
+  await h.run(() => { void getMenu().props.menu.items.find(entry => entry.colors).colors.find(entry => entry.value === 6).action() })
+  assert.equal(h.rows()[0].props['data-label-color'], 6)
+  assert.ok(!h.text().includes('Finder permission needed'))
+})

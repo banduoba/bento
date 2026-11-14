@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added native Finder color labels with batch assignment, removal, preserved custom tags, and tinted backgrounds across file and search views. Fixed Get Info to open Finder’s real information windows instead of setting their read-only visibility property; paths are passed as arguments and failures/timeouts are reported.
+
 - Fixed live compression size tracking to include Info-ZIP temporary output before final rename. Successful compression and extraction select their outputs automatically and dismiss success feedback after four seconds; errors remain visible.
 
 - Added tracked ZIP creation with generated-size feedback, cancellation, atomic collision-safe output publication and preserved guarded Undo; extraction now automatically selects successful output folders in the originating tab.

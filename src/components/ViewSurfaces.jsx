@@ -1,3 +1,6 @@
+import useFileLabels from '../useFileLabels'
+import { fileLabelStyle } from '../fileLabels'
+import FileLabelDot from './FileLabelDot'
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { parentPath } from '../format'
@@ -20,9 +23,11 @@ function sameTrail(a, b) {
   return a.length === b.length && a.every((entry, index) => entry.path === b[index].path)
 }
 
-function FileTile({ entry, selected, trailOpen, cut, current, renaming, viewportRef, renameRef, onRenameChange, onRenameCommit, onRenameCancel, onRenameHeight, onClick, onOpen, onMenu, onDragStart, onDrop, className }) {
+function FileTile({ entry, selected, trailOpen, cut, current, renaming, viewportRef, renameRef, onRenameChange, onRenameCommit, onRenameCancel, onRenameHeight, onClick, onOpen, onMenu, onDragStart, onDrop, className, label }) {
   return <div
     data-path={entry.path}
+    data-label-color={label || undefined}
+    style={fileLabelStyle(label)}
     data-dir={entry.is_dir ? '1' : undefined}
     className={`${className}${selected ? ' selected' : ''}${trailOpen ? ' trail-open' : ''}${cut ? ' cut' : ''}${current ? ' kbd-current' : ''}`}
     title={entry.name}
@@ -37,6 +42,7 @@ function FileTile({ entry, selected, trailOpen, cut, current, renaming, viewport
     {renaming
       ? <InlineRename inputRef={renameRef} viewportRef={viewportRef} value={renaming.value} onChange={onRenameChange} onCommit={onRenameCommit} onCancel={onRenameCancel} onHeight={onRenameHeight} />
       : <span className="view-file-name">{entry.name}</span>}
+    {!renaming && <FileLabelDot value={label} />}
     {entry.is_dir && className === 'column-item' && <span className="column-chevron">›</span>}
   </div>
 }
@@ -96,6 +102,8 @@ export function IconView(props) {
     rangeExtractor: keepEditorMounted(renameIndex < 0 ? -1 : Math.floor(renameIndex / columns)),
     getItemKey: row => rows[row * columns]?.path ?? row,
   })
+  const visibleRows = virtual.getVirtualItems()
+  const labels = useFileLabels(visibleRows.flatMap(row => rows.slice(row.index * columns, (row.index + 1) * columns)).map(entry => entry.path), rows)
   useEffect(() => {
     const row = renameIndex < 0 ? -1 : Math.floor(renameIndex / columns)
     const previous = previousRenameRow.current
@@ -146,8 +154,8 @@ export function IconView(props) {
     {props.loading && <div className="loading">载入中…</div>}
     {!props.loading && rows.length === 0 && <div className="empty">{props.emptyText}</div>}
     <div className="icon-rows" ref={innerRef} style={{ height: virtual.getTotalSize() }}>
-      {virtual.getVirtualItems().map(row => <div key={row.key} className="icon-grid-row" style={{ transform: `translateY(${row.start}px)`, height: renameSize?.row === row.index ? renameSize.size : row.size, gridTemplateColumns: `repeat(${columns}, ${TILE_WIDTH}px)` }}>
-        {rows.slice(row.index * columns, (row.index + 1) * columns).map(entry => <FileTile key={entry.path} {...tiles(entry)} className="icon-item" onRenameChange={props.onRenameChange} onRenameCommit={props.onRenameCommit} onRenameCancel={props.onRenameCancel} onRenameHeight={height => {
+      {visibleRows.map(row => <div key={row.key} className="icon-grid-row" style={{ transform: `translateY(${row.start}px)`, height: renameSize?.row === row.index ? renameSize.size : row.size, gridTemplateColumns: `repeat(${columns}, ${TILE_WIDTH}px)` }}>
+        {rows.slice(row.index * columns, (row.index + 1) * columns).map(entry => <FileTile key={entry.path} {...tiles(entry)} label={labels[entry.path]} className="icon-item" onRenameChange={props.onRenameChange} onRenameCommit={props.onRenameCommit} onRenameCancel={props.onRenameCancel} onRenameHeight={height => {
           if (renaming?.path !== entry.path) return
           const size = Math.max(TILE_HEIGHT, height + 62)
           virtual.resizeItem(row.index, size)
@@ -171,6 +179,8 @@ function Column({ depth, path, entries, pending, active, selection, trailPath, c
     rangeExtractor: keepEditorMounted(renameIndex),
     getItemKey: index => entries[index]?.path ?? index,
   })
+  const visibleItems = virtual.getVirtualItems()
+  const labels = useFileLabels(visibleItems.map(item => entries[item.index]?.path), entries)
   const tiles = useTileActions({ ...common, rows: entries, selection: active ? selection : new Set(), viewportRef: ref, scopeKey: active })
   useEffect(() => {
     const previous = previousRenameIndex.current
@@ -205,13 +215,14 @@ function Column({ depth, path, entries, pending, active, selection, trailPath, c
       {pending && <div className="column-status">载入中…</div>}
       {!pending && depth > 0 && entries.length === 0 && <div className="column-status">文件夹为空</div>}
       <div className="column-inner" style={{ height: virtual.getTotalSize() }}>
-        {virtual.getVirtualItems().map(item => {
+        {visibleItems.map(item => {
           const entry = entries[item.index]
           if (!entry) return null
           const tile = tiles(entry)
           return <div key={item.key} className="column-position" style={{ transform: `translateY(${item.start}px)`, height: item.size }}>
             <FileTile
               {...tile}
+              label={labels[entry.path]}
               className="column-item"
               selected={active && selection.has(entry.path)}
               trailOpen={trailPath === entry.path && !(active && selection.has(entry.path))}

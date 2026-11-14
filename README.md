@@ -39,6 +39,9 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 
 ## Features
 
+File context menus include macOS Finder **Get Info** (`⌘I` in panes) and seven native color labels. Assign a color to the selected files or folders, or use **Remove color label** to clear it; existing custom tag names are preserved. Tinted backgrounds and color dots appear in list, icon, column and search views, and remain after reopening Bento. Labels load asynchronously without blocking directory or search results.
+
+
 | | |
 | --- | --- |
 | **Multi-pane layouts** | 10 presets — single, side-by-side, stacked, 2×2, and several 3-pane arrangements. Switch with the toolbar or View menu. |
