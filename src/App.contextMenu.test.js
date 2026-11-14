@@ -197,3 +197,39 @@ test('partial label failures remain visible and late metadata cannot reopen a cl
   await h.run(() => gate.resolve([{ path: a.path, color: 6 }]))
   assert.equal(menu(h), undefined)
 })
+
+test('closing and replacing a large-selection menu stops old batches and keeps only one metadata read active', async t => {
+  const requests = []
+  const rows = Array.from({ length: 300 }, (_, i) => entry(`${i}.txt`))
+  const h = await mountApp(t, { getFileLabels: paths => { const request = { ...deferred(), paths }; requests.push(request); return request.promise } })
+  await show(h, rows[0], rows.map(item => item.path), rows)
+  assert.equal(requests[0].paths.length, 128)
+  await h.run(() => menuNode(h).props.onClose())
+  await h.run(() => requests[0].resolve(requests[0].paths.map(path => ({ path, color: 6 }))))
+  assert.equal(requests.length, 1)
+  await show(h, rows[0], rows.map(item => item.path), rows)
+  await show(h, rows[1])
+  await show(h, rows[2])
+  assert.equal(requests.length, 2)
+  await h.run(() => requests[1].resolve(requests[1].paths.map(path => ({ path, color: 6 }))))
+  assert.deepEqual(requests[2].paths, [rows[2].path])
+  await h.run(() => requests[2].resolve([{ path: rows[2].path, color: 4 }]))
+  assert.equal(menu(h).items.find(item => item.colors).colors.find(item => item.value === 4).checked, true)
+})
+
+test('a reopened menu receives successful color writes that started before it opened', async t => {
+  let color = 6
+  const gate = deferred(), a = entry('a.txt')
+  const h = await mountApp(t, {
+    getFileLabels: async paths => paths.map(path => ({ path, color })),
+    setFileLabel: async paths => { await gate.promise; color = 4; return paths.map(path => ({ path, color })) },
+  })
+  await show(h, a)
+  const blue = menu(h).items.find(item => item.colors).colors.find(item => item.value === 4)
+  let operation
+  await h.run(() => { menuNode(h).props.onClose(); operation = blue.action() })
+  await show(h, a)
+  assert.equal(menu(h).items.find(item => item.colors).colors.find(item => item.value === 6).checked, true)
+  await h.run(async () => { gate.resolve(); await operation })
+  assert.equal(menu(h).items.find(item => item.colors).colors.find(item => item.value === 4).checked, true)
+})
