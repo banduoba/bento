@@ -21,7 +21,8 @@ export function fileLabelMenuItem(paths, labels, apply) {
   const values = new Map((labels || []).filter(validFileLabel).map(item => [item.path, item.color]))
   return { label: '颜色标签', colors: [...FILE_LABEL_COLORS, { value: 0, label: '移除颜色标签' }].map(color => {
     const count = paths.filter(path => values.get(path) === color.value).length
-    return { ...color, checked: count === paths.length ? true : count ? 'mixed' : false, action: () => apply(color.value) }
+    const checked = count > 0 && count === paths.length ? true : count ? 'mixed' : false
+    return { ...color, checked, action: () => apply(checked === true ? 0 : color.value) }
   }) }
 }
 

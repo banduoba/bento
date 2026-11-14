@@ -183,6 +183,34 @@ test('color labels apply to the captured selection without using the file clipbo
   assert.deepEqual(h.alerts, [])
 })
 
+for (const { name, initial, checked, expected } of [
+  { name: 'single tagged file clears', initial: [6], checked: true, expected: 0 },
+  { name: 'uniform file and folder selection clears', initial: [6, 6], checked: true, expected: 0 },
+  { name: 'mixed file and folder selection becomes uniform', initial: [6, 4], checked: 'mixed', expected: 6 },
+]) {
+  test(`clicking the red swatch: ${name}`, async t => {
+    const rows = [entry('a.txt'), entry('folder', true)].slice(0, initial.length)
+    const colors = new Map(rows.map((row, i) => [row.path, initial[i]])), writes = []
+    const h = await mountApp(t, {
+      getFileLabels: async paths => paths.map(path => ({ path, color: colors.get(path) })),
+      setFileLabel: async (paths, color) => {
+        writes.push([paths, color]); paths.forEach(path => colors.set(path, color))
+        return paths.map(path => ({ path, color }))
+      },
+    })
+    const paths = rows.map(row => row.path)
+    const id = await show(h, rows[0], paths, rows)
+    const red = () => h.root.find(n => n.type === 'button' && n.props['aria-label'] === '红色')
+    assert.equal(red().props['aria-checked'], checked)
+    await h.run(() => h.panes[0].props.onSelect(id, new Set(['/different/selection'])))
+    await h.run(() => red().props.onClick())
+    assert.deepEqual(writes, [[paths, expected]])
+    assert.equal(menu(h), undefined)
+    await show(h, rows[0], paths, rows)
+    assert.equal(red().props['aria-checked'], expected === 6)
+  })
+}
+
 test('partial label failures remain visible and late metadata cannot reopen a closed menu', async t => {
   const gate = deferred(), a = entry('a.txt'), b = entry('b.txt')
   const h = await mountApp(t, {
