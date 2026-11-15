@@ -4,6 +4,8 @@ use serde::Serialize;
 #[cfg(target_os = "macos")]
 mod quick_look;
 #[cfg(target_os = "macos")]
+mod preview_edit;
+#[cfg(target_os = "macos")]
 mod native_files;
 
 use std::ffi::CString;
