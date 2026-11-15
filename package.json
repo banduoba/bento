@@ -10,6 +10,7 @@
     "vite:build": "vite build",
     "dev": "tauri dev",
     "build": "tauri build",
+    "clean:dev": "cargo clean --manifest-path src-tauri/Cargo.toml --profile dev",
     "bench:fixture:10k": "node scripts/bench/generate-fixture.mjs --preset 10k",
     "bench:fixture:100k": "node scripts/bench/generate-fixture.mjs --preset 100k",
     "bench:measure": "node scripts/bench/measure.mjs",
