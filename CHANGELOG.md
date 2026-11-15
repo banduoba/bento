@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed Copy and Select All in the focused native Quick Look preview, including PDF and text documents, while preserving file-list clipboard operations and copy-name/path shortcuts.
+
 - Back and Forward restore each tab's per-visit selection after directory loading and scroll it into view. Missing or filtered items are skipped, new user selections cancel pending restores, and no-op navigation preserves selection.
 
 - Added native Finder color labels with batch assignment, removal by clicking the checked color again, preserved custom tags, and tinted backgrounds across file and search views. Mixed selections receive the clicked color uniformly. Fixed Get Info to open Finder’s real information windows instead of setting their read-only visibility property; paths are passed as arguments and failures/timeouts are reported.

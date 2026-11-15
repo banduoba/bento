@@ -179,6 +179,23 @@ fn install_key_monitor() {
         if !panel_is_visible(mtm) {
             return pass;
         }
+        if let Some(panel) = shared_panel(mtm) {
+            let characters = event_ref
+                .charactersIgnoringModifiers()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+            if let Some(action) = crate::preview_edit::key_action(
+                &characters,
+                event_ref.modifierFlags(),
+                panel.isKeyWindow(),
+                event_ref.windowNumber() == panel.windowNumber(),
+            ) {
+                crate::preview_edit::perform(&panel, action);
+                // Consume even when no text can be copied: do not fall through
+                // to the file-list clipboard or a global menu shortcut.
+                return std::ptr::null_mut();
+            }
+        }
         let ctrl = controller(mtm);
         let mods = NSEventModifierFlags::Command
             | NSEventModifierFlags::Control
@@ -213,6 +230,21 @@ fn install_key_monitor() {
     if monitor.is_none() {
         eprintln!("[quicklook] local key monitor was not installed");
     }
+}
+
+/// The menu uses the same native text route as Command-C/Command-A while the
+/// preview owns keyboard focus. File-list commands keep their existing route.
+pub fn handle_edit_menu(id: &str) -> bool {
+    let Some(mtm) = MainThreadMarker::new() else { return false; };
+    if !panel_is_visible(mtm) {
+        return false;
+    }
+    let Some(panel) = shared_panel(mtm) else { return false; };
+    let Some(action) = crate::preview_edit::menu_action(id, panel.isKeyWindow()) else {
+        return false;
+    };
+    crate::preview_edit::perform(&panel, action);
+    true
 }
 
 fn attach_panel(panel: &QLPreviewPanel, ctrl: &QuickLookController) {

@@ -326,6 +326,10 @@ pub fn install(app: &App) -> tauri::Result<()> {
 }
 
 pub fn dispatch(app: &AppHandle, id: &str) {
+    #[cfg(target_os = "macos")]
+    if crate::quick_look::handle_edit_menu(id) {
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.emit("bento-menu-command", id);
     }
