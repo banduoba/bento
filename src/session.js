@@ -10,14 +10,20 @@ const counts = { '1': 1, '2c': 2, '2r': 2, '4': 4, '3l1r': 3, '3l2r': 3, '3t2b':
 const layoutOf = l => Object.hasOwn(counts, l) ? String(l) : '2c'
 const indexOf = (n, size, fallback = 0) => Number.isInteger(n) ? Math.min(Math.max(n, 0), size - 1) : fallback
 
-export function navigateTab(tab, { path, step } = {}) {
+export function navigateTab(tab, { path, step, selection = [] } = {}) {
+  const remember = () => {
+    const snapshots = tab.history.map((_, i) => tab.historySelections?.[i] || [])
+    snapshots[tab.hi] = [...selection].filter(validPath)
+    return snapshots
+  }
   if (step) {
     const hi = tab.hi + step
-    return hi >= 0 && hi < tab.history.length ? { ...tab, hi, path: tab.history[hi] } : tab
+    return hi >= 0 && hi < tab.history.length ? { ...tab, hi, path: tab.history[hi], historySelections: remember() } : tab
   }
   if (!validPath(path) || path === tab.path) return tab
   const history = [...tab.history.slice(0, tab.hi + 1), path]
-  return { ...tab, path, history, hi: history.length - 1 }
+  const historySelections = [...remember().slice(0, tab.hi + 1), []]
+  return { ...tab, path, history, hi: history.length - 1, historySelections }
 }
 
 export function sanitizePanes(raw, home) {

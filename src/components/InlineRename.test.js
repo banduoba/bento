@@ -107,7 +107,7 @@ const commitSource=app.slice(commitStart,commitEnd).replace('  const commitRenam
 test('actual App commit closes empty, unchanged and rejected renames before native outcome',async()=>{
   for(const value of ['', 'file.txt', 'invalid/name']) {
     const history=[],renaming={tabId:'t',path:'/file.txt',value}
-    const callback=new Function('renaming','setRenaming','basename','renameItems','alert','setSel',`return (${commitSource})`)(renaming,v=>history.push(['editor',v]),p=>p.slice(p.lastIndexOf('/')+1),()=>{history.push(['native']);return Promise.resolve(['failed'])},()=>history.push(['error']),()=>history.push(['selection']))
+    const callback=new Function('renaming','setRenaming','basename','renameItems','alert','setSel','setHistoryRequest',`return (${commitSource})`)(renaming,v=>history.push(['editor',v]),p=>p.slice(p.lastIndexOf('/')+1),()=>{history.push(['native']);return Promise.resolve(['failed'])},()=>history.push(['error']),()=>history.push(['selection']),()=>history.push(['cancel-history']))
     callback();assert.deepEqual(history[0],['editor',null])
     if(value==='invalid/name'){assert.deepEqual(history[1],['native']);await Promise.resolve();assert.deepEqual(history[2],['error'])}
     else assert.equal(history.length,1)

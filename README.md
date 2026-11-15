@@ -39,6 +39,8 @@ It is built with a **Rust** backend on **Tauri 2** and a **React 19** interface,
 
 ## Features
 
+Back and Forward remember the selection for each folder visit in the current tab. After the directory finishes loading, Bento restores surviving visible items and scrolls the first selected item into view. A new selection cancels any pending restoration.
+
 File context menus include macOS Finder **Get Info** (`⌘I` in panes) and seven native color labels. Assign a color to the selected files or folders, or click the checked color again to clear it. For a mixed selection, clicking a color assigns it to every selected item. **Remove color label** also clears colors; existing custom tag names are preserved. Tinted backgrounds and color dots appear in list, icon, column and search views, and remain after reopening Bento. Labels load asynchronously without blocking directory or search results.
 
 

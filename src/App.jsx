@@ -172,9 +172,34 @@ export default function App() {
   const [wsRenaming, setWsRenaming] = useState(null) // { id, value }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsImportApplied, setSettingsImportApplied] = useState(null)
-  const [revealReq, setRevealReq] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
+  const [revealReq, setRevealReqState] = useState(null) // { tabId, path, nonce } 搜索定位后选中文件
   const revealReqRef = useRef(null)
   revealReqRef.current = revealReq
+  // Pending and ready history reveals belong to each tab, including inactive tabs.
+  const [historyRequests, setHistoryRequests] = useState({})
+  const historyRequestsRef = useRef({})
+  const setHistoryRequest = (tabId, request) => {
+    if (!request && !historyRequestsRef.current[tabId]) return
+    const next = { ...historyRequestsRef.current }
+    if (request) next[tabId] = request
+    else delete next[tabId]
+    // Invalidate synchronously so an already queued listing callback cannot win.
+    historyRequestsRef.current = next
+    setHistoryRequests(next)
+  }
+  const setRevealReq = request => {
+    if (request && typeof request !== 'function') setHistoryRequest(request.tabId, null)
+    setRevealReqState(request)
+  }
+  const cancelHistoryPaths = paths => {
+    for (const [tabId, request] of Object.entries(historyRequestsRef.current)) {
+      const remaining = request.selectionPaths.filter(path => !paths.has(path))
+      if (remaining.length !== request.selectionPaths.length) {
+        setHistoryRequest(tabId, remaining.length ? { ...request, path: remaining[0], selectionPaths: remaining,
+          nonce: `history-${++transferRevealSequence.current}` } : null)
+      }
+    }
+  }
   const transferRevealSequence = useRef(0)
   const [springOpen, setSpringOpen] = useState(null)
   const [springHover, setSpringHover] = useState(null)
@@ -598,10 +623,17 @@ export default function App() {
   }
 
   const paneIndexOf = (tabId) => cfg.panes.findIndex((p) => p.tabs.some((t) => t.id === tabId))
-  const locationChanged = tabId => {
+  const locationChanged = (tabId, preserveHistory = false) => {
     if (!tabId) return
     tabLocationRevisions.current[tabId] = (tabLocationRevisions.current[tabId] || 0) + 1
-    setRevealReq(request => request?.tabId === tabId && request.selectionPaths ? null : request)
+    if (!preserveHistory) setHistoryRequest(tabId, null)
+    setRevealReq(request => request?.tabId === tabId ? null : request)
+  }
+
+  const selectionForNavigation = tabId => {
+    const pending = historyRequestsRef.current[tabId]
+    return pending?.kind === 'history'
+      ? pending.selectionPaths : sel[tabId] || EMPTY_SELECTION
   }
 
   const nav = (tabId, path, isRefresh) => {
@@ -609,16 +641,36 @@ export default function App() {
       refreshTab(tabId)
       return
     }
+    const current = locateTab(tabId)
+    if (!current || navigateTab(current, { path }) === current) return
+    const selection = selectionForNavigation(tabId)
     trace(`nav tab=${tabId} -> ${path}`)
     locationChanged(tabId)
-    updateTab(tabId, t => navigateTab(t, { path }))
+    updateTab(tabId, t => navigateTab(t, { path, selection }))
     setSel(s => ({ ...s, [tabId]: new Set() }))
   }
 
   const travel = (tabId, step) => {
+    const current = locateTab(tabId)
+    if (!current) return
+    const selection = selectionForNavigation(tabId)
+    const next = navigateTab(current, { step, selection })
+    if (next === current) return
     locationChanged(tabId)
-    updateTab(tabId, t => navigateTab(t, { step }))
+    updateTab(tabId, t => navigateTab(t, { step, selection }))
     setSel(s => ({ ...s, [tabId]: new Set() }))
+    const paths = next.historySelections[next.hi]
+    if (paths?.length) setHistoryRequest(tabId, { tabId, root: next.path, kind: 'history', path: paths[0], selectionPaths: paths, nonce: `history-${++transferRevealSequence.current}` })
+  }
+  const historyReady = (request, paths) => {
+    const pending = historyRequestsRef.current[request.tabId]
+    if (pending?.nonce !== request.nonce || pending.kind !== 'history') return
+    const tab = cfgRef.current?.panes.flatMap(pane => pane.tabs).find(tab => tab.id === request.tabId)
+    if (tab?.path !== request.root) return
+    const existing = new Set(paths)
+    const selected = request.selectionPaths.filter(path => existing.has(path))
+    setSel(s => ({ ...s, [request.tabId]: new Set(selected) }))
+    setHistoryRequest(request.tabId, selected.length ? { ...request, kind: 'history-ready', path: selected[0], selectionPaths: selected } : null)
   }
   const navBack = tabId => travel(tabId, -1)
   const navForward = tabId => travel(tabId, 1)
@@ -652,8 +704,8 @@ export default function App() {
   const switchTab = (pi, ti) => {
     const pane = cfgRef.current?.panes[pi]
     if (pane && pane.active !== ti) {
-      locationChanged(pane.tabs[pane.active]?.id)
-      locationChanged(pane.tabs[ti]?.id)
+      locationChanged(pane.tabs[pane.active]?.id, true)
+      locationChanged(pane.tabs[ti]?.id, true)
     }
     setCfg((c) => ({
       ...c,
@@ -898,6 +950,8 @@ export default function App() {
 
   // ---------- 工作区 ----------
   const resetTransientState = () => {
+    historyRequestsRef.current = {}
+    setHistoryRequests({})
     setSel({})
     setFilters({})
     rowsCache.current = {}
@@ -995,6 +1049,7 @@ export default function App() {
 
   // ---------- 选择 ----------
   const onSelect = (tabId, next) => {
+    setHistoryRequest(tabId, null)
     tabSelectionRevisions.current[tabId] = (tabSelectionRevisions.current[tabId] || 0) + 1
     setRevealReq(request => request?.tabId === tabId && request.selectionPaths ? null : request)
     setSel((s) => ({ ...s, [tabId]: next }))
@@ -1102,6 +1157,7 @@ export default function App() {
   const releasePaths = paths => {
     const gone = new Set(paths)
     if (gone.size) {
+      cancelHistoryPaths(gone)
       setSel(s => Object.fromEntries(Object.entries(s).map(([id, paths]) => [id, new Set([...paths].filter(p => !gone.has(p)))])))
       setRevealReq(request => gone.has(request?.path) ? null : request)
       window.dispatchEvent(new CustomEvent('bento-moved', { detail: { paths: [...gone] } }))
@@ -1149,6 +1205,7 @@ export default function App() {
     const paths = [...new Set(receipts.map(r => r.dest).filter(path => parentPath(path) === target.dest
       && (current.showHidden || !basename(path).startsWith('.')) && (!match || match(basename(path)))))]
     if (!paths.length) return // folder-row drops and paths outside this listing keep their existing feedback
+    setHistoryRequest(target.tabId, null)
     setSel(s => ({ ...s, [target.tabId]: new Set(paths) }))
     // Column child directories use their row selection; list and icon views can
     // scroll to a receipt through Pane's existing reveal request.
@@ -1263,6 +1320,7 @@ export default function App() {
       if (result?.error || result?.cancelled || entries.length !== list.length || known.length !== entries.length) invalidateUndo(boundary)
       refreshDirectories([...list.map(parentPath), ...entries.filter(e => e.trashed).map(e => parentPath(e.trashed))])
       const gone = new Set(entries.map(e => e.original))
+      cancelHistoryPaths(gone)
       setSel(s => ({ ...s, [tabId]: new Set([...(s[tabId] || [])].filter(p => !gone.has(p))) }))
       if (known.length) pushUndo(restoreUndo(known), [...new Set(known.flatMap(r => [parentPath(r.source), parentPath(r.dest)]))])
       if (result?.error && !result.cancelled) alert(result.error)
@@ -1434,6 +1492,7 @@ export default function App() {
       if (identified(item)) pushUndo(trashUndo([item]), [parentPath(item.dest)])
       else invalidateUndo(boundary)
       if (receipt?.path) {
+        setHistoryRequest(tabId, null)
         setSel(s => ({ ...s, [tabId]: new Set([receipt.path]) }))
         setRenaming({ tabId, path: receipt.path, value: basename(receipt.path), selectAll })
       }
@@ -1507,6 +1566,7 @@ export default function App() {
     if (!value || value.trim() === basename(path)) return
     renameItems([{ path, newName: value }]).then(errors => {
       if (errors.length) alert(errors.join('\n'))
+      setHistoryRequest(tabId, null)
       setSel(s => ({ ...s, [tabId]: new Set() }))
     })
   }
@@ -2236,8 +2296,15 @@ export default function App() {
               cutSet={cutSet}
               editPathSignal={i === focusIdx ? pathEditTick : 0}
               flash={i === flashPane}
-              reveal={revealReq && revealReq.tabId === p.tabs[p.active]?.id ? revealReq : null}
+              reveal={historyRequests[p.tabs[p.active]?.id] || (revealReq?.tabId === p.tabs[p.active]?.id ? revealReq : null)}
+              onHistoryReady={historyReady}
               onRevealDone={() => {
+                const tabId = p.tabs[p.active]?.id
+                const history = historyRequests[tabId]
+                if (history) {
+                  if (historyRequestsRef.current[tabId]?.nonce === history.nonce) setHistoryRequest(tabId, null)
+                  return
+                }
                 if (revealReqRef.current?.nonce !== revealReq?.nonce) return
                 // 虚拟行先由 Pane 挂载，再从原滚动位置按 nearest 对齐。
                 if (revealReq?.scrollTop != null) {
@@ -2269,6 +2336,7 @@ export default function App() {
               onSwitchTab={switchTab}
               onDropTransfer={(dest, paths, mode, onSuccess) => transferInto(dest, paths, mode, onSuccess, p.tabs[p.active]?.id)}
               onFilter={(tid, v) => {
+                setHistoryRequest(tid, null)
                 setRevealReq(request => request?.tabId === tid && request.selectionPaths ? null : request)
                 setFilters((f) => ({ ...f, [tid]: v }))
               }}
@@ -2404,6 +2472,7 @@ export default function App() {
           onApply={async (items) => {
             const errors = await renameItems(items)
             const tid = batchRename.tabId
+            setHistoryRequest(tid, null)
             setBatchRename(null)
             setSel((s) => ({ ...s, [tid]: new Set() }))
             refreshDirectories(batchRename.items.map(item => parentPath(item.path)))
