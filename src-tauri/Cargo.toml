@@ -27,6 +27,16 @@ tauri-plugin-drag = "2"
 tauri-plugin-dialog = "2"
 bento-fswatch = { path = "fswatch" }
 
+# Keep useful application backtraces without retaining full type/variable debug
+# data or accumulating incremental artifacts across development worktrees.
+# Cargo's test profile inherits these settings.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 lto = true
 codegen-units = 1

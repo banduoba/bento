@@ -119,6 +119,10 @@ npm run build
 npm run dev        # Tauri 开发模式（热更新）
 ```
 
+开发和测试构建只保留应用错误回溯所需的行号，省略依赖的调试信息，并关闭增量编译以减少本地磁盘占用。修改 Rust 代码后的重新编译可能稍慢。需要调试应用变量时，可运行 `CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_DEV_INCREMENTAL=true npm run dev`。
+
+没有构建或开发版应用运行时，可执行 `npm run clean:dev`，清理当前编译目录内的调试／测试产物。该命令保留正式版安装包；下次开发构建或运行测试时会重新编译依赖。使用多个 worktree 时，可为本项目指定同一个 `CARGO_TARGET_DIR`，避免重复缓存；构建和清理命令均遵循此变量。
+
 **首次启动**
 
 - 应用使用临时（ad-hoc）签名，首次打开 macOS 可能要求确认（*右键 → 打开*）。

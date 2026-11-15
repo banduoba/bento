@@ -119,6 +119,10 @@ The app and a disk image are written to `src-tauri/target/release/bundle/` (`mac
 npm run dev        # Tauri dev mode with hot reload
 ```
 
+Development and test builds retain application line numbers for backtraces, omit dependency debug information, and disable incremental compilation to limit local disk usage. Rust edits may take longer to rebuild. For application variable-level debugging, run `CARGO_PROFILE_DEV_DEBUG=2 CARGO_PROFILE_DEV_INCREMENTAL=true npm run dev`.
+
+Run `npm run clean:dev` to remove the current target directory's generated debug/test artifacts when no build or development app is running. This preserves release bundles; the next development build or test run recompiles its dependencies. With multiple worktrees, use one shared `CARGO_TARGET_DIR` for this project to avoid duplicate caches. Both build and cleanup commands honor that variable.
+
 **First launch**
 
 - The app is ad-hoc signed, so macOS may ask you to confirm the first launch (*right-click → Open*).
