@@ -432,7 +432,7 @@ test('scope buttons issue the selected scope and clear selection and stale conte
     await h.update({ scope })
     await h.flush()
     assert.equal(h.requests.at(-1).args[1], scope)
-    assert.equal(h.requests.at(-1).args[2], scope === 'pane' ? '/work' : null)
+    assert.equal(h.requests.at(-1).args[2], scope === 'home' ? null : '/work')
     await h.resolve(h.requests.length - 1, result([item('one.txt'), item('two.txt')]))
     assert.ok(h.rows()[0].props.className.endsWith(' on'))
     assert.ok(!h.rows()[1].props.className.endsWith(' on'))
@@ -627,6 +627,26 @@ test('partial name results appear before completion and stale progress cannot re
   await h.resolve(1, result([item('next.txt')]))
   assert.ok(h.text().includes('next.txt'))
   assert.ok(!h.text().includes('补充搜索中'))
+})
+
+test('disk verification keeps a global name request alive while it makes progress', async t => {
+  const h = await mount(t, { scope: 'global', mode: 'name' })
+  await h.type('report-final.rtf')
+  await h.flush()
+  assert.equal(h.requests[0].args[2], '/work')
+  const progress = h.requests[0].args[8]
+  await h.advance(7000)
+  await h.run(() => progress(result([], { diskScanned: 50000 })))
+  assert.ok(h.text().includes('正在核对磁盘'))
+  await h.advance(7000)
+  await h.run(() => progress(result([item('report-final.rtf')], { diskScanned: 100000 })))
+  assert.equal(h.rows().length, 1)
+  assert.deepEqual(h.cancels, [])
+  await h.resolve(0, result([item('report-final.rtf')]))
+  await h.advance(8000)
+  assert.equal(h.rows().length, 1)
+  assert.ok(!h.text().includes('正在核对磁盘'))
+  assert.deepEqual(h.cancels, [])
 })
 
 test('late progress after final completion cannot replace final sibling results', async t => {

@@ -46,6 +46,8 @@ pub struct SearchResponse {
     pub incomplete: bool,
     pub warnings: Vec<Warning>,
     pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_scanned: Option<usize>,
 }
 impl SearchResponse {
     fn new(source: &str) -> Self {
@@ -55,6 +57,7 @@ impl SearchResponse {
             incomplete: false,
             warnings: vec![],
             source: source.into(),
+            disk_scanned: None,
         }
     }
     fn warn(&mut self, code: &'static str, message: impl Into<String>) {
@@ -1247,15 +1250,8 @@ fn spotlight(
     }
     Ok(())
 }
-// A narrower query can have no indexed hits even when a broad prefix sees
-// nearby files. Use those files only as directory hints, never as results.
-struct NameHints {
-    items: Vec<SearchItem>,
-    identifier: regex::bytes::Regex,
-}
-
-// Normal verification stays at the level of admitted hits. Recovery may check
-// one additional level in a project folder with the same identifier.
+// Verify only siblings of already admitted hits. This never descends into children,
+// follows an entry symlink, or reads file contents; network filesystem time is soft.
 fn verify_siblings(
     request: &Request,
     roots: &[PathBuf],
@@ -1263,7 +1259,6 @@ fn verify_siblings(
     remaining: &mut usize,
     response: &mut SearchResponse,
     budget: &Budget,
-    hints: Option<&NameHints>,
 ) -> Result<()> {
     cancelled(cancel)?;
     let query = parse_query(&request.query, false)?;
@@ -1271,12 +1266,11 @@ fn verify_siblings(
         return Ok(());
     }
     let start = Instant::now();
-    let mut parents = VecDeque::new();
+    let mut parents = vec![];
     let mut seen = HashSet::new();
     let mut seen_paths = HashSet::new();
     let mut parent_overflow = false;
-    let extra_seeds = hints.map_or(&[][..], |hints| hints.items.as_slice());
-    for hit in response.items.iter().chain(extra_seeds) {
+    for hit in &response.items {
         cancelled(cancel)?;
         if start.elapsed() >= budget.duration {
             response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
@@ -1304,15 +1298,14 @@ fn verify_siblings(
                 parent_overflow = true;
                 break;
             }
-            parents.push_back((parent, true));
+            parents.push(parent);
         }
     }
     if parent_overflow {
         response.warn("siblingBudget", "同级目录核验达到目录预算，结果可能不完整");
     }
     let mut visited = 0;
-    let mut child_dirs = 0;
-    while let Some((parent, can_descend)) = parents.pop_front() {
+    for parent in parents {
         cancelled(cancel)?;
         if start.elapsed() >= budget.duration || visited >= budget.entries {
             response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
@@ -1340,19 +1333,6 @@ fn verify_siblings(
                 }
             };
             let path = entry.path();
-            if can_descend
-                && hints.is_some_and(|h| h.identifier.is_match(entry.file_name().as_bytes()))
-                && entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && eligible(&path, roots, request)
-                && seen.insert(path.clone())
-            {
-                if child_dirs < 32 {
-                    child_dirs += 1;
-                    parents.push_front((path.clone(), false));
-                } else {
-                    response.warn("siblingBudget", "同级目录核验达到目录预算，结果可能不完整");
-                }
-            }
             // Cheap name/visibility/dedup gates precede metadata and canonicalization.
             if !visible(&path, request.show_hidden)
                 || !query.literal_names_accept(&path)
@@ -1389,98 +1369,159 @@ fn verify_siblings(
     }
     cancelled(cancel)
 }
-fn finish_global_names(
+
+fn verify_live_names(
     request: &Request,
     roots: &[PathBuf],
     cancel: &AtomicBool,
-    remaining: &mut usize,
     response: &mut SearchResponse,
-    lookup: impl FnOnce(&str, &mut usize) -> Result<Vec<SearchItem>>,
+    publish: &(dyn Fn(&SearchResponse) + Sync),
 ) -> Result<()> {
     cancelled(cancel)?;
-    if request.mode != "name" || response.truncated {
-        return Ok(());
-    }
-    let hints = if *remaining > 0 {
-        name_hint_identifier(&request.query)
-            .map(|(prefix, identifier)| {
-                lookup(&prefix, remaining).map(|items| NameHints { items, identifier })
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    verify_siblings(
-        request,
-        roots,
-        cancel,
-        remaining,
-        response,
-        &Budget {
-            entries: 20_000,
-            duration: Duration::from_millis(180),
-            ..Budget::default()
-        },
-        hints.as_ref(),
-    )
-}
-
-fn name_hint_identifier(query: &str) -> Option<(String, regex::bytes::Regex)> {
-    // Only derive hints from an ordinary name. Date fragments, explicit filters,
-    // wildcard and regex expressions have their own matching semantics.
-    let words = query_words(query);
-    let [term] = words.as_slice() else {
-        return None;
-    };
-    if term.starts_with(['!', '\'', '^'])
-        || term.ends_with('$')
-        || term.contains([':', '/', '*', '?', '{', '}'])
-    {
-        return None;
-    }
-    static IDENTIFIER: OnceLock<regex::Regex> = OnceLock::new();
-    let captures = IDENTIFIER
-        .get_or_init(|| regex::Regex::new(r"([a-zA-Z]{3,32})([0-9]{4,24})").unwrap())
-        .captures(term)?;
-    let identifier = captures.get(0)?.as_str();
-    let prefix = captures.get(1)?.as_str().to_ascii_lowercase();
-    let pattern = regex::bytes::RegexBuilder::new(&regex::escape(identifier))
-        .case_insensitive(true)
-        .build()
-        .ok()?;
-    Some((prefix, pattern))
-}
-
-fn lookup_name_hints(
-    prefix: &str,
-    request: &Request,
-    roots: &[PathBuf],
-    cancel: &AtomicBool,
-    remaining: &mut usize,
-) -> Result<Vec<SearchItem>> {
-    let mut hint = request.clone();
-    hint.query = prefix.into();
-    hint.format = "all".into();
-    hint.limit = 200;
-    let roots = roots.to_vec();
-    let reserved = (*remaining).min(1000);
-    *remaining -= reserved;
-    match index_worker().run(cancel, Duration::from_millis(300), move |stop| {
-        let mut hints = SearchResponse::new("fsearch");
-        let mut unused = reserved;
-        indexed(&hint, &roots, &stop, &mut unused, &mut hints)?;
-        Ok((hints.items, unused))
-    }) {
-        Ok((items, unused)) => {
-            *remaining += unused;
-            Ok(items)
+    let query = parse_query(&request.query, false)?;
+    let exact = match query.spotlight_terms.as_slice() {
+        [term] if term.len() >= 8 || term.contains('.') => {
+            let variants = name_forms(term).map(|form| regex::escape(&form));
+            regex::bytes::RegexBuilder::new(&format!("\\A(?:{}|{})\\z", variants[0], variants[1]))
+                .case_insensitive(true)
+                .build()
+                .ok()
         }
-        Err(error) if error.code == "cancelled" => Err(error),
-        Err(error) => {
-            if error.code == "indexBusy" {
-                *remaining += reserved;
+        _ => None,
+    };
+    let mut exact_found = response.items.iter().any(|hit| {
+        exact
+            .as_ref()
+            .is_some_and(|re| re.is_match(hit.name.as_bytes()))
+    });
+    let unrestricted = roots.is_empty();
+    let system_alias =
+        |p: &Path| unrestricted && (p.starts_with("/System/Volumes") || p.starts_with("/dev"));
+    // Search the current pane first, then the home and mounted data volumes.
+    // The final root traversal covers the rest and skips completed subtrees.
+    let mut queue = Vec::new();
+    if let Some(pane) = request.root.as_ref().and_then(|p| directory(p).ok()) {
+        if pane != Path::new("/")
+            && !system_alias(&pane)
+            && (unrestricted || roots.iter().any(|r| pane.starts_with(r)))
+        {
+            queue.push(pane);
+        }
+    }
+    if unrestricted {
+        if let Some(home) = std::env::var_os("HOME").and_then(|p| fs::canonicalize(p).ok()) {
+            for name in ["Documents", "Desktop", "Downloads"] {
+                let path = home.join(name);
+                // This only sets priority. The home walk handles aliases and errors.
+                if fs::symlink_metadata(&path).is_ok_and(|md| md.is_dir()) {
+                    queue.push(path);
+                }
             }
-            Ok(vec![])
+            queue.push(home);
+        }
+        queue.push(PathBuf::from("/Volumes"));
+        queue.push(PathBuf::from("/"));
+    } else {
+        let mut configured = roots.to_vec();
+        configured.sort_by_key(|path| path.components().count());
+        queue.extend(configured);
+    }
+    response.source = "filesystem".into();
+    response.warnings.clear();
+    response.incomplete = false;
+    let progress = |response: &SearchResponse, visited| {
+        let mut snapshot = response.clone();
+        snapshot.disk_scanned = Some(visited);
+        publish(&snapshot);
+    };
+    progress(response, 0);
+    let mut last_update = Instant::now();
+    let mut visited = 0;
+    let mut completed: HashSet<PathBuf> = HashSet::new();
+    'roots: for root in queue {
+        cancelled(cancel)?;
+        if !visible(&root, request.show_hidden) || completed.iter().any(|p| root.starts_with(p)) {
+            continue;
+        }
+        let Some(entries) = disk_entries(&root, response) else {
+            continue;
+        };
+        let mut stack = vec![entries];
+        while let Some(entries) = stack.last_mut() {
+            cancelled(cancel)?;
+            if last_update.elapsed() >= Duration::from_millis(400) {
+                progress(response, visited);
+                last_update = Instant::now();
+            }
+            let Some(entry) = entries.next() else {
+                stack.pop();
+                continue;
+            };
+            visited += 1;
+            let Ok(entry) = entry else {
+                disk_read_warning(response);
+                continue;
+            };
+            let name = entry.file_name();
+            if !request.show_hidden && name.as_bytes().starts_with(b".") {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                disk_read_warning(response);
+                continue;
+            };
+            let path = entry.path();
+            if (kind.is_file() || kind.is_dir() || kind.is_symlink())
+                && query.literal_names_accept(&path)
+            {
+                if let Ok(md) = fs::metadata(&path) {
+                    if format_ok(&path, md.is_dir(), &request.format)
+                        && query_accepts(&query, &path, &md)
+                        && eligible(&path, roots, request)
+                    {
+                        let is_exact = exact
+                            .as_ref()
+                            .is_some_and(|re| re.is_match(name.as_bytes()));
+                        if is_exact && !exact_found && response.items.len() == request.limit {
+                            // A full filename can outrank an indexed substring at the display limit.
+                            response.items.pop();
+                            response.truncated = true;
+                        }
+                        admit(response, item(&path, &md, None, None), request.limit);
+                        exact_found |= is_exact;
+                        if response.truncated && (exact.is_none() || exact_found) {
+                            break 'roots;
+                        }
+                        if response.items.len() == 1 || is_exact {
+                            progress(response, visited);
+                            last_update = Instant::now();
+                        }
+                    }
+                } else if !kind.is_symlink() {
+                    disk_read_warning(response);
+                }
+            }
+            if kind.is_dir() && !system_alias(&path) && !completed.contains(&path) {
+                if let Some(entries) = disk_entries(&path, response) {
+                    stack.push(entries);
+                }
+            }
+        }
+        completed.insert(root);
+    }
+    cancelled(cancel)
+}
+
+fn disk_read_warning(response: &mut SearchResponse) {
+    response.warn("readError", "部分目录或文件未能读取，搜索结果可能不完整");
+}
+
+fn disk_entries(path: &Path, response: &mut SearchResponse) -> Option<fs::ReadDir> {
+    match fs::read_dir(path) {
+        Ok(entries) => Some(entries),
+        Err(_) => {
+            disk_read_warning(response);
+            None
         }
     }
 }
@@ -1506,7 +1547,6 @@ fn parallel_name_sources(
         let mut response = SearchResponse::new("fsearch+spotlight");
         response.warn("indexCoverage", "索引覆盖范围有限，结果可能不完整");
         let mut remaining = 0;
-        let mut failures = vec![];
         let mut sources = vec![];
         for (is_index, reply) in receive {
             cancelled(cancel)?;
@@ -1524,7 +1564,6 @@ fn parallel_name_sources(
                         },
                         error.message.clone(),
                     );
-                    failures.push(error.message);
                 }
             }
             if !response.items.is_empty() {
@@ -1534,9 +1573,6 @@ fn parallel_name_sources(
             }
         }
         cancelled(cancel)?;
-        if failures.len() == 2 && response.items.is_empty() {
-            return Err(SearchError::new("unavailable", failures.join("；")));
-        }
         response.source = sources.join("+");
         Ok((response, remaining))
     })
@@ -1595,18 +1631,37 @@ fn progressive_global_names(
             }
         },
     )?;
-    finish_global_names(
+    verify_siblings(
         request,
         &roots,
         cancel,
         &mut remaining,
         &mut response,
-        |prefix, remaining| lookup_name_hints(prefix, request, &roots, cancel, remaining),
+        &Budget {
+            entries: 20_000,
+            duration: Duration::from_millis(180),
+            ..Budget::default()
+        },
     )?;
+    // A thread-local policy keeps name verification from fetching cloud placeholders.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("bento-verify-names".into())
+            .spawn_scoped(scope, || {
+                fsearch::no_materialize();
+                verify_live_names(request, &roots, cancel, &mut response, publish)
+            })
+            .map_err(|e| SearchError::new("io", e.to_string()))?
+            .join()
+            .map_err(|_| SearchError::new("io", "磁盘名称核对意外停止"))?
+    })?;
     cancelled(cancel)?;
     Ok(response)
 }
 fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchResponse> {
+    if request.mode == "name" {
+        return progressive_global_names(request, cancel, &|_| {});
+    }
     let roots = request
         .roots
         .iter()
@@ -1622,45 +1677,9 @@ fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchRespons
         }
         response.warn("engineUnavailable", error.message.clone());
     }
-    if request.mode == "content" {
-        if response.items.is_empty() {
-            primary?;
-        }
-        return Ok(response);
+    if response.items.is_empty() {
+        primary?;
     }
-    if !response.truncated {
-        match spotlight(request, &roots, cancel, &mut remaining, &mut response) {
-            Ok(()) => {
-                response.source = if primary.is_ok() {
-                    "fsearch+spotlight"
-                } else {
-                    "spotlight"
-                }
-                .into()
-            }
-            Err(error) => {
-                if error.code == "cancelled" {
-                    return Err(error);
-                }
-                if primary.is_err() && response.items.is_empty() {
-                    return Err(SearchError::new(
-                        "unavailable",
-                        format!("{}；{}", primary.unwrap_err().message, error.message),
-                    ));
-                }
-                response.warn("systemUnavailable", error.message);
-            }
-        }
-    }
-    finish_global_names(
-        request,
-        &roots,
-        cancel,
-        &mut remaining,
-        &mut response,
-        |prefix, remaining| lookup_name_hints(prefix, request, &roots, cancel, remaining),
-    )?;
-    cancelled(cancel)?;
     Ok(response)
 }
 
@@ -2745,6 +2764,80 @@ mod tests {
         );
         (request, vec![root], response)
     }
+
+    #[test]
+    fn disk_verification_finds_unindexed_nested_names_without_any_neighbor_hint() {
+        let f = Fixture::new();
+        let target = f.file("project/nested/a/b/Café notes.rtf", "fresh");
+        f.file("project/nested/a/b/Café notes.rtf.cache", "not an rtf");
+        f.file("project/.hidden/Café notes.rtf", "hidden");
+        f.file("elsewhere/Café notes.rtf", "out of scope");
+        let roots = vec![fs::canonicalize(f.0.join("project")).unwrap()];
+        std::os::unix::fs::symlink(f.0.join("elsewhere"), roots[0].join("alias")).unwrap();
+        let mut request = req();
+        request.scope = "global".into();
+        request.mode = "name".into();
+        request.query = "café notes.rtf ext:rtf".into();
+        let unavailable = |remaining| IndexReply {
+            response: SearchResponse::new("unavailable"),
+            remaining,
+            result: Err(SearchError::new("unavailable", "fixture without an index")),
+        };
+        let cancel = AtomicBool::new(false);
+        let (mut response, _) =
+            parallel_name_sources(&request, &cancel, &|_| {}, unavailable, unavailable).unwrap();
+        verify_live_names(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut response,
+            &|_| {},
+        )
+        .unwrap();
+        let names: Vec<_> = response
+            .items
+            .iter()
+            .map(|item| item.path.as_str())
+            .collect();
+        let target = fs::canonicalize(target).unwrap();
+        assert_eq!(names, [target.to_str().unwrap()]);
+        assert!(!response.incomplete);
+    }
+
+    #[test]
+    fn disk_verification_prefers_exact_filename_at_cap_and_can_be_cancelled() {
+        let f = Fixture::new();
+        let decoy = fs::canonicalize(f.file("cache/design-final.pdf.log", "cache")).unwrap();
+        let target = fs::canonicalize(f.file("project/deep/design-final.pdf", "actual")).unwrap();
+        let roots = vec![fs::canonicalize(&f.0).unwrap()];
+        let mut request = req();
+        request.scope = "global".into();
+        request.mode = "name".into();
+        request.query = "design-final.pdf".into();
+        request.limit = 1;
+        let mut response = SearchResponse::new("fsearch");
+        response
+            .items
+            .push(item(&decoy, &fs::metadata(&decoy).unwrap(), None, None));
+        response.truncated = true;
+        verify_live_names(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut response,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(Path::new(&response.items[0].path), target);
+        assert!(response.truncated);
+        let cancel = AtomicBool::new(false);
+        let err = verify_live_names(&request, &roots, &cancel, &mut response, &|snapshot| {
+            assert_eq!(snapshot.disk_scanned, Some(0));
+            cancel.store(true, Ordering::Relaxed);
+        })
+        .unwrap_err();
+        assert_eq!(err.code, "cancelled");
+    }
     #[test]
     fn sibling_verification_finds_unindexed_copies_without_recursion_or_symlinks() {
         let f = Fixture::new();
@@ -2766,7 +2859,6 @@ mod tests {
             &mut remaining,
             &mut response,
             &Budget::default(),
-            None,
         )
         .unwrap();
         let mut names: Vec<_> = response.items.iter().map(|hit| hit.name.as_str()).collect();
@@ -2784,7 +2876,6 @@ mod tests {
                 entries,
                 ..Budget::default()
             },
-            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), 2);
@@ -2792,60 +2883,6 @@ mod tests {
             !response.incomplete,
             "one shared parent is scanned only once"
         );
-    }
-    #[test]
-    fn exact_name_search_recovers_missing_projects_with_or_without_indexed_hits() {
-        let f = Fixture::new();
-        let indexed = fs::canonicalize(f.file("inside/old-nora0123.txt", "indexed")).unwrap();
-        let project = "inside/2026-11-26_project_NORA20110998";
-        let target = f.file(&format!("{project}/2026-11-26_nora20110998.R"), "new");
-        f.file(&format!("{project}/nora20110999.R"), "wrong ID");
-        f.file(
-            &format!("{project}/deep/2026-11-26_nora20110998.R"),
-            "too deep",
-        );
-        f.file("outside/nora20110998.txt", "out of scope");
-        let roots = vec![fs::canonicalize(f.0.join("inside")).unwrap()];
-        let mut request = req();
-        request.scope = "global".into();
-        request.mode = "name".into();
-        let cached =
-            fs::canonicalize(f.file("inside/cache/2026-11-26_nora20110998.R.cache", "cached"))
-                .unwrap();
-        for (query, has_cached_hit) in
-            [("nora20110998", false), ("2026-11-26_nora20110998.R", true)]
-        {
-            request.query = query.into();
-            let mut response = SearchResponse::new("fsearch+spotlight");
-            if has_cached_hit {
-                response
-                    .items
-                    .push(item(&cached, &fs::metadata(&cached).unwrap(), None, None));
-            }
-            finish_global_names(
-                &request,
-                &roots,
-                &AtomicBool::new(false),
-                &mut 100,
-                &mut response,
-                |prefix, _| {
-                    assert_eq!(prefix, "nora");
-                    Ok(vec![item(
-                        &indexed,
-                        &fs::metadata(&indexed).unwrap(),
-                        None,
-                        None,
-                    )])
-                },
-            )
-            .unwrap();
-            assert_eq!(response.items.len(), 2);
-            let target = fs::canonicalize(&target).unwrap();
-            assert!(response
-                .items
-                .iter()
-                .any(|hit| Path::new(&hit.path) == target));
-        }
     }
     #[test]
     fn sibling_verification_honors_explicit_scope_format_hidden_and_result_limit() {
@@ -2864,7 +2901,6 @@ mod tests {
             &mut 100,
             &mut response,
             &Budget::default(),
-            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), 1);
@@ -2879,7 +2915,6 @@ mod tests {
             &mut 100,
             &mut response,
             &Budget::default(),
-            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), 3);
@@ -2896,7 +2931,6 @@ mod tests {
             &mut 100,
             &mut response,
             &Budget::default(),
-            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), before);
@@ -2934,7 +2968,6 @@ mod tests {
             &mut 200,
             &mut response,
             &Budget::default(),
-            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), 35 + 32);
@@ -2958,7 +2991,6 @@ mod tests {
             &mut 100,
             &mut response,
             &Budget::default(),
-            None,
         )
         .unwrap_err();
         assert_eq!(error.code, "cancelled");
@@ -2979,7 +3011,6 @@ mod tests {
                     duration,
                     ..Budget::default()
                 },
-                None,
             )
             .unwrap();
             assert_eq!(response.items.len(), 1);
@@ -3050,6 +3081,7 @@ mod tests {
         let mut request = req();
         request.query = std::env::var("BENTO_QA_SEARCH").expect("set BENTO_QA_SEARCH");
         request.scope = "global".into();
+        request.root = std::env::var("BENTO_QA_PANE").ok();
         request.mode = "name".into();
         request.limit = 1000;
         request.roots = std::env::var_os("BENTO_QA_ROOTS")
@@ -3062,13 +3094,22 @@ mod tests {
         let start = Instant::now();
         let response = if std::env::var_os("BENTO_QA_PROGRESSIVE").is_some() {
             let first = AtomicBool::new(false);
+            let target = std::env::var("BENTO_QA_TARGET").ok();
+            let target_found = AtomicBool::new(false);
             progressive_global_names(&request, &AtomicBool::new(false), &|snapshot| {
-                if !first.swap(true, Ordering::Relaxed) {
+                if !snapshot.items.is_empty() && !first.swap(true, Ordering::Relaxed) {
                     println!(
                         "BENTO_QA_FIRST_MS={} ITEMS={}",
                         start.elapsed().as_millis(),
                         snapshot.items.len()
                     );
+                }
+                if target
+                    .as_ref()
+                    .is_some_and(|path| snapshot.items.iter().any(|hit| &hit.path == path))
+                    && !target_found.swap(true, Ordering::Relaxed)
+                {
+                    println!("BENTO_QA_TARGET_MS={}", start.elapsed().as_millis());
                 }
             })
             .unwrap()

@@ -207,16 +207,22 @@ export default function SearchOverlay({
     timerRef.current = setTimeout(async () => {
       submitted = true
       setHistory(items => normalizeHistory([q, ...items]))
-      watchdog = setTimeout(() => {
-        if (tokenRef.current !== token) return
-        ++tokenRef.current
-        cancel()
-        setError('搜索超时，请重试或收窄搜索范围。')
-        setBusy(false)
-      }, SEARCH_TIMEOUT_MS)
+      const armWatchdog = () => {
+        clearTimeout(watchdog)
+        watchdog = setTimeout(() => {
+          if (tokenRef.current !== token) return
+          ++tokenRef.current
+          cancel()
+          setError('搜索超时，长时间没有进展。请重试或收窄搜索范围。')
+          setBusy(false)
+        }, SEARCH_TIMEOUT_MS)
+      }
+      armWatchdog()
       try {
-        const r = await api.searchQuery(q, scope, scope === 'pane' ? root : null, showHidden, searchPaths, mode, requestId, format, partial => {
+        const searchRoot = scope === 'pane' || (scope === 'global' && mode === 'name') ? root : null
+        const r = await api.searchQuery(q, scope, searchRoot, showHidden, searchPaths, mode, requestId, format, partial => {
           if (tokenRef.current !== token || settled) return
+          if (partial.diskScanned != null) armWatchdog()
           setResults(partial.items)
           setResponse(partial)
           setElapsed(Math.round(performance.now() - t0))
@@ -701,7 +707,7 @@ export default function SearchOverlay({
         </div>
         <div className="search-footer">
           <span className="search-count" role="status" aria-live="polite">
-            {!query.trim() ? '最近搜索' : busy ? (sorted.length ? `${sorted.length} 个结果 · 补充搜索中…` : '搜索中…') : error ? '搜索失败'
+            {!query.trim() ? '最近搜索' : busy ? (response?.diskScanned != null ? `${sorted.length} 个结果 · 正在核对磁盘…` : sorted.length ? `${sorted.length} 个结果 · 补充搜索中…` : '搜索中…') : error ? '搜索失败'
               : `${sorted.length} 个结果${elapsed != null ? ` · ${elapsed} ms` : ''}`}
           </span>
           {selectedItem && <span className="search-selected-path" title={selectedItem.path}>{selectedItem.path}</span>}

@@ -19,7 +19,7 @@ const SECTIONS = [
 
 /**
  * 设置面板：搜索范围与通用偏好
- * cfg.searchPaths 为空 = 搜索全部已索引位置；非空 = 结果限定在这些目录（及其子目录）内
+ * cfg.searchPaths 为空时使用默认全局范围。指定目录后，全局搜索限定在这些目录及子目录内。
  */
 export default function SettingsDialog({
   analyticsEnabled, onAnalyticsEnabledChange, analyticsPersistenceError, shortcuts = {}, onShortcutsChange,
@@ -157,7 +157,7 @@ export default function SettingsDialog({
                   </button>
                 </div>
                 <div className="settings-list">
-                  {searchPaths.length === 0 && <div className="settings-empty"><SettingsIcon kind="search" size={23} /><div><strong>全部已索引位置</strong><span>添加文件夹，可缩小全局搜索的范围。</span></div></div>}
+                  {searchPaths.length === 0 && <div className="settings-empty"><SettingsIcon kind="search" size={23} /><div><strong>默认全局范围</strong><span>添加文件夹，可缩小全局搜索范围并加快核对。</span></div></div>}
                   {searchPaths.map((p) => (
                     <div key={p} className="settings-row">
                       <span className="settings-path" title={p}>{p}</span>
