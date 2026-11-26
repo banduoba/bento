@@ -23,10 +23,14 @@ const SECTIONS = [
  */
 export default function SettingsDialog({
   analyticsEnabled, onAnalyticsEnabledChange, analyticsPersistenceError, shortcuts = {}, onShortcutsChange,
-  open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, enterAction, onEnterActionChange, onExportSettings, onImportSettings, onClose,
+  open: visible, searchPaths, onChange, showHidden, onShowHiddenChange, autoRefresh, onAutoRefreshChange, layout, onLayoutChange, enterAction, onEnterActionChange, onExportSettings, onImportSettings, onRebuildIndex, onClose,
 }) {
   const [busy, setBusy] = useState(false)
-  const [fda, setFda] = useState(null) // null=查询中
+  const [indexStatus, setIndexStatus] = useState(null)
+  const fda = indexStatus == null ? null : !!indexStatus.full_disk_access
+  const [restarting, setRestarting] = useState(false)
+  const restartPending = useRef(false)
+  const [rebuildError, setRebuildError] = useState(null)
   const [section, setSection] = useState('search')
   const [backupBusy, setBackupBusy] = useState(false)
   const backupRunning = useRef(false)
@@ -34,8 +38,24 @@ export default function SettingsDialog({
   const dialogRef = useDialogFocus(visible)
 
   useEffect(() => {
-    if (!visible) return
-    api.fsearchStatus().then((st) => setFda(!!st.full_disk_access)).catch(() => setFda(null))
+    if (!visible || !hasTauri) return
+    let alive = true
+    let pending = false
+    const poll = async () => {
+      if (pending) return
+      pending = true
+      try {
+        const status = await api.fsearchStatus()
+        if (alive) setIndexStatus(status)
+      } catch {
+        if (alive) setIndexStatus(null)
+      } finally {
+        pending = false
+      }
+    }
+    void poll()
+    const timer = setInterval(poll, 1500)
+    return () => { alive = false; clearInterval(timer) }
   }, [visible])
 
   useEffect(() => {
@@ -53,6 +73,21 @@ export default function SettingsDialog({
 
   if (!visible) return null
   const currentSection = SECTIONS.find(item => item.id === section)
+  const rebuilding = indexStatus?.rebuild_state === 'building'
+
+  const rebuildIndex = async () => {
+    if (!onRebuildIndex || restartPending.current || rebuilding) return
+    restartPending.current = true
+    setRestarting(true)
+    setRebuildError(null)
+    try {
+      await onRebuildIndex()
+    } catch (error) {
+      restartPending.current = false
+      setRestarting(false)
+      setRebuildError(error?.message || String(error))
+    }
+  }
 
   // 系统目录选择器
   const pick = async () => {
@@ -150,7 +185,7 @@ export default function SettingsDialog({
                 <div className="settings-option">
                   <div className="settings-label">
                     <div className="settings-option-title">搜索范围</div>
-                    <p>未添加目录时，搜索全部已索引位置。</p>
+                    <p>指定目录后，全局搜索只检查这些目录及其子目录。</p>
                   </div>
                   <button className="btn small" onClick={pick} disabled={busy}>
                     {busy ? '选择中…' : '添加目录…'}
@@ -169,10 +204,20 @@ export default function SettingsDialog({
                   ))}
                 </div>
               </div>
-              <p className="settings-hint">
-                全局搜索默认覆盖 Spotlight 已索引的全部位置（含挂载卷与其他用户目录，需授予
-                「完全磁盘访问权限」）。添加目录后，全局搜索结果将只保留这些目录内的内容。
-              </p>
+              {hasTauri && <div className="settings-card">
+                <div className="settings-option">
+                  <div className="settings-label">
+                    <div className="settings-option-title" id="settings-index-title">Bento 搜索索引</div>
+                    <p>保存当前会话，重启 Bento 后重新建立索引。重建期间仍可搜索文件名。</p>
+                    {(restarting || rebuilding) && <p role="status">{restarting ? '正在保存会话并重启…' : '正在后台重建索引…'}</p>}
+                    {indexStatus?.rebuild_state === 'ready' && !restarting && <p role="status">名称索引已重建。</p>}
+                    {(rebuildError || indexStatus?.rebuild_state === 'failed') && <p role="alert">索引重建失败：{rebuildError || indexStatus.rebuild_error || '索引尚未写入，可重新尝试。'}</p>}
+                  </div>
+                  <button type="button" className="btn small" onClick={rebuildIndex} disabled={!onRebuildIndex || restarting || rebuilding}>
+                    {rebuilding ? '重建中…' : '重启并重建索引'}
+                  </button>
+                </div>
+              </div>}
             </section>}
             {section === 'general' && <section id="settings-general" className="settings-group" aria-labelledby="settings-general-title">
               <h2 id="settings-general-title">通用</h2>

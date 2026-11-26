@@ -13,18 +13,18 @@ const bundle = await build({ entryPoints: [fileURLToPath(new URL('./SettingsDial
   b.onResolve({ filter: /^@tauri-apps\/plugin-dialog$/ }, () => ({ path: 'dialog', namespace: 'test' }))
   b.onLoad({ filter: /.*/, namespace: 'test' }, ({ path }) => ({ contents: path === 'api' ? 'export const hasTauri = globalThis.__backup.native; export const api = globalThis.__backup.api' : path === 'dialog' ? 'export const open = o => globalThis.__backup.open(o); export const save = o => globalThis.__backup.save(o)' : 'export default function About(){return null}', loader: 'js' }))
 } }] })
-async function mount(t, native = true) {
+async function mount(t, native = true, indexState = 'available') {
   const prev = { window: globalThis.window, __backup: globalThis.__backup, IS_REACT_ACT_ENVIRONMENT: globalThis.IS_REACT_ACT_ENVIRONMENT }
   const calls = [], state = { native, file: '/backup.json', fail: null }
   globalThis.window = new EventTarget(); globalThis.IS_REACT_ACT_ENVIRONMENT = true
   state.open = async options => { calls.push(['open', options]); return state.file }
   state.save = async options => { calls.push(['save', options]); return state.file }
-  state.api = { fsearchStatus: async () => ({}), readSettingsBackup: async path => { calls.push(['read', path]); if (state.fail) throw state.fail; return 'backup text' }, exportSettingsBackup: async (path, document) => { calls.push(['export', path, document]); if (state.fail) throw state.fail } }
+  state.api = { fsearchStatus: async () => ({ rebuild_state: indexState }), readSettingsBackup: async path => { calls.push(['read', path]); if (state.fail) throw state.fail; return 'backup text' }, exportSettingsBackup: async (path, document) => { calls.push(['export', path, document]); if (state.fail) throw state.fail } }
   globalThis.__backup = state
   const mod = { exports: {} }; new Function('require', 'module', 'exports', bundle.outputFiles[0].text)(require, mod, mod.exports)
   let renderer
   const error = console.error; console.error = (...a) => { if (!String(a[0]).startsWith('react-test-renderer is deprecated.')) error(...a) }
-  try { await act(async () => { renderer = create(React.createElement(mod.exports.default, { open: true, searchPaths: [], onClose() {}, onExportSettings: () => ({ version: 1 }), onImportSettings: async text => { calls.push(['apply', text]); if (state.fail) throw state.fail } })) }) } finally { console.error = error }
+  try { await act(async () => { renderer = create(React.createElement(mod.exports.default, { open: true, searchPaths: [], onClose() {}, onExportSettings: () => ({ version: 1 }), onImportSettings: async text => { calls.push(['apply', text]); if (state.fail) throw state.fail }, onRebuildIndex: async () => { calls.push(['rebuild']); if (state.fail) throw state.fail } })) }) } finally { console.error = error }
   t.after(async () => { await act(async () => renderer.unmount()); for (const [key, value] of Object.entries(prev)) { if (value === undefined) delete globalThis[key]; else globalThis[key] = value } })
   const button = label => renderer.root.findAllByType('button').find(n => (n.props['aria-label'] || n.children.join('')) === label)
   return { state, calls, button, text: () => JSON.stringify(renderer.toJSON()), async click(label) { assert.ok(button(label), `${label} exists`); await act(async () => { await button(label).props.onClick() }) } }
@@ -49,4 +49,23 @@ test('cancelling dialogs does nothing and read/write failures stay visible for r
 test('browser preview disables file backup controls', async t => {
   const h = await mount(t, false); await h.click('备份')
   assert.equal(h.button('导出设置…').props.disabled, true); assert.equal(h.button('导入设置…').props.disabled, true)
+})
+
+test('search settings can retry a failed rebuild request and block another restart while pending', async t => {
+  const h = await mount(t)
+  h.state.fail = Error('session could not be saved')
+  await h.click('重启并重建索引')
+  assert.ok(h.text().includes('session could not be saved'))
+  assert.equal(h.button('重启并重建索引').props.disabled, false)
+  h.state.fail = null
+  await h.click('重启并重建索引')
+  assert.equal(h.button('重启并重建索引').props.disabled, true)
+  assert.ok(h.text().includes('正在保存会话并重启'))
+  assert.deepEqual(h.calls, [['rebuild'], ['rebuild']])
+})
+
+test('search settings display a background rebuild in progress after reopening', async t => {
+  const h = await mount(t, true, 'building')
+  assert.equal(h.button('重建中…').props.disabled, true)
+  assert.ok(h.text().includes('正在后台重建索引'))
 })

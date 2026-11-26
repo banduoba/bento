@@ -467,12 +467,13 @@ export default function SearchOverlay({
 
   const createdDate = sortBy === 'btime'
   const dateLabel = createdDate ? '创建日期' : '修改日期'
-  const indexBuilding = scope === 'global' && idxStatus && !idxStatus.ready
+  const rebuildingIndex = idxStatus?.rebuild_state === 'building'
+  const indexBuilding = scope === 'global' && idxStatus && (!idxStatus.ready || rebuildingIndex)
   const needsDiskAccess = scope === 'global' && idxStatus?.full_disk_access === false
   const warnings = [...new Set((response?.warnings || []).map(w => w.message).filter(Boolean))]
   const hasCoverageNotice = !busy && (response?.incomplete || response?.truncated || warnings.length > 0)
   const coverageSummary = response?.truncated ? '结果已截断，建议收窄范围'
-    : hasCoverageNotice ? '结果可能不完整' : '名称索引准备中'
+    : hasCoverageNotice ? '结果可能不完整' : rebuildingIndex ? '正在重建名称索引' : '名称索引准备中'
   const selectedItem = query.trim() ? sorted[selIdx] : null
   const resultActionLabel = selectedItem?.is_dir ? '打开文件夹' : '定位'
 

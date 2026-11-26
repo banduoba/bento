@@ -1,5 +1,6 @@
 use rayon::prelude::*;
 use serde::Serialize;
+mod search_index;
 
 #[cfg(target_os = "macos")]
 mod quick_look;
@@ -45,14 +46,15 @@ fn fsearch_engine() -> Option<&'static fsearch::Engine> {
     FSEARCH
         .get_or_init(|| {
             let home = std::env::var("HOME").unwrap_or_default();
-            match fsearch::Engine::start(fsearch::Options {
-                dir: fsearch::default_dir(&home),
-                home: home.clone(),
+            match search_index::engine_dir(&home).and_then(|dir| fsearch::Engine::start(fsearch::Options {
+                dir,
+                home,
                 skip: None,
-            }) {
+            })) {
                 Ok(e) => Some(e),
                 Err(err) => {
                     eprintln!("fsearch init failed: {err}");
+                    search_index::record_start_error(&err);
                     None
                 }
             }
@@ -3007,25 +3009,29 @@ struct FsearchStatus {
     ready: bool,
     entries: usize,
     full_disk_access: bool,
+    rebuild_state: &'static str,
+    rebuild_error: Option<String>,
 }
 
 fn fsearch_status_snapshot(full_disk_access: bool) -> FsearchStatus {
+    let (rebuild_state, rebuild_error) = search_index::maintenance_status();
     FsearchStatus {
-        ready: FSEARCH_READY.load(std::sync::atomic::Ordering::Relaxed),
+        ready: rebuild_state == "ready" || FSEARCH_READY.load(std::sync::atomic::Ordering::Relaxed),
         // The upstream count requires locks held by content indexing. Zero means
         // unknown here; the UI must not present it as a measured catalog size.
         entries: 0,
         full_disk_access,
+        rebuild_state,
+        rebuild_error,
     }
 }
 
 /// Poll app-owned readiness; never call Engine::status (it locks names/content).
 #[tauri::command]
 async fn fsearch_status() -> Result<FsearchStatus, String> {
-    let access = tauri::async_runtime::spawn_blocking(fsearch::has_full_disk_access)
+    tauri::async_runtime::spawn_blocking(|| fsearch_status_snapshot(fsearch::has_full_disk_access()))
         .await
-        .map_err(|error| error.to_string())?;
-    Ok(fsearch_status_snapshot(access))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -3127,6 +3133,7 @@ pub fn run() {
         .plugin(tauri_plugin_drag::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            search_index::configure(app);
             #[cfg(target_os = "macos")]
             session_exit::install_native_quit(app)?;
             #[cfg(target_os = "macos")]
@@ -3141,16 +3148,11 @@ pub fn run() {
             native_menu::install(app)?;
 
             // 启动即预热 fsearch 引擎（后台加载/构建索引），避免首次搜索时慢
-            {
-                let app = app.handle().clone();
-                std::thread::spawn(move || {
-                    let _ = &app;
-                    if let Some(e) = fsearch_engine() {
-                        let st = e.status();
-                        eprintln!("[fsearch] ready={} entries={}", st.ready, st.entries);
-                    }
-                });
-            }
+            std::thread::spawn(|| {
+                if fsearch_engine().is_some() {
+                    search_index::maintenance_status();
+                }
+            });
             // 模板目录：用户把 .docx 等文件放进来后，「新建」子菜单会列出它们
             if let Ok(app_dir) = app.handle().path().app_data_dir() {
                 if let Err(err) = ensure_templates_dir(&app_dir) {
@@ -3223,6 +3225,7 @@ pub fn run() {
             append_error_log,
             save_window_state,
             fsearch_status,
+            search_index::rebuild_search_index,
             session_store::load_session,
             session_store::save_session,
             session_exit::session_exit_reply,
@@ -3241,7 +3244,10 @@ pub fn run() {
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event { extraction::shutdown(); }
             if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
-                session_exit::on_exit_requested(app, code, api);
+                // An explicit search-index restart follows frontend persistence.
+                if code != Some(tauri::RESTART_EXIT_CODE) {
+                    session_exit::on_exit_requested(app, code, api);
+                }
             }
         });
 }

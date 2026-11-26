@@ -71,6 +71,7 @@ export const api = hasTauri
         invoke('read_text_preview', { path, query, maxBytes: maxBytes || 262144 }),
       openPrivacySettings: () => invoke('open_privacy_settings'),
       fsearchStatus: () => invoke('fsearch_status'),
+      rebuildSearchIndex: () => invoke('rebuild_search_index'),
       dirActivity: (paths) => invoke('dir_activity', { paths }),
       diskSpace: (path) => invoke('disk_space', { path }),
       homeDir: () => invoke('home_dir'),
