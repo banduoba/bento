@@ -46,6 +46,8 @@ pub struct SearchResponse {
     pub incomplete: bool,
     pub warnings: Vec<Warning>,
     pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_scanned: Option<usize>,
 }
 impl SearchResponse {
     fn new(source: &str) -> Self {
@@ -55,6 +57,7 @@ impl SearchResponse {
             incomplete: false,
             warnings: vec![],
             source: source.into(),
+            disk_scanned: None,
         }
     }
     fn warn(&mut self, code: &'static str, message: impl Into<String>) {
@@ -1366,6 +1369,163 @@ fn verify_siblings(
     }
     cancelled(cancel)
 }
+
+fn verify_live_names(
+    request: &Request,
+    roots: &[PathBuf],
+    cancel: &AtomicBool,
+    response: &mut SearchResponse,
+    publish: &(dyn Fn(&SearchResponse) + Sync),
+) -> Result<()> {
+    cancelled(cancel)?;
+    let query = parse_query(&request.query, false)?;
+    let exact = match query.spotlight_terms.as_slice() {
+        [term] if term.len() >= 8 || term.contains('.') => {
+            let variants = name_forms(term).map(|form| regex::escape(&form));
+            regex::bytes::RegexBuilder::new(&format!("\\A(?:{}|{})\\z", variants[0], variants[1]))
+                .case_insensitive(true)
+                .build()
+                .ok()
+        }
+        _ => None,
+    };
+    let mut exact_found = response.items.iter().any(|hit| {
+        exact
+            .as_ref()
+            .is_some_and(|re| re.is_match(hit.name.as_bytes()))
+    });
+    let unrestricted = roots.is_empty();
+    let system_alias =
+        |p: &Path| unrestricted && (p.starts_with("/System/Volumes") || p.starts_with("/dev"));
+    // Search the current pane first, then the home and mounted data volumes.
+    // The final root traversal covers the rest and skips completed subtrees.
+    let mut queue = Vec::new();
+    if let Some(pane) = request.root.as_ref().and_then(|p| directory(p).ok()) {
+        if pane != Path::new("/")
+            && !system_alias(&pane)
+            && (unrestricted || roots.iter().any(|r| pane.starts_with(r)))
+        {
+            queue.push(pane);
+        }
+    }
+    if unrestricted {
+        if let Some(home) = std::env::var_os("HOME").and_then(|p| fs::canonicalize(p).ok()) {
+            for name in ["Documents", "Desktop", "Downloads"] {
+                let path = home.join(name);
+                // This only sets priority. The home walk handles aliases and errors.
+                if fs::symlink_metadata(&path).is_ok_and(|md| md.is_dir()) {
+                    queue.push(path);
+                }
+            }
+            queue.push(home);
+        }
+        queue.push(PathBuf::from("/Volumes"));
+        queue.push(PathBuf::from("/"));
+    } else {
+        let mut configured = roots.to_vec();
+        configured.sort_by_key(|path| path.components().count());
+        queue.extend(configured);
+    }
+    response.source = "filesystem".into();
+    response.warnings.clear();
+    response.incomplete = false;
+    let progress = |response: &SearchResponse, visited| {
+        let mut snapshot = response.clone();
+        snapshot.disk_scanned = Some(visited);
+        publish(&snapshot);
+    };
+    progress(response, 0);
+    let mut last_update = Instant::now();
+    let mut visited = 0;
+    let mut completed: HashSet<PathBuf> = HashSet::new();
+    'roots: for root in queue {
+        cancelled(cancel)?;
+        if !visible(&root, request.show_hidden) || completed.iter().any(|p| root.starts_with(p)) {
+            continue;
+        }
+        let Some(entries) = disk_entries(&root, response) else {
+            continue;
+        };
+        let mut stack = vec![entries];
+        while let Some(entries) = stack.last_mut() {
+            cancelled(cancel)?;
+            if last_update.elapsed() >= Duration::from_millis(400) {
+                progress(response, visited);
+                last_update = Instant::now();
+            }
+            let Some(entry) = entries.next() else {
+                stack.pop();
+                continue;
+            };
+            visited += 1;
+            let Ok(entry) = entry else {
+                disk_read_warning(response);
+                continue;
+            };
+            let name = entry.file_name();
+            if !request.show_hidden && name.as_bytes().starts_with(b".") {
+                continue;
+            }
+            let Ok(kind) = entry.file_type() else {
+                disk_read_warning(response);
+                continue;
+            };
+            let path = entry.path();
+            if (kind.is_file() || kind.is_dir() || kind.is_symlink())
+                && query.literal_names_accept(&path)
+            {
+                if let Ok(md) = fs::metadata(&path) {
+                    if format_ok(&path, md.is_dir(), &request.format)
+                        && query_accepts(&query, &path, &md)
+                        && eligible(&path, roots, request)
+                    {
+                        let is_exact = exact
+                            .as_ref()
+                            .is_some_and(|re| re.is_match(name.as_bytes()));
+                        if is_exact && !exact_found && response.items.len() == request.limit {
+                            // A full filename can outrank an indexed substring at the display limit.
+                            response.items.pop();
+                            response.truncated = true;
+                        }
+                        admit(response, item(&path, &md, None, None), request.limit);
+                        exact_found |= is_exact;
+                        if response.truncated && (exact.is_none() || exact_found) {
+                            break 'roots;
+                        }
+                        if response.items.len() == 1 || is_exact {
+                            progress(response, visited);
+                            last_update = Instant::now();
+                        }
+                    }
+                } else if !kind.is_symlink() {
+                    disk_read_warning(response);
+                }
+            }
+            if kind.is_dir() && !system_alias(&path) && !completed.contains(&path) {
+                if let Some(entries) = disk_entries(&path, response) {
+                    stack.push(entries);
+                }
+            }
+        }
+        completed.insert(root);
+    }
+    cancelled(cancel)
+}
+
+fn disk_read_warning(response: &mut SearchResponse) {
+    response.warn("readError", "部分目录或文件未能读取，搜索结果可能不完整");
+}
+
+fn disk_entries(path: &Path, response: &mut SearchResponse) -> Option<fs::ReadDir> {
+    match fs::read_dir(path) {
+        Ok(entries) => Some(entries),
+        Err(_) => {
+            disk_read_warning(response);
+            None
+        }
+    }
+}
+
 // Each source owns half the candidate budget. Publish admitted results as soon as
 // either finishes, without making a cold opaque index delay the system source.
 fn parallel_name_sources(
@@ -1387,7 +1547,6 @@ fn parallel_name_sources(
         let mut response = SearchResponse::new("fsearch+spotlight");
         response.warn("indexCoverage", "索引覆盖范围有限，结果可能不完整");
         let mut remaining = 0;
-        let mut failures = vec![];
         let mut sources = vec![];
         for (is_index, reply) in receive {
             cancelled(cancel)?;
@@ -1405,7 +1564,6 @@ fn parallel_name_sources(
                         },
                         error.message.clone(),
                     );
-                    failures.push(error.message);
                 }
             }
             if !response.items.is_empty() {
@@ -1415,9 +1573,6 @@ fn parallel_name_sources(
             }
         }
         cancelled(cancel)?;
-        if failures.len() == 2 && response.items.is_empty() {
-            return Err(SearchError::new("unavailable", failures.join("；")));
-        }
         response.source = sources.join("+");
         Ok((response, remaining))
     })
@@ -1488,10 +1643,25 @@ fn progressive_global_names(
             ..Budget::default()
         },
     )?;
+    // A thread-local policy keeps name verification from fetching cloud placeholders.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("bento-verify-names".into())
+            .spawn_scoped(scope, || {
+                fsearch::no_materialize();
+                verify_live_names(request, &roots, cancel, &mut response, publish)
+            })
+            .map_err(|e| SearchError::new("io", e.to_string()))?
+            .join()
+            .map_err(|_| SearchError::new("io", "磁盘名称核对意外停止"))?
+    })?;
     cancelled(cancel)?;
     Ok(response)
 }
 fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchResponse> {
+    if request.mode == "name" {
+        return progressive_global_names(request, cancel, &|_| {});
+    }
     let roots = request
         .roots
         .iter()
@@ -1507,49 +1677,9 @@ fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchRespons
         }
         response.warn("engineUnavailable", error.message.clone());
     }
-    if request.mode == "content" {
-        if response.items.is_empty() {
-            primary?;
-        }
-        return Ok(response);
+    if response.items.is_empty() {
+        primary?;
     }
-    if !response.truncated {
-        match spotlight(request, &roots, cancel, &mut remaining, &mut response) {
-            Ok(()) => {
-                response.source = if primary.is_ok() {
-                    "fsearch+spotlight"
-                } else {
-                    "spotlight"
-                }
-                .into()
-            }
-            Err(error) => {
-                if error.code == "cancelled" {
-                    return Err(error);
-                }
-                if primary.is_err() && response.items.is_empty() {
-                    return Err(SearchError::new(
-                        "unavailable",
-                        format!("{}；{}", primary.unwrap_err().message, error.message),
-                    ));
-                }
-                response.warn("systemUnavailable", error.message);
-            }
-        }
-    }
-    verify_siblings(
-        request,
-        &roots,
-        cancel,
-        &mut remaining,
-        &mut response,
-        &Budget {
-            entries: 20_000,
-            duration: Duration::from_millis(180),
-            ..Budget::default()
-        },
-    )?;
-    cancelled(cancel)?;
     Ok(response)
 }
 
@@ -2634,6 +2764,80 @@ mod tests {
         );
         (request, vec![root], response)
     }
+
+    #[test]
+    fn disk_verification_finds_unindexed_nested_names_without_any_neighbor_hint() {
+        let f = Fixture::new();
+        let target = f.file("project/nested/a/b/Café notes.rtf", "fresh");
+        f.file("project/nested/a/b/Café notes.rtf.cache", "not an rtf");
+        f.file("project/.hidden/Café notes.rtf", "hidden");
+        f.file("elsewhere/Café notes.rtf", "out of scope");
+        let roots = vec![fs::canonicalize(f.0.join("project")).unwrap()];
+        std::os::unix::fs::symlink(f.0.join("elsewhere"), roots[0].join("alias")).unwrap();
+        let mut request = req();
+        request.scope = "global".into();
+        request.mode = "name".into();
+        request.query = "café notes.rtf ext:rtf".into();
+        let unavailable = |remaining| IndexReply {
+            response: SearchResponse::new("unavailable"),
+            remaining,
+            result: Err(SearchError::new("unavailable", "fixture without an index")),
+        };
+        let cancel = AtomicBool::new(false);
+        let (mut response, _) =
+            parallel_name_sources(&request, &cancel, &|_| {}, unavailable, unavailable).unwrap();
+        verify_live_names(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut response,
+            &|_| {},
+        )
+        .unwrap();
+        let names: Vec<_> = response
+            .items
+            .iter()
+            .map(|item| item.path.as_str())
+            .collect();
+        let target = fs::canonicalize(target).unwrap();
+        assert_eq!(names, [target.to_str().unwrap()]);
+        assert!(!response.incomplete);
+    }
+
+    #[test]
+    fn disk_verification_prefers_exact_filename_at_cap_and_can_be_cancelled() {
+        let f = Fixture::new();
+        let decoy = fs::canonicalize(f.file("cache/design-final.pdf.log", "cache")).unwrap();
+        let target = fs::canonicalize(f.file("project/deep/design-final.pdf", "actual")).unwrap();
+        let roots = vec![fs::canonicalize(&f.0).unwrap()];
+        let mut request = req();
+        request.scope = "global".into();
+        request.mode = "name".into();
+        request.query = "design-final.pdf".into();
+        request.limit = 1;
+        let mut response = SearchResponse::new("fsearch");
+        response
+            .items
+            .push(item(&decoy, &fs::metadata(&decoy).unwrap(), None, None));
+        response.truncated = true;
+        verify_live_names(
+            &request,
+            &roots,
+            &AtomicBool::new(false),
+            &mut response,
+            &|_| {},
+        )
+        .unwrap();
+        assert_eq!(Path::new(&response.items[0].path), target);
+        assert!(response.truncated);
+        let cancel = AtomicBool::new(false);
+        let err = verify_live_names(&request, &roots, &cancel, &mut response, &|snapshot| {
+            assert_eq!(snapshot.disk_scanned, Some(0));
+            cancel.store(true, Ordering::Relaxed);
+        })
+        .unwrap_err();
+        assert_eq!(err.code, "cancelled");
+    }
     #[test]
     fn sibling_verification_finds_unindexed_copies_without_recursion_or_symlinks() {
         let f = Fixture::new();
@@ -2877,6 +3081,7 @@ mod tests {
         let mut request = req();
         request.query = std::env::var("BENTO_QA_SEARCH").expect("set BENTO_QA_SEARCH");
         request.scope = "global".into();
+        request.root = std::env::var("BENTO_QA_PANE").ok();
         request.mode = "name".into();
         request.limit = 1000;
         request.roots = std::env::var_os("BENTO_QA_ROOTS")
@@ -2889,13 +3094,22 @@ mod tests {
         let start = Instant::now();
         let response = if std::env::var_os("BENTO_QA_PROGRESSIVE").is_some() {
             let first = AtomicBool::new(false);
+            let target = std::env::var("BENTO_QA_TARGET").ok();
+            let target_found = AtomicBool::new(false);
             progressive_global_names(&request, &AtomicBool::new(false), &|snapshot| {
-                if !first.swap(true, Ordering::Relaxed) {
+                if !snapshot.items.is_empty() && !first.swap(true, Ordering::Relaxed) {
                     println!(
                         "BENTO_QA_FIRST_MS={} ITEMS={}",
                         start.elapsed().as_millis(),
                         snapshot.items.len()
                     );
+                }
+                if target
+                    .as_ref()
+                    .is_some_and(|path| snapshot.items.iter().any(|hit| &hit.path == path))
+                    && !target_found.swap(true, Ordering::Relaxed)
+                {
+                    println!("BENTO_QA_TARGET_MS={}", start.elapsed().as_millis());
                 }
             })
             .unwrap()

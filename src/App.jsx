@@ -2432,6 +2432,14 @@ export default function App() {
         onAnalyticsEnabledChange={onAnalyticsEnabledChange}
         onExportSettings={() => createSettingsBackup(cfgRef.current)}
         onImportSettings={importSettings}
+        onRebuildIndex={async () => {
+          const task = await api.extractionStatus()
+          if (task?.state === 'running' || task?.state === 'cancelling') {
+            throw new Error('请等压缩或解压完成后再重启。')
+          }
+          await flushPersistence()
+          await api.rebuildSearchIndex()
+        }}
         shortcuts={cfg.shortcuts}
         onShortcutsChange={value => { const shortcuts = validateBindings(value); setCfg(c => ({ ...c, shortcuts })) }}
         searchPaths={cfg.searchPaths}

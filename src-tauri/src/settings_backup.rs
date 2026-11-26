@@ -188,7 +188,7 @@ fn private_temporary(dir: &Path) -> io::Result<(File, Temporary)> {
         }
     }
 }
-fn atomic_write(destination: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(destination: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = destination.parent().ok_or("保存位置无效")?;
     let (mut file, temporary) =
         private_temporary(dir).map_err(|e| format!("无法创建临时设置文件：{e}"))?;

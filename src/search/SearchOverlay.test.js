@@ -432,7 +432,7 @@ test('scope buttons issue the selected scope and clear selection and stale conte
     await h.update({ scope })
     await h.flush()
     assert.equal(h.requests.at(-1).args[1], scope)
-    assert.equal(h.requests.at(-1).args[2], scope === 'pane' ? '/work' : null)
+    assert.equal(h.requests.at(-1).args[2], scope === 'home' ? null : '/work')
     await h.resolve(h.requests.length - 1, result([item('one.txt'), item('two.txt')]))
     assert.ok(h.rows()[0].props.className.endsWith(' on'))
     assert.ok(!h.rows()[1].props.className.endsWith(' on'))
@@ -577,6 +577,26 @@ test('pending index status shows unknown coverage honestly and retains Full Disk
   assert.ok(!h.text().includes('当前结果来自系统索引'))
 })
 
+test('the rebuild timer follows index polls and remains visible beside partial-result notices', async t => {
+  const h = await mount(t, { mode: 'name' })
+  let status = { ready: true, rebuild_state: 'building', rebuild_elapsed_seconds: 59 }
+  globalThis.__searchTest.fsearchStatus = async () => status
+  await h.update({ scope: 'global' })
+  assert.ok(h.text().includes('重建已用时 59 秒'))
+
+  await h.type('needle')
+  await h.flush()
+  await h.resolve(0, result([item()], { incomplete: true }))
+  assert.ok(h.text().includes('结果可能不完整'))
+  status = { ...status, rebuild_elapsed_seconds: 61 }
+  await h.advance(1500)
+  assert.ok(h.text().includes('重建已用时 1 分 1 秒'))
+
+  status = { ready: true, rebuild_state: 'ready', rebuild_elapsed_seconds: null }
+  await h.advance(1500)
+  assert.ok(!h.text().includes('重建已用时'))
+})
+
 
 for (const is_dir of [false, true]) {
   test(`selected ${is_dir ? 'folder' : 'file'} action hint matches activation and explicit context focus action stays separate`, async t => {
@@ -627,6 +647,26 @@ test('partial name results appear before completion and stale progress cannot re
   await h.resolve(1, result([item('next.txt')]))
   assert.ok(h.text().includes('next.txt'))
   assert.ok(!h.text().includes('补充搜索中'))
+})
+
+test('disk verification keeps a global name request alive while it makes progress', async t => {
+  const h = await mount(t, { scope: 'global', mode: 'name' })
+  await h.type('report-final.rtf')
+  await h.flush()
+  assert.equal(h.requests[0].args[2], '/work')
+  const progress = h.requests[0].args[8]
+  await h.advance(7000)
+  await h.run(() => progress(result([], { diskScanned: 50000 })))
+  assert.ok(h.text().includes('正在核对磁盘'))
+  await h.advance(7000)
+  await h.run(() => progress(result([item('report-final.rtf')], { diskScanned: 100000 })))
+  assert.equal(h.rows().length, 1)
+  assert.deepEqual(h.cancels, [])
+  await h.resolve(0, result([item('report-final.rtf')]))
+  await h.advance(8000)
+  assert.equal(h.rows().length, 1)
+  assert.ok(!h.text().includes('正在核对磁盘'))
+  assert.deepEqual(h.cancels, [])
 })
 
 test('late progress after final completion cannot replace final sibling results', async t => {
