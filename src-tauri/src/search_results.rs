@@ -1247,8 +1247,15 @@ fn spotlight(
     }
     Ok(())
 }
-// Verify only siblings of already admitted hits. This never descends into children,
-// follows an entry symlink, or reads file contents; network filesystem time is soft.
+// A narrower query can have no indexed hits even when a broad prefix sees
+// nearby files. Use those files only as directory hints, never as results.
+struct NameHints {
+    items: Vec<SearchItem>,
+    identifier: regex::bytes::Regex,
+}
+
+// Normal verification stays at the level of admitted hits. Recovery may check
+// one additional level in a project folder with the same identifier.
 fn verify_siblings(
     request: &Request,
     roots: &[PathBuf],
@@ -1256,6 +1263,7 @@ fn verify_siblings(
     remaining: &mut usize,
     response: &mut SearchResponse,
     budget: &Budget,
+    hints: Option<&NameHints>,
 ) -> Result<()> {
     cancelled(cancel)?;
     let query = parse_query(&request.query, false)?;
@@ -1263,11 +1271,12 @@ fn verify_siblings(
         return Ok(());
     }
     let start = Instant::now();
-    let mut parents = vec![];
+    let mut parents = VecDeque::new();
     let mut seen = HashSet::new();
     let mut seen_paths = HashSet::new();
     let mut parent_overflow = false;
-    for hit in &response.items {
+    let extra_seeds = hints.map_or(&[][..], |hints| hints.items.as_slice());
+    for hit in response.items.iter().chain(extra_seeds) {
         cancelled(cancel)?;
         if start.elapsed() >= budget.duration {
             response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
@@ -1295,14 +1304,15 @@ fn verify_siblings(
                 parent_overflow = true;
                 break;
             }
-            parents.push(parent);
+            parents.push_back((parent, true));
         }
     }
     if parent_overflow {
         response.warn("siblingBudget", "同级目录核验达到目录预算，结果可能不完整");
     }
     let mut visited = 0;
-    for parent in parents {
+    let mut child_dirs = 0;
+    while let Some((parent, can_descend)) = parents.pop_front() {
         cancelled(cancel)?;
         if start.elapsed() >= budget.duration || visited >= budget.entries {
             response.warn("siblingBudget", "同级目录核验达到扫描预算，结果可能不完整");
@@ -1330,6 +1340,19 @@ fn verify_siblings(
                 }
             };
             let path = entry.path();
+            if can_descend
+                && hints.is_some_and(|h| h.identifier.is_match(entry.file_name().as_bytes()))
+                && entry.file_type().is_ok_and(|kind| kind.is_dir())
+                && eligible(&path, roots, request)
+                && seen.insert(path.clone())
+            {
+                if child_dirs < 32 {
+                    child_dirs += 1;
+                    parents.push_front((path.clone(), false));
+                } else {
+                    response.warn("siblingBudget", "同级目录核验达到目录预算，结果可能不完整");
+                }
+            }
             // Cheap name/visibility/dedup gates precede metadata and canonicalization.
             if !visible(&path, request.show_hidden)
                 || !query.literal_names_accept(&path)
@@ -1366,6 +1389,102 @@ fn verify_siblings(
     }
     cancelled(cancel)
 }
+fn finish_global_names(
+    request: &Request,
+    roots: &[PathBuf],
+    cancel: &AtomicBool,
+    remaining: &mut usize,
+    response: &mut SearchResponse,
+    lookup: impl FnOnce(&str, &mut usize) -> Result<Vec<SearchItem>>,
+) -> Result<()> {
+    cancelled(cancel)?;
+    if request.mode != "name" || response.truncated {
+        return Ok(());
+    }
+    let hints = if *remaining > 0 {
+        name_hint_identifier(&request.query)
+            .map(|(prefix, identifier)| {
+                lookup(&prefix, remaining).map(|items| NameHints { items, identifier })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    verify_siblings(
+        request,
+        roots,
+        cancel,
+        remaining,
+        response,
+        &Budget {
+            entries: 20_000,
+            duration: Duration::from_millis(180),
+            ..Budget::default()
+        },
+        hints.as_ref(),
+    )
+}
+
+fn name_hint_identifier(query: &str) -> Option<(String, regex::bytes::Regex)> {
+    // Only derive hints from an ordinary name. Date fragments, explicit filters,
+    // wildcard and regex expressions have their own matching semantics.
+    let words = query_words(query);
+    let [term] = words.as_slice() else {
+        return None;
+    };
+    if term.starts_with(['!', '\'', '^'])
+        || term.ends_with('$')
+        || term.contains([':', '/', '*', '?', '{', '}'])
+    {
+        return None;
+    }
+    static IDENTIFIER: OnceLock<regex::Regex> = OnceLock::new();
+    let captures = IDENTIFIER
+        .get_or_init(|| regex::Regex::new(r"([a-zA-Z]{3,32})([0-9]{4,24})").unwrap())
+        .captures(term)?;
+    let identifier = captures.get(0)?.as_str();
+    let prefix = captures.get(1)?.as_str().to_ascii_lowercase();
+    let pattern = regex::bytes::RegexBuilder::new(&regex::escape(identifier))
+        .case_insensitive(true)
+        .build()
+        .ok()?;
+    Some((prefix, pattern))
+}
+
+fn lookup_name_hints(
+    prefix: &str,
+    request: &Request,
+    roots: &[PathBuf],
+    cancel: &AtomicBool,
+    remaining: &mut usize,
+) -> Result<Vec<SearchItem>> {
+    let mut hint = request.clone();
+    hint.query = prefix.into();
+    hint.format = "all".into();
+    hint.limit = 200;
+    let roots = roots.to_vec();
+    let reserved = (*remaining).min(1000);
+    *remaining -= reserved;
+    match index_worker().run(cancel, Duration::from_millis(300), move |stop| {
+        let mut hints = SearchResponse::new("fsearch");
+        let mut unused = reserved;
+        indexed(&hint, &roots, &stop, &mut unused, &mut hints)?;
+        Ok((hints.items, unused))
+    }) {
+        Ok((items, unused)) => {
+            *remaining += unused;
+            Ok(items)
+        }
+        Err(error) if error.code == "cancelled" => Err(error),
+        Err(error) => {
+            if error.code == "indexBusy" {
+                *remaining += reserved;
+            }
+            Ok(vec![])
+        }
+    }
+}
+
 // Each source owns half the candidate budget. Publish admitted results as soon as
 // either finishes, without making a cold opaque index delay the system source.
 fn parallel_name_sources(
@@ -1476,17 +1595,13 @@ fn progressive_global_names(
             }
         },
     )?;
-    verify_siblings(
+    finish_global_names(
         request,
         &roots,
         cancel,
         &mut remaining,
         &mut response,
-        &Budget {
-            entries: 20_000,
-            duration: Duration::from_millis(180),
-            ..Budget::default()
-        },
+        |prefix, remaining| lookup_name_hints(prefix, request, &roots, cancel, remaining),
     )?;
     cancelled(cancel)?;
     Ok(response)
@@ -1537,17 +1652,13 @@ fn global_search(request: &Request, cancel: &AtomicBool) -> Result<SearchRespons
             }
         }
     }
-    verify_siblings(
+    finish_global_names(
         request,
         &roots,
         cancel,
         &mut remaining,
         &mut response,
-        &Budget {
-            entries: 20_000,
-            duration: Duration::from_millis(180),
-            ..Budget::default()
-        },
+        |prefix, remaining| lookup_name_hints(prefix, request, &roots, cancel, remaining),
     )?;
     cancelled(cancel)?;
     Ok(response)
@@ -2655,6 +2766,7 @@ mod tests {
             &mut remaining,
             &mut response,
             &Budget::default(),
+            None,
         )
         .unwrap();
         let mut names: Vec<_> = response.items.iter().map(|hit| hit.name.as_str()).collect();
@@ -2672,6 +2784,7 @@ mod tests {
                 entries,
                 ..Budget::default()
             },
+            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), 2);
@@ -2679,6 +2792,60 @@ mod tests {
             !response.incomplete,
             "one shared parent is scanned only once"
         );
+    }
+    #[test]
+    fn exact_name_search_recovers_missing_projects_with_or_without_indexed_hits() {
+        let f = Fixture::new();
+        let indexed = fs::canonicalize(f.file("inside/old-nora0123.txt", "indexed")).unwrap();
+        let project = "inside/2026-11-26_project_NORA20110998";
+        let target = f.file(&format!("{project}/2026-11-26_nora20110998.R"), "new");
+        f.file(&format!("{project}/nora20110999.R"), "wrong ID");
+        f.file(
+            &format!("{project}/deep/2026-11-26_nora20110998.R"),
+            "too deep",
+        );
+        f.file("outside/nora20110998.txt", "out of scope");
+        let roots = vec![fs::canonicalize(f.0.join("inside")).unwrap()];
+        let mut request = req();
+        request.scope = "global".into();
+        request.mode = "name".into();
+        let cached =
+            fs::canonicalize(f.file("inside/cache/2026-11-26_nora20110998.R.cache", "cached"))
+                .unwrap();
+        for (query, has_cached_hit) in
+            [("nora20110998", false), ("2026-11-26_nora20110998.R", true)]
+        {
+            request.query = query.into();
+            let mut response = SearchResponse::new("fsearch+spotlight");
+            if has_cached_hit {
+                response
+                    .items
+                    .push(item(&cached, &fs::metadata(&cached).unwrap(), None, None));
+            }
+            finish_global_names(
+                &request,
+                &roots,
+                &AtomicBool::new(false),
+                &mut 100,
+                &mut response,
+                |prefix, _| {
+                    assert_eq!(prefix, "nora");
+                    Ok(vec![item(
+                        &indexed,
+                        &fs::metadata(&indexed).unwrap(),
+                        None,
+                        None,
+                    )])
+                },
+            )
+            .unwrap();
+            assert_eq!(response.items.len(), 2);
+            let target = fs::canonicalize(&target).unwrap();
+            assert!(response
+                .items
+                .iter()
+                .any(|hit| Path::new(&hit.path) == target));
+        }
     }
     #[test]
     fn sibling_verification_honors_explicit_scope_format_hidden_and_result_limit() {
@@ -2697,6 +2864,7 @@ mod tests {
             &mut 100,
             &mut response,
             &Budget::default(),
+            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), 1);
@@ -2711,6 +2879,7 @@ mod tests {
             &mut 100,
             &mut response,
             &Budget::default(),
+            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), 3);
@@ -2727,6 +2896,7 @@ mod tests {
             &mut 100,
             &mut response,
             &Budget::default(),
+            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), before);
@@ -2764,6 +2934,7 @@ mod tests {
             &mut 200,
             &mut response,
             &Budget::default(),
+            None,
         )
         .unwrap();
         assert_eq!(response.items.len(), 35 + 32);
@@ -2787,6 +2958,7 @@ mod tests {
             &mut 100,
             &mut response,
             &Budget::default(),
+            None,
         )
         .unwrap_err();
         assert_eq!(error.code, "cancelled");
@@ -2807,6 +2979,7 @@ mod tests {
                     duration,
                     ..Budget::default()
                 },
+                None,
             )
             .unwrap();
             assert_eq!(response.items.len(), 1);
