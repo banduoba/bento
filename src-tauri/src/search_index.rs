@@ -201,9 +201,9 @@ pub(crate) fn record_start_error(error: &str) {
     }
 }
 
-pub(crate) fn maintenance_status() -> (&'static str, Option<String>) {
+pub(crate) fn maintenance_status() -> (&'static str, Option<String>, Option<u64>) {
     let Some(storage) = STORAGE.get() else {
-        return ("available", None);
+        return ("available", None, None);
     };
     let phase = storage.phase();
     if phase == "ready" && !storage.pruned.swap(true, Ordering::AcqRel) {
@@ -216,6 +216,7 @@ pub(crate) fn maintenance_status() -> (&'static str, Option<String>) {
     (
         phase,
         storage.error.lock().ok().and_then(|error| error.clone()),
+        (phase == "building").then(|| storage.started.elapsed().as_secs()),
     )
 }
 

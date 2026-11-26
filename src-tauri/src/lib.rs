@@ -3011,10 +3011,11 @@ struct FsearchStatus {
     full_disk_access: bool,
     rebuild_state: &'static str,
     rebuild_error: Option<String>,
+    rebuild_elapsed_seconds: Option<u64>,
 }
 
 fn fsearch_status_snapshot(full_disk_access: bool) -> FsearchStatus {
-    let (rebuild_state, rebuild_error) = search_index::maintenance_status();
+    let (rebuild_state, rebuild_error, rebuild_elapsed_seconds) = search_index::maintenance_status();
     FsearchStatus {
         ready: rebuild_state == "ready" || FSEARCH_READY.load(std::sync::atomic::Ordering::Relaxed),
         // The upstream count requires locks held by content indexing. Zero means
@@ -3023,6 +3024,7 @@ fn fsearch_status_snapshot(full_disk_access: bool) -> FsearchStatus {
         full_disk_access,
         rebuild_state,
         rebuild_error,
+        rebuild_elapsed_seconds,
     }
 }
 

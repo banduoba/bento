@@ -577,6 +577,26 @@ test('pending index status shows unknown coverage honestly and retains Full Disk
   assert.ok(!h.text().includes('当前结果来自系统索引'))
 })
 
+test('the rebuild timer follows index polls and remains visible beside partial-result notices', async t => {
+  const h = await mount(t, { mode: 'name' })
+  let status = { ready: true, rebuild_state: 'building', rebuild_elapsed_seconds: 59 }
+  globalThis.__searchTest.fsearchStatus = async () => status
+  await h.update({ scope: 'global' })
+  assert.ok(h.text().includes('重建已用时 59 秒'))
+
+  await h.type('needle')
+  await h.flush()
+  await h.resolve(0, result([item()], { incomplete: true }))
+  assert.ok(h.text().includes('结果可能不完整'))
+  status = { ...status, rebuild_elapsed_seconds: 61 }
+  await h.advance(1500)
+  assert.ok(h.text().includes('重建已用时 1 分 1 秒'))
+
+  status = { ready: true, rebuild_state: 'ready', rebuild_elapsed_seconds: null }
+  await h.advance(1500)
+  assert.ok(!h.text().includes('重建已用时'))
+})
+
 
 for (const is_dir of [false, true]) {
   test(`selected ${is_dir ? 'folder' : 'file'} action hint matches activation and explicit context focus action stays separate`, async t => {

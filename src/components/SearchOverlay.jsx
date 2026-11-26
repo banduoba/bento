@@ -468,6 +468,10 @@ export default function SearchOverlay({
   const createdDate = sortBy === 'btime'
   const dateLabel = createdDate ? '创建日期' : '修改日期'
   const rebuildingIndex = idxStatus?.rebuild_state === 'building'
+  const rebuildSeconds = idxStatus?.rebuild_elapsed_seconds
+  const rebuildElapsed = rebuildingIndex && Number.isFinite(rebuildSeconds)
+    ? `${rebuildSeconds >= 60 ? `${Math.floor(rebuildSeconds / 60)} 分 ` : ''}${rebuildSeconds % 60} 秒`
+    : null
   const indexBuilding = scope === 'global' && idxStatus && (!idxStatus.ready || rebuildingIndex)
   const needsDiskAccess = scope === 'global' && idxStatus?.full_disk_access === false
   const warnings = [...new Set((response?.warnings || []).map(w => w.message).filter(Boolean))]
@@ -547,7 +551,7 @@ export default function SearchOverlay({
         </div>}
         {(hasCoverageNotice || indexBuilding) && (
           <details className="search-coverage">
-            <summary>{coverageSummary}<span className="search-coverage-more">详情</span></summary>
+            <summary>{coverageSummary}{rebuildElapsed && ` · 重建已用时 ${rebuildElapsed}`}<span className="search-coverage-more">详情</span></summary>
             <div className="search-coverage-details">
               {hasCoverageNotice && <>
                 {response?.truncated && <div>结果已截断，请收窄搜索范围或关键词。</div>}
